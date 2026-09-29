@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lemoq"
+version = "0.1.0"
+description = "Byte-budget-driven quantization and kernel optimization for MoE decode under edge constraints."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# 注意：V100 是 sm_70，必须装带 sm_70 支持的 CUDA 12.x 构建。
+# 这里不锁死 torch 版本，避免在不同服务器上装不上；实际版本记录进 results/env-<date>.md。
+dependencies = [
+    "torch",
+    "transformers",
+    "numpy",
+    "safetensors",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "black>=22.0",
+    "ruff>=0.11.0",
+    "mypy",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+lint.select = ["W", "F", "I", "C4"]
+lint.ignore = ["E501", "C901"]
+exclude = [".git", ".venv", "build", "dist", "__pycache__", ".pytest_cache", ".mypy_cache", "results"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+addopts = ["--strict-markers", "--strict-config"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = ["torch.*", "transformers.*", "safetensors.*", "triton.*"]
+ignore_missing_imports = true

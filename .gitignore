@@ -1,0 +1,31 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Virtualenv
+.venv/
+venv/
+
+# Experiment outputs: raw data stays local; stable records get excerpted into commits
+results/*
+!results/.gitkeep
+
+# Model caches / weights — never commit
+models/
+*.safetensors
+*.bin
+*.gguf
+.cache/
+hf_cache/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
