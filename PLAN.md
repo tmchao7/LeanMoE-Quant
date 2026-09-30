@@ -5,8 +5,8 @@
 > 状态：**计划阶段**。本文只描述要做什么、为什么、以及什么结果算成功/算失败；不含任何实测数字。
 >
 > 关联项目：
-> - [MegaKernel-vLLM](<../../MegaKernel-vLLM/README.md>)（系统级：整模型融合 vs CUDA Graph 的收益边界）
-> - [MoE-Flow](<../../MoE-Flow/PROJECT.md>)（系统级：Host/Device 混合专家管理与专家缓存）
+> - [MegaKernel-vLLM](<../MegaKernel-vLLM/README.md>)（系统级：整模型融合 vs CUDA Graph 的收益边界）
+> - [MoE-Flow](<../MoE-Flow/PROJECT.md>)（系统级：Host/Device 混合专家管理与专家缓存）
 > - 本项目（算法+kernel 级：**量化与反量化融合**）——三者合起来覆盖 MoE 推理优化的三层，互不重叠。
 
 ---
@@ -87,14 +87,20 @@
 - **社区对照齐**：vLLM/SGLang 都支持，baseline 可信；
 - **它是"小 MoE 里最开放的"**：权重、数据、训练日志全公开，讲 baseline 故事容易。
 
-**已验证的架构数字（引用自 [MegaKernel-vLLM docs/16](<../../MegaKernel-vLLM/docs/16_MoE_A100可行性调研.md>) §1.2/§1.3）**：
+**已验证的架构数字（引用自 [MegaKernel-vLLM docs/16](<../MegaKernel-vLLM/docs/16_MoE_A100可行性调研.md>) §1.2/§1.3）**：
 
-| 模型 | 层 | hidden | experts | top-k | expert dim | 总参 | 激活/token | fp16 权重 | 每 token 流字节 @BS1 |
+| 模型 | 层 | hidden | experts | top-k | expert dim | 总参 | 激活/token | fp16 权重 | 权重字节/token @BS1 |
 |---|---|---|---|---|---|---|---|---|---|
-| OLMoE-1B-7B | 16 | — | 64 | 8 | 1024 | ~6.9B | ~1.3B | 13.8 GB | ~2.25 GB |
+| OLMoE-1B-7B | 16 | 2048 | 64 | 8 | 1024 | 6.92B | 1.18B | 13.84 GB | **2.358 GB** |
 | Qwen3-30B-A3B | 48 | 2048 | 128 | 8 | 768 | 30.52B | 3.34B | 61.0 GB | 3.85 GB |
 
-> 上表 OLMoE 一列来自 docs/16；**Qwen3-30B-A3B 一行已核实**（HF 模型卡 + 配置推导）。OLMoE 的具体列请以 HF `config.json` 为准，上手时补录实测值。
+> **两行都已核实来源**：OLMoE 一行由 `config.json` 逐项推导（过程见 [docs/MODELS.md](docs/MODELS.md) §3.1–§3.2）；
+> Qwen3-30B-A3B 来自 HF 模型卡 + config 推导（见 MegaKernel-vLLM docs/16 §1.2）。
+>
+> ⚠️ **"权重字节/token"不含 KV**。这是**权重字节 `[W]`**，与 context 无关；
+> 决定实测延迟的总字节 `[T] = [W] + KV 读` 随 ctx 变化（OLMoE @4K 时 KV 占 `[T]` 的 18.5%）。
+> 两个口径的定义与各自的达成率公式见 [docs/METRICS.md](docs/METRICS.md) §3.2。**历史上此处曾漏标，
+> 导致"2.25 GB @8K ctx"被误读；现已显式区分。**
 
 ---
 
@@ -102,8 +108,9 @@
 
 | 优先级 | 技术 | 目标 | 备注 |
 |---|---|---|---|
-| ⭐⭐⭐ | **W4A16 / W8A8 权重量化 + 自写 dequant-GEMM 融合 kernel** | 降低每 token 权重字节 | Triton 先（迭代快），CUDA 后（kernel 质量对照） |
-| ⭐⭐ | **KV Cache 量化（INT8）** | 长上下文显存 | 实现量小、收益可测 |
+| ⭐⭐⭐ | **W4A16 / W8A8 权重量化 + 自写 dequant-GEMM 融合 kernel** | 降低 `[W]`（专家权重占 68.3%） | Triton 先（迭代快、可跨卡复用源码），CUDA 后（kernel 质量对照） |
+| ⭐⭐ | **量化 lm_head 的取舍决策** | `[W]` 的 8.7% | OLMoE 的 lm_head **untied**，必须完整流一遍。保留 fp16 vs 量化，**必须显式记录**（docs/MODELS.md §4.4） |
+| ⭐ | **KV Cache 量化（INT8）** | **带宽**，不是显存 | ⚠️ 已下调：主配置下 KV 池仅 0.5 GiB（占权重 3.6%），@4K 占流量 18.5%、INT8 后约省 9%。**batch=1 下不是主杠杆**（docs/MODELS.md §3.2） |
 | ⭐ | **算子融合**（RMSNorm+RoPE、SwiGLU、decode attention） | 减少中间张量读写与 launch | 是"锦上添花"，**不要当主杠杆** |
 
 ### 3.1 反量化必须融合（本项目的核心技术判断）
@@ -148,7 +155,7 @@
 | **2** | **Triton dequant-GEMM 融合 kernel**（先 W8A8 验证融合有效，再 W4A16） | kernel 级延迟 + "融合 vs 不融合"对照 | 4–6 天 |
 | **3** | **精度-延迟-显存三条曲线**（dense：0.5B/1.5B） | 帕累托前沿图 | 2–3 天 |
 | **4** | **MoE 主线实验**（OLMoE-1B-7B）：路由开销分解 + 专家层量化敏感度 | "量化在 MoE 上的收益上限"结论 | 3–5 天 |
-| **5** | KV INT8 × context 长度（1K/4K/8K） | 长上下文显存-精度权衡 | 2 天 |
+| **5** | KV INT8 × context 长度（1K/2K/4K；⚠️ OLMoE 上限 4096） | 带宽-精度权衡（**不是**显存权衡） | 1–2 天 |
 | **6** | （可选）租 48GB 卡做 Qwen3-30B-A3B INT4 单点 | scale 验证数据点 | 1 天 + 租卡 |
 | **7** | 文档与复现：README、实验记录、图表、已知限制 | 可复现的仓库 | 2 天 |
 
@@ -171,14 +178,21 @@
 | **归因** | **dequant 开销占总步时间比例**、**实测可达带宽**、**带宽达成率** | 本项目最该报的"深度指标" |
 | **边界** | batch 扫描 1/2/4/8、context 扫描 | 量化在 batch=1 最赚，大 batch 可能被 dequant 拖累 |
 
-**带宽达成率**（把两个项目连起来的物理口径）：
+**带宽达成率**（把两个项目连起来的物理口径）——**完整定义与两个分母见
+[docs/METRICS.md](docs/METRICS.md) §3.2**：
 
-```
-理论下限(ms/step) = 每 token 权重字节 ÷ 实测可达带宽
-达成率 = 理论下限 ÷ 实测 per-token 延迟
+```text
+[W] = 权重字节/token     （不含 KV，与 ctx 无关）—— 量化的直接杠杆
+[T] = [W] + KV 读(ctx)   （决定实测单步延迟）
+
+量化杠杆下限 floor_W = [W]      ÷ 实测可达带宽
+端到端下限   floor_T = [T]@ctx ÷ 实测可达带宽
+        达成率 = 对应下限 ÷ 实测 per-token 延迟   （必须标注 ctx 与用的是哪个口径）
 ```
 
 必须先在 V100 上**实测可达带宽**（不要用规格值 900 GB/s）。
+报告时**不得**用 `[W]` 当分子、实测延迟（含 KV）当分母——那会虚高，
+也正是"达成率 >100%"最常见的来源。
 
 ---
 
@@ -191,9 +205,13 @@
 | E3 | batch 扫描 1/2/4/8 | 量化收益随 batch 递减 | batch=1 无收益 → 立论被否证 |
 | E4 | **MoE 路由开销分解**（OLMoE） | 路由/打包开销不随量化下降，构成收益上限 | 路由开销 <5% → 上限假设不成立 |
 | E5 | 专家层量化敏感度（逐层/逐专家） | 不同专家对量化的敏感度不均，存在更优的混合位宽 | 敏感度均匀 → 混合位宽无意义 |
-| E6 | KV INT8 × ctx{1K,4K,8K} | 长上下文收益更显著，精度损失可接受 | 精度崩塌 |
+| E6 | KV INT8 × ctx{1K, 2K, **4K**} | KV 量化省的是带宽不是显存；@4K 约省 9% 总流量 | 收益 <5% 或精度崩塌 → 该杠杆对本模型无意义 |
 
 **E4 是本项目的差异化核心**：它回答"量化在 MoE 上的天花板在哪"，这个问题比"我加速了多少"值钱。
+
+> ⚠️ **context 上限约束**：OLMoE-1B-7B 的 `max_position_embeddings = 4096`
+> （见 [docs/MODELS.md](docs/MODELS.md) §3.3）。因此 **E3/E5/E6 的 context 扫描上限是 4K**，
+> 不能用 8K。若确实需要长 ctx 数据点，必须换模型并标注**不可与 OLMoE 混比**。
 
 ---
 
@@ -202,7 +220,7 @@
 | 项 | 量 |
 |---|---|
 | 主实验 | V100 服务器（自有，边际成本 ≈ 0） |
-| 可选对照 | 租 4090 / 48GB 卡 **8–12 小时**（估 ¥30–100，**以平台实时价为准**） |
+| 可选对照 | 租 **RTX 5090**（首选，见 [docs/SPECS.md](docs/SPECS.md) §2.2）**8–12 小时**，以平台实时价为准 |
 | 合计 | 主要成本是时间，不是钱 |
 
 ---
@@ -239,7 +257,7 @@ LeanMoE-Quant/
 ├── src/                 # 量化实现、反量化 kernel、评估入口
 ├── benchmarks/          # 计时与显存口径的统一实现
 ├── experiments/         # 每个实验一个记录：假设 / 配置 / 原始数据 / 结论
-├── results/             # JSON 原始数据（进版本库）
+├── results/             # JSON 原始数据（**gitignored**；稳定后摘录进提交，见 §5 EXPERIMENTS）
 └── tests/               # 正确性门槛（先于性能）
 ```
 
@@ -247,9 +265,24 @@ LeanMoE-Quant/
 
 ## 附：本计划中的"待核实"清单（阶段 0 必须落盘）
 
-- [ ] V100 具体型号：SXM2 / PCIe、16GB / 32GB
-- [ ] 实测可达带宽（≥3 次重复，报中位数与离散度）
+**已完成（2026-09，从 config / LLVM 源码核实，见对应文档）**
+
+- [x] OLMoE-1B-7B 架构数字 —— `config.json` 逐项推导，见 [docs/MODELS.md](docs/MODELS.md) §3.1
+- [x] OLMoE 每-token 字节预算（fp16）→ `[W] = 2.358 GB`，专家占 68.3%，见 §3.2
+- [x] OLMoE `max_position_embeddings = 4096` → context 扫描上限 4K
+- [x] OLMoE `tie_word_embeddings = false` → lm_head 独立，占 `[W]` 的 8.7%
+- [x] OLMoE `torch_dtype = bfloat16` → 必须转 fp16
+- [x] 跨代特性矩阵（V100/4090/5090/H100）—— 从本地 LLVM NVPTX 谓词核实，
+      含"40/50 系都没有 `wgmma`"、"5090 独有 MX block-scale"，见 [docs/SPECS.md](docs/SPECS.md) §2.1
+
+**待上机落盘**
+
+- [ ] V100 具体型号：SXM2 / PCIe
+- [ ] 实测可达带宽（≥3 次重复 + **只读模式**，报中位数与离散度）
 - [ ] sm_70 上 fp16 张量核实测吞吐、shared memory 上限
 - [ ] `cp.async` 是否真的不可用（编译探针）
+- [ ] **Triton 在 sm_70 上能否跑通**（⚠️ 决定阶段 2 是否全盘返工）
+- [ ] **`ncu` 是否可用**（补 kernel 级证据）
+- [ ] **共享机编译能力**：`nvcc`/`ptxas` 版本、与 torch CUDA 构建是否匹配（⚠️ 可能改变技术路线）
 - [ ] OLMoE-1B-7B 与 Qwen2.5-{0.5,1.5}B 在 fp16 下能否与 HF 参考逐 token 对齐
 - [ ] bf16 checkpoint 转 fp16 后的精度落差
