@@ -70,18 +70,25 @@ def _split_lines_outside_fences(text: str):
         yield i, line, in_fence
 
 
-def check_links(root: str, files: list[str]) -> list[str]:
-    """Return a list of human-readable problems with internal links."""
-    problems: list[str] = []
+def _within(root: str, path: str) -> bool:
+    """True if `path` is inside `root` (after resolving both)."""
+    root_abs = os.path.abspath(root)
+    path_abs = os.path.abspath(path)
+    try:
+        return os.path.commonpath([root_abs, path_abs]) == root_abs
+    except ValueError:  # 不同盘符等
+        return False
+
+
+def iter_links(root: str, files: list[str]):
+    """Yield (rel, lineno, target, resolved, inside_root) for every path-like link."""
     for rel in files:
         path = os.path.join(root, rel)
         try:
             with open(path, encoding="utf-8") as fh:
                 text = fh.read()
-        except OSError as exc:
-            problems.append("%s: 无法读取 (%s)" % (rel, exc))
+        except OSError:
             continue
-
         base = os.path.dirname(path)
         for lineno, line, in_fence in _split_lines_outside_fences(text):
             if in_fence:
@@ -98,8 +105,38 @@ def check_links(root: str, files: list[str]) -> list[str]:
                 if not (path_part.endswith(".md") or path_part.startswith(".") or "/" in path_part):
                     continue
                 resolved = os.path.normpath(os.path.join(base, path_part))
-                if not os.path.exists(resolved):
-                    problems.append("%s:%d: 死链 -> %s" % (rel, lineno, target))
+                yield rel, lineno, target, resolved, _within(root, resolved)
+
+
+def list_external_links(root: str, files: list[str]) -> list[str]:
+    """跨仓库引用（指向本仓库之外的链接）。
+
+    这些链接在**独立 clone**（服务器、CI、评审者 clone）里必然解析不到，因为它们指向
+    磁盘上的兄弟目录。所以它们不属于"内部链接"的检查范围——但也不该被静默丢掉，
+    因此单独列出，供人确认那是有意为之。
+    """
+    out = []
+    for rel, lineno, target, _resolved, inside in iter_links(root, files):
+        if not inside:
+            out.append("%s:%d -> %s" % (rel, lineno, target))
+    return out
+
+
+def check_links(root: str, files: list[str]) -> list[str]:
+    """Return a list of human-readable problems with **internal** links.
+
+    指向仓库之外的链接不计为失败（见 `list_external_links`）：它们在独立 clone
+    里一定存在不了。真正算失败的是"仓库内"的死链——那才是本仓库自己的错误。
+    """
+    problems: list[str] = []
+    for rel in files:
+        path = os.path.join(root, rel)
+        if not os.path.exists(path):
+            problems.append("%s: 无法读取" % rel)
+            continue
+    for rel, lineno, target, resolved, inside in iter_links(root, files):
+        if inside and not os.path.exists(resolved):
+            problems.append("%s:%d: 死链 -> %s" % (rel, lineno, target))
     return problems
 
 
@@ -146,9 +183,21 @@ def main(argv: list[str] | None = None) -> int:
     root = os.path.abspath(args.root)
     files = iter_markdown_files(root)
     problems = check_links(root, files) + check_tables(root, files)
+    external = list_external_links(root, files)
 
     if not args.quiet:
         print("checked %d markdown files" % len(files))
+    if external and not args.quiet:
+        # 跨仓库引用：在独立 clone 里必然解析不到，所以不算失败，但要让人看见
+        missing = []
+        for item in external:
+            target = item.split("-> ", 1)[-1]
+            if not os.path.exists(os.path.join(root, target)):
+                missing.append(item)
+        print(
+            "  note: %d cross-repo link(s), %d of which resolve on this machine"
+            % (len(external), len(external) - len(missing))
+        )
     if problems:
         for p in problems:
             print("  " + p, file=sys.stderr)

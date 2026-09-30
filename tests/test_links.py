@@ -11,7 +11,12 @@ from __future__ import annotations
 
 import os
 
-from tools.check_docs import check_links, check_tables, iter_markdown_files
+from tools.check_docs import (
+    check_links,
+    check_tables,
+    iter_markdown_files,
+    list_external_links,
+)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -20,6 +25,30 @@ def test_no_broken_internal_links():
     files = iter_markdown_files(ROOT)
     problems = check_links(ROOT, files)
     assert problems == [], "死链:\n" + "\n".join(problems)
+
+
+def test_cross_repo_links_are_not_treated_as_broken(tmp_path):
+    """★ 服务器上抓到的 bug：跨仓库链接在独立 clone 里必然解析不到。
+
+    `PLAN.md` 引用 `../MegaKernel-vLLM/README.md` 是**有意为之**（三个项目在磁盘上
+    是兄弟目录）。但在服务器 / CI / 评审者 clone 里那个目录不存在。若把它当成死链，
+    这条检查在任何独立 checkout 上都会永远失败 —— 那就等于没有检查。
+    """
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    # 必须真的走出仓库根：docs/ -> ../.. = tmp_path 之上
+    (docs / "a.md").write_text("[x](../../sibling-project/README.md)\n", encoding="utf-8")
+    assert check_links(str(tmp_path), ["docs/a.md"]) == []
+    # 但必须能被单独列出来，不能静默丢弃
+    assert list_external_links(str(tmp_path), ["docs/a.md"])
+
+
+def test_internal_broken_link_still_fails(tmp_path):
+    """仓库**内部**的死链仍然必须失败 —— 放宽跨仓库链接不能顺手把这个也放宽。"""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a.md").write_text("[x](missing.md)\n", encoding="utf-8")
+    assert len(check_links(str(tmp_path), ["docs/a.md"])) == 1
 
 
 def test_tables_are_well_formed():
