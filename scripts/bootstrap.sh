@@ -102,8 +102,20 @@ fi
 # ---------- 4. 其余依赖 ----------
 echo
 echo "[4/5] 其余依赖（走国内镜像）"
-if [ -f configs/constraints.txt ]; then
-  run uv pip install --python "${PY}" --index-url "${INDEX}" -r configs/constraints.txt
+REQS="configs/constraints.txt"
+if [ "${SKIP_TORCH}" = "1" ] && [ -f "${REQS}" ]; then
+  # ★ 必须把 torch 从依赖列表里剔掉：constraints.txt 含 `torch==<pin>`，
+  #   若原样安装，会在 `--no-torch`（意图是复用镜像自带 torch）时把那个能用的
+  #   torch 覆盖成一个来自 PyPI 镜像的、可能不匹配 CUDA 构建的版本。
+  #   注意只剔除 `torch`，不要误伤 `transformers`。
+  REQS_FILTERED="${TMPDIR:-/tmp}/lemoq-constraints-notorch.txt"
+  grep -vE '^[[:space:]]*torch([=<>!~ ]|$)' configs/constraints.txt > "${REQS_FILTERED}"
+  echo "  (--no-torch: 已从依赖中剔除 torch，保留镜像自带版本)"
+  echo "  剔除的行:"; grep -E '^[[:space:]]*torch([=<>!~ ]|$)' configs/constraints.txt | sed 's/^/    /'
+  REQS="${REQS_FILTERED}"
+fi
+if [ -f "${REQS}" ]; then
+  run uv pip install --python "${PY}" --index-url "${INDEX}" -r "${REQS}"
 else
   run uv pip install --python "${PY}" --index-url "${INDEX}" \
       "transformers==4.57.6" numpy safetensors pyyaml pytest
