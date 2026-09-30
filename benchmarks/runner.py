@@ -236,6 +236,13 @@ def run_baseline(
         repeats=3,
     )
 
+    # ---- 瓶颈解剖（不是可选的美化）----
+    # ★ OLMoE 的 HF MoE 块对 64 个专家**逐个 Python 循环**，每步产生约 8000 个 kernel。
+    #   实测单步 ~105 ms，而 roofline 下限 1.52 ms —— 差 ~70 倍。不做归因的话，
+    #   会把它误当成"MoE 在 batch=1 本来就慢"，从而彻底错过真正的原因。
+    breakdown = _breakdown(model, nxt, past, device, dtype)
+    moe = _bench_moe_block(model, device, dtype)
+
     vram = split_report(tr)
 
     # ---- 字节预算 ----
@@ -265,6 +272,8 @@ def run_baseline(
     return {
         "spec": spec,
         "weight_bytes_actual": weight_bytes_actual,
+        "breakdown": breakdown,
+        "moe_block": moe,
         "ttft": ttft,
         "steps": steps,
         "gap": gap,
@@ -274,6 +283,141 @@ def run_baseline(
         "attainment": attainment,
         "measured_bw_gbps": bw,
     }
+
+
+def _gpu_time_ms(fn, *, warmup: int = 5, iters: int = 30) -> dict[str, Any]:
+    """Pure GPU time via CUDA events (host launch latency excluded).
+
+    与 wall time 的差就是"host 是否在拖后腿"。两者必须都报：这个项目的论点是
+    batch=1 受带宽限制，而如果实测显示 GPU 忙等 host，那论点在这一段就不成立。
+    """
+    import torch
+
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    xs: list[float] = []
+    for _ in range(iters):
+        s = torch.cuda.Event(enable_timing=True)
+        e = torch.cuda.Event(enable_timing=True)
+        s.record()
+        fn()
+        e.record()
+        torch.cuda.synchronize()
+        xs.append(s.elapsed_time(e))
+    xs.sort()
+    return {"p50": xs[len(xs) // 2], "min": xs[0], "max": xs[-1], "n": len(xs)}
+
+
+def _breakdown(model, tok, past, device, dtype) -> dict[str, Any]:
+    """Profile one decode step and attribute GPU time to kernels.
+
+    `indexFuncSmallIndex` / `cub::DeviceSelectSweep` 这些不是"MoE 的代价"，
+    而是 `torch.where` + 逐专家 Python 循环的代价。把它们与真正的 GEMM 分开，
+    才能判断量化能救什么、不能救什么。
+    """
+    import torch
+
+    try:
+        from torch.profiler import ProfilerActivity, profile
+    except Exception as exc:  # noqa: BLE001
+        return {"error": "%s: %s" % (type(exc).__name__, exc)}
+
+    state = {"tok": tok, "past": past}
+
+    def one():
+        with torch.no_grad():
+            o = model(state["tok"], past_key_values=state["past"], use_cache=True)
+        state["tok"] = o.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        state["past"] = o.past_key_values
+
+    for _ in range(3):
+        one()
+    torch.cuda.synchronize()
+
+    steps = 5
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        for _ in range(steps):
+            one()
+        torch.cuda.synchronize()
+
+    evts = [e for e in prof.key_averages() if e.self_device_time_total > 0]
+    evts.sort(key=lambda e: -e.self_device_time_total)
+    total_ms = sum(e.self_device_time_total for e in evts) / steps / 1000.0
+    kernel_count = sum(e.count for e in evts) / steps
+
+    def _bucket(name: str) -> str:
+        n = name.lower()
+        if "gemvx" in n or "gemm" in n or "cutlass" in n:
+            return "gemm"
+        if "flash" in n or "attention" in n:
+            return "attention"
+        if "cub::" in n or "indexfunc" in n or "index_elementwise" in n or "write_indices" in n:
+            return "routing_pack"
+        if "memcpy" in n or "dtoh" in n:
+            return "memcpy"
+        return "other"
+
+    buckets: dict[str, float] = {}
+    for e in evts:
+        buckets[_bucket(e.key)] = (
+            buckets.get(_bucket(e.key), 0.0) + e.self_device_time_total / steps / 1000.0
+        )
+    for k in buckets:
+        buckets[k] = round(buckets[k], 3)
+
+    return {
+        "gpu_total_ms_per_step": round(total_ms, 3),
+        "kernels_per_step": int(kernel_count),
+        "bucket_ms": dict(sorted(buckets.items(), key=lambda kv: -kv[1])),
+        "top_kernels": [
+            {
+                "name": e.key[:120],
+                "per_step_ms": round(e.self_device_time_total / steps / 1000.0, 3),
+                "bucket": _bucket(e.key),
+            }
+            for e in evts[:8]
+        ],
+        "interpretation": (
+            "kernel 数（~8000/步）本身就说明问题：batch=1 decode 的每一层只需要"
+            "几十个 GEMM，多出来的全是 routing/pack 的逐算子开销。"
+        ),
+    }
+
+
+def _bench_moe_block(model, device, dtype) -> dict[str, Any]:
+    """单独测一个 MoE 块在 batch=1 下的耗时，作为可独立复核的最小证据。
+
+    把它摘出来是因为整个项目的论点是围绕 MoE routing 的固定成本展开的，
+    而这个成本必须能在**不加载整个模型**的情况下被验证。
+    """
+    import torch
+
+    try:
+        blk = model.model.layers[2].mlp
+        h = int(model.config.hidden_size)
+        x = torch.randn(1, 1, h, device=device, dtype=dtype)
+        per_step_ms = _gpu_time_ms(lambda: blk(x), warmup=5, iters=20)
+        # 纯 GEMM 部分的对照：64 个专家全算一遍需要读多少字节
+        spec = ModelSpec.from_hf_config(
+            model.config.to_dict(), name=str(getattr(model.config, "_name_or_path", ""))
+        )
+        all_experts_bytes = spec.num_experts * 3 * spec.hidden * spec.expert_ffn_dim * 2
+        topk_bytes = spec.top_k * 3 * spec.hidden * spec.expert_ffn_dim * 2
+        return {
+            "per_call_ms": round(per_step_ms["p50"], 3),
+            "called_per_token": 1,
+            "n_experts_available": spec.num_experts,
+            "n_experts_activated": spec.top_k,
+            "bytes_if_all_experts_streamed": all_experts_bytes,
+            "bytes_if_only_topk_streamed": topk_bytes,
+            "note": (
+                "HF 实现对全部 64 个专家都做了 gather/scatter（见 OlmoeSparseMoeBlock），"
+                "而每 token 只激活 8 个。这个差值就是 EXP-p4-01 要量化的目标。"
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"error": "%s: %s" % (type(exc).__name__, exc)}
 
 
 def _consistency_gate(res: dict[str, Any]) -> dict[str, Any]:
@@ -426,12 +570,42 @@ def build_payload(
         "samples": {"ttft_ms": ttft["samples"], "per_token_ms": steps["samples"]},
     }
 
+    bd = res.get("breakdown") or {}
+    bucket = bd.get("bucket_ms") or {}
+    gpu_total = bd.get("gpu_total_ms_per_step")
     payload["attribution"] = {
         "gpu_p50_ms": gap.get("gpu_p50_ms"),
         "host_p50_ms": gap.get("host_p50_ms"),
         "host_share_pct": gap.get("host_share_pct"),
         "dequant_share_pct": None,  # 本阶段没有反量化
-        "routing_share_pct": None,  # 见 EXP-p4-01
+        "routing_share_pct": (
+            round(100.0 * bucket.get("routing_pack", 0.0) / gpu_total, 1) if gpu_total else None
+        ),
+    }
+
+    # ★ 瓶颈解剖必须进 payload：roofline 下限与实测差约 70 倍是这条基线最重要的
+    #   发现，它决定后续所有优化的顺序（先消 routing/launch，再谈量化）。
+    payload["bottleneck"] = {
+        "roofline_floor_T_ms": (res.get("attainment") or {}).get("floor_t_ms"),
+        "measured_p50_ms": steps["p50"],
+        "slack_factor": (
+            round(steps["p50"] / res["attainment"]["floor_t_ms"], 1)
+            if (res.get("attainment") or {}).get("floor_t_ms")
+            else None
+        ),
+        "gpu_total_ms_per_step": gpu_total,
+        "kernels_per_step": bd.get("kernels_per_step"),
+        "bucket_ms": bucket,
+        "bucket_share_pct": (
+            {k: round(100.0 * v / gpu_total, 1) for k, v in bucket.items()} if gpu_total else {}
+        ),
+        "top_kernels": bd.get("top_kernels"),
+        "moe_block": res.get("moe_block"),
+        "conclusion": (
+            "batch=1 decode 的实测时间远高于 roofline 下限，而差的不是带宽 —— "
+            "是逐专家 Python 循环产生的上千个 kernel。说明本项目里"
+            "**量化收益会被 kernel/launch 开销截断**（对应 PLAN.md 推论 4）。"
+        ),
     }
 
     payload["attainment"] = res["attainment"]

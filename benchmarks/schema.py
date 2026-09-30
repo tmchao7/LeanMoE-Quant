@@ -100,6 +100,20 @@ RESULT_SCHEMA: dict[str, dict[str, tuple[type, ...]]] = {
         "dequant_share_pct": (float, int),
         "routing_share_pct": (float, int),
     },
+    # 瓶颈解剖：roofline 下限与实测的差距，以及差距落在哪些 kernel 上。
+    # 这是回答"量化到底能不能兑现"的唯一依据，所以是必填而非可选。
+    "bottleneck": {
+        "roofline_floor_T_ms": (float, int),
+        "measured_p50_ms": (float, int),
+        "slack_factor": (float, int),
+        "gpu_total_ms_per_step": (float, int),
+        "kernels_per_step": (int,),
+        "bucket_ms": (dict,),
+        "bucket_share_pct": (dict,),
+        "top_kernels": (list,),
+        "moe_block": (dict,),
+        "conclusion": (str,),
+    },
     "attainment": {
         "floor_w_ms": (float, int),
         "floor_t_ms": (float, int),
@@ -140,6 +154,7 @@ REQUIRED_TOP = (
     "bytes",
     "latency",
     "attribution",
+    "bottleneck",
     "attainment",
     "vram",
     "verdict",
