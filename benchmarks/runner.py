@@ -167,11 +167,26 @@ def run_baseline(
 
     # tokenizer 先加载：确认它是可取的（本基线用合成的 token id，不需要它编码）
     AutoTokenizer.from_pretrained(model_id)
+
+    # ★ `dtype=` 而不是 `torch_dtype=`：transformers 4.57 里 `torch_dtype` 会打
+    #   deprecation 警告。**不要**传 `device_map=`：那会拉进 accelerate 依赖，
+    #   而且会让权重分散到不同设备从而污染显存账。这里显式 `.to(device)`。
     model = AutoModelForCausalLM.from_pretrained(model_id, dtype=dtype)
     model = model.to(device).eval()
     tr.mark("after_weights")
 
     spec = _model_spec(model.config, model_id)
+
+    # 权重实际占用（区别于 checkpoint 里的字节数）。这一步很关键：
+    # OLMoE 的 checkpoint 自述是 bf16，我们按 fp16 加载，两者都是 2 字节所以应当接近，
+    # 但如果差得远，说明加载路径没按预期走 —— 那样后面所有字节账都是错的。
+    weight_bytes_actual = sum(p.numel() * p.element_size() for p in model.parameters())
+    tie = bool(getattr(model.config, "tie_word_embeddings", False))
+    if tie:
+        weight_bytes_actual -= (
+            model.get_input_embeddings().weight.numel()
+            * model.get_input_embeddings().weight.element_size()
+        )
 
     # 用重复的 token 构造一个长度为 ctx 的 prompt（内容对延迟无影响）
     prompt_ids = [1] * ctx
@@ -249,6 +264,7 @@ def run_baseline(
 
     return {
         "spec": spec,
+        "weight_bytes_actual": weight_bytes_actual,
         "ttft": ttft,
         "steps": steps,
         "gap": gap,
@@ -257,6 +273,53 @@ def run_baseline(
         "weight": w,
         "attainment": attainment,
         "measured_bw_gbps": bw,
+    }
+
+
+def _consistency_gate(res: dict[str, Any]) -> dict[str, Any]:
+    """The falsifiable check available at the fp16 baseline stage.
+
+    没有量化时，"与参考比"是同义反复。此时唯一能证伪的是**自洽性**：
+
+        floor_T = T_bytes / measured_bandwidth   <=   measured_time
+
+    若 floor > 实测时间，说明要么字节账少算了、要么带宽高估了。两者都会污染之后
+    每一个达成率，所以这一步必须**在**做量化之前就通过。
+    """
+    a = res.get("attainment") or {}
+    p50 = (res.get("steps") or {}).get("p50")
+    floor_t = a.get("floor_t_ms")
+    checks = [
+        {
+            "name": "floor_T <= measured_p50",
+            "floor_t_ms": floor_t,
+            "measured_p50_ms": p50,
+            "passed": bool(floor_t and p50 and floor_t <= p50),
+            "why": "理论下限若高于实测时间，则字节账或带宽有误",
+        },
+        {
+            "name": "attainment_T <= 100%",
+            "bw_attainment_pct": a.get("bw_attainment_pct"),
+            "passed": bool(
+                a.get("bw_attainment_pct") is not None and a["bw_attainment_pct"] <= 100.0
+            ),
+            "why": ">100% 意味着比'只能读这么多字节'还快 —— 物理上不可能",
+        },
+        {
+            "name": "bandwidth was measured, not assumed",
+            "measured_bw_gbps": res.get("measured_bw_gbps"),
+            "passed": bool(res.get("measured_bw_gbps")),
+            "why": "硬规则 4：roofline 必须用实测带宽",
+        },
+    ]
+    passed = all(c["passed"] for c in checks)
+    return {
+        "passed": passed,
+        "checks": checks,
+        "note": (
+            "这是 fp16 阶段能做的唯一可证伪检查。量化阶段（EXP-p1-01 起）"
+            "还会额外要求 KL / top-1 对 fp16 参考达标。"
+        ),
     }
 
 
@@ -304,20 +367,28 @@ def build_payload(
         "timed": cfg.get("timed"),
     }
 
-    # fp16 基线就是参考实现本身，KL 定义为 0（见 applicability 的说明）
+    # ★ fp16 基线没有"与参考比"的意义 —— 这个配置**就是**参考实现。
+    #   所以这里不写 KL=0 冒充"通过了门槛"（那是同义反复，属于自欺）。
+    #   真正可证伪的门槛是**自洽性**：由实测带宽和字节账推出的理论下限，
+    #   必须 <= 实测时间。若 >100%，错的一定是字节账或带宽（本项目全部结论的地基）。
+    consistency = _consistency_gate(res)
     payload["correctness"] = {
-        "kl": 0.0,
-        "top1_agreement": 1.0,
+        "kl": None,
+        "top1_agreement": None,
         "ppl_fp16": None,
         "ppl_this": None,
         "ppl_delta": None,
-        "gate": "PASS",
+        "gate": "PASS" if consistency["passed"] else "FAIL",
         "thresholds": {
-            "note": "fp16 基线：本配置**就是**参考实现，故 KL=0 / top-1=1.0 是同义反复",
+            "note": (
+                "fp16 基线：KL / top-1 对参考实现无意义（本配置即参考），故为 null。"
+                "可证伪的门槛是自洽性 —— 见 consistency。"
+            ),
             "kl_max_w8": 0.01,
             "kl_max_w4": 0.05,
             "top1_min": 0.95,
         },
+        "consistency": consistency,
     }
 
     budget = res["budget"]
@@ -326,6 +397,24 @@ def build_payload(
         "T_total_bytes": budget["T"]["total_bytes"],
         "kv_read_bytes": budget["KV"]["read_bytes"],
         "breakdown": budget["W"]["items"],
+        # ★ 预算 vs 实测：两者必须接近。差得远说明"读多少字节"这个前提错了，
+        #   而那正是本项目全部结论的地基（docs/METRICS.md §3）。
+        "weight_bytes_actual": res.get("weight_bytes_actual"),
+        "budget_vs_actual_delta_pct": (
+            round(
+                100.0
+                * (res["weight_bytes_actual"] - budget["W"]["total_bytes"])
+                / budget["W"]["total_bytes"],
+                3,
+            )
+            if res.get("weight_bytes_actual") and budget["W"]["total_bytes"]
+            else None
+        ),
+        "budget_vs_actual_note": (
+            "W 是**每 token 实际读到的权重字节**（top-k 专家），故略小于 checkpoint 里"
+            "所有专家之和；weight_bytes_actual 是加载后驻留的全部参数。两者不等是预期的，"
+            "但差距应能由 expert 未激活 + lm_head 是否计入来解释。"
+        ),
     }
 
     payload["latency"] = {
@@ -357,11 +446,12 @@ def build_payload(
     }
 
     payload["verdict"] = {
-        "verdict": "PASS",
-        "outcome": "supported",
+        "verdict": "PASS" if consistency["passed"] else "FAIL",
+        "outcome": "supported" if consistency["passed"] else "refuted",
         "notes": (
-            "第一条系统级基线。KL/top-1 是同义反复（本配置即参考），"
-            "所以这里**不构成**任何量化结论；它建立的是测量管线与绝对数字。"
+            "第一条系统级基线，不构成任何量化结论；它建立的是测量管线与绝对数字。"
+            "正确性栏位里的 KL/top-1 为 null（对本配置无意义），"
+            "实际把守的是 consistency 自洽性检查。"
         ),
     }
     payload["applicability"] = {
