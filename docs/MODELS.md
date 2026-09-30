@@ -37,15 +37,77 @@ Qwen3-30B-A3B 作为**收尾的单点验证**，用来回答"结论是否能 sca
 
 ---
 
-## 3. 架构数字（引用来源已标注）
+## 3. 架构数字
+
+### 3.1 OLMoE-1B-7B-0924 —— **已从 `config.json` 逐项核实**
+
+`allenai/OLMoE-1B-7B-0924` 的 `config.json` 已通过 `hf-mirror.com` 获取并逐项核对（2026-09）。
+下表是从 config **推导**的值：不是实测，但推导过程可复核。
+
+| 项 | 值 |
+|---|---|
+| layers | 16 |
+| hidden_size | 2048 |
+| num_experts | 64 |
+| num_experts_per_tok | 8 |
+| intermediate_size（expert FFN dim） | 1024 |
+| num_attention_heads / num_key_value_heads | 16 / **16 → MHA，不是 GQA** |
+| vocab_size | 50304 |
+| `tie_word_embeddings` | **false → lm_head 独立，每 token 必须完整读一遍** |
+| `torch_dtype` | **bfloat16 → 必须转 fp16，并记录精度落差** |
+| `max_position_embeddings` | **4096** ⚠️ 见 §3.3 |
+| 总参数 | 6,919,028,736 ≈ **6.92 B** |
+| 激活/token（不含 embedding） | 1,178,861,568 ≈ **1.18 B** |
+| fp16 权重全量 | 13,838,057,472 B = **13.84 GB (12.89 GiB)** |
+
+推导：`(attention 16,777,216 + router 131,072 + 64 × 6,291,456 experts) × 16 层 + 2 × embedding(103,022,592) = 6,919,028,736`。
+
+### 3.2 每-token 字节预算（fp16、batch=1）—— 本项目的核心数字
+
+**这是 `PLAN.md` 中 `~2.25 GB` 的完整口径**：它是**权重字节 [W]，不含 KV**。
+
+| 项 | 参数量 | fp16 字节 | 占 [W] |
+|---|---|---|---|
+| attention (q,k,v,o) | 268,435,456 | 0.537 GB | 22.8% |
+| router (gate) | 2,097,152 | 0.004 GB | 0.18% |
+| **top-8 专家（8/64）** | **805,306,368** | **1.611 GB** | **68.3%** |
+| lm_head（untied） | 103,022,592 | 0.206 GB | 8.7% |
+| **合计 [W]** | **1,178,861,568** | **2.358 GB (2.196 GiB)** | 100% |
+
+KV 每-token 读（MHA：`2 × 16 层 × 2048 × ctx × 2 B = 131,072 × ctx` 字节）：
+
+| ctx | KV 读 | 总字节 [T] = [W]+KV | KV 占 [T] |
+|---|---|---|---|
+| 1K | 0.134 GB | 2.492 GB | 5.4% |
+| 4K（模型上限） | 0.537 GB | 2.895 GB | 18.5% |
+
+口径定义见 [METRICS.md](METRICS.md) §3.2。
+
+**三条直接结论**（都影响实验设计，不是描述性细节）：
+
+1. **专家权重是唯一值得战斗的地方（68.3%）**，attention 次之（22.8%）。router 只占 0.18%——
+   这就是 `PLAN.md` 立论里"路由开销不随量化下降，所以构成 MoE 量化收益上限"的量化依据。
+2. **lm_head 占 8.7%，而且它是 untied 的**。量化或保留 fp16 是一个**必须显式记录**的决策，
+   不能再当成脚注（见 §4.4）。
+3. **KV INT8 在主配置下不是主杠杆**：batch=1、ctx ≤ 4096 时 KV 池只有 **0.5 GiB**（占 13.84 GB
+   权重的 3.6%），它省的主要是**带宽**（@4K 占总流量 18.5%，INT8 后约省 9%）而不是显存。
+   优先级已在 `PLAN.md` §3 下调。
+
+### 3.3 ⚠️ `max_position_embeddings = 4096`
+
+`PLAN.md` §7 的 E6 原计划把 context 扫到 **8K，超出该模型的训练上下文**。
+处理方式（二选一，必须显式声明）：
+
+- 把 OLMoE 的扫描上限压到 **4K**（保守，推荐先做这个）；
+- 或换到长上下文模型上做长 ctx 实验，并标注模型不同、不可与 OLMoE 混比。
+
+### 3.4 Qwen3-30B-A3B（对照行）
 
 | 模型 | 层 | hidden | experts | top-k | expert FFN dim | 总参 | 激活/token | fp16 权重 |
 |---|---|---|---|---|---|---|---|---|
-| OLMoE-1B-7B | 16 | 2048 | 64 | 8 | 1024 | ~6.9B | ~1.3B | ~13.8 GB |
 | Qwen3-30B-A3B | 48 | 2048 | 128 | 8 | 768 | 30.52B | 3.34B | 61.0 GB |
 
-Qwen3-30B-A3B 一行已核实（HF 模型卡 + config 推导，见 MegaKernel-vLLM docs/16 §1.2）。
-**OLMoE 一列在上机时以 HF `config.json` 为准复核并落盘**（本文标为待复核）。
+已核实（HF 模型卡 + config 推导，见 MegaKernel-vLLM docs/16 §1.2）。
 
 ---
 
