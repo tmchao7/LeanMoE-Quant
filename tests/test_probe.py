@@ -13,7 +13,7 @@ import os
 import subprocess
 import sys
 
-from tools.probe_machine import SCHEMA_VERSION, arch_expectations
+from tools.probe_machine import SCHEMA_VERSION, arch_expectations, bandwidth_gbps
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -157,3 +157,58 @@ def test_gate0_script_reads_fields_that_exist(tmp_path):
     assert r["compile"].get("cpp_extension_compiles", "MISSING") != "MISSING"
     assert r["bandwidth"].get("measured_gbps", "MISSING") != "MISSING"
     assert r["bandwidth"].get("read_only_gbps", "MISSING") != "MISSING"
+
+
+# ---------------------------------------------------------------------------
+# 带宽换算 —— 那次的 bug 就在这里，必须有无 GPU 也能跑的回归测试
+# ---------------------------------------------------------------------------
+def test_bandwidth_gbps_uses_per_iteration_time():
+    """★ 回归测试：`total_ms` 是**整段循环**的耗时，必须除以迭代数。
+
+    第一版漏了这一步：5090 上真值 ~1520 GB/s 被报成 76 GB/s（恰好差 timed=20 倍），
+    而且数值稳定、CoV 0.1%，看起来完全可信。
+    """
+    n_bytes = 512 * 1024 * 1024
+    per_iter_ms = n_bytes / (1520e9) * 1000.0  # 真值 1520 GB/s 下单次迭代的毫秒
+    got = bandwidth_gbps(n_bytes, per_iter_ms * 20, iters=20)
+    assert abs(got - 1520.0) < 1.0, "得到 %.1f，应为 1520" % got
+
+
+def test_bandwidth_gbps_would_catch_the_original_bug():
+    """把 bug 的算法写出来，确认它给出的是 1/20 —— 说明这个测试真的在测东西。"""
+    n_bytes = 512 * 1024 * 1024
+    per_iter_ms = n_bytes / (1520e9) * 1000.0
+    total_ms = per_iter_ms * 20
+    buggy = n_bytes / (total_ms / 1000.0) / 1e9  # 漏了 /20
+    correct = bandwidth_gbps(n_bytes, total_ms, iters=20)
+    assert abs(buggy - correct / 20) < 0.5
+    assert buggy < 100.0 and correct > 1500.0
+
+
+def test_bandwidth_gbps_defaults_to_single_iteration():
+    assert abs(bandwidth_gbps(1000_000_000, 1000.0) - 1.0) < 1e-9
+
+
+def test_bandwidth_gbps_rejects_bad_inputs():
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        bandwidth_gbps(1000, 10.0, iters=0)
+    assert bandwidth_gbps(1000, 0.0) == 0.0
+
+
+def test_plausibility_flags_an_order_of_magnitude_error():
+    """合理性告警必须真的会响 —— 它就是这次抓出 bug 的机制。"""
+    from tools.probe_machine import _plausibility_check
+
+    bad = _plausibility_check("NVIDIA GeForce RTX 5090", 78.0)
+    assert bad["warning"] and "investigate" in bad["warning"].lower()
+    ok = _plausibility_check("NVIDIA GeForce RTX 5090", 1641.0)
+    assert ok["warning"] is None
+    assert ok["spec_is_informational_only"] is True
+
+
+def test_plausibility_is_silent_for_unknown_gpus():
+    from tools.probe_machine import _plausibility_check
+
+    assert _plausibility_check("Some Future GPU", 10.0)["warning"] is None

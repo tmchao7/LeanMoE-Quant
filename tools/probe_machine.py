@@ -29,7 +29,9 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -139,6 +141,41 @@ def _host_cpu() -> str:
 # ---------------------------------------------------------------------------
 # 探针
 # ---------------------------------------------------------------------------
+def _find_tool(name: str) -> str | None:
+    """Locate an executable on PATH **or in the usual CUDA locations**.
+
+    为什么不能只用 `shutil.which`：在容器镜像里 `/usr/local/cuda/bin` 常常不在
+    PATH 上（AutoDL 的镜像就是如此），于是 `which nvcc` 返回空，而实际上
+    nvcc 就在 `/usr/local/cuda/bin/nvcc`。第一版探针因此把"有 nvcc"误报成
+    "没有 nvcc"，并顺带把 cpp_extension 的结论也带偏了。
+    """
+    found = shutil.which(name)
+    if found:
+        return found
+    candidates = [
+        "/usr/local/cuda/bin/%s" % name,
+        "/usr/local/cuda-12.8/bin/%s" % name,
+        "/usr/local/cuda-12/bin/%s" % name,
+        "/usr/local/cuda-13/bin/%s" % name,
+        # ★ 必须按 name 展开：这里曾经硬编码成 "ncu"，导致查 nsys 时返回了 ncu 的
+        #   路径，于是探针报告"nsys 可用"——而它其实根本没装。
+        "/opt/nvidia/nsight-compute/*/%s" % name,
+        "/opt/nvidia/nsight-systems/*/bin/%s" % name,
+        "/opt/nvidia/nsight-systems/*/%s" % name,
+        "/usr/local/bin/%s" % name,
+        "/opt/conda/bin/%s" % name,
+    ]
+    for pat in candidates:
+        if "*" in pat:
+            hits = sorted(glob.glob(pat))
+            if hits:
+                return hits[-1]
+            continue
+        if os.path.isfile(pat) and os.access(pat, os.X_OK):
+            return pat
+    return None
+
+
 def probe_host() -> dict[str, Any]:
     import os
 
@@ -215,6 +252,67 @@ def probe_torch() -> dict[str, Any]:
     return info
 
 
+# 仅供**合理性告警**使用的规格带宽表。
+# ★ 绝不用于任何理论下限计算（AGENTS.md 规则 4：roofline 必须用实测可达带宽）。
+# 它唯一的作用是：当实测值离规格差一个数量级时**大声报警**，而不是安静地写进结果。
+_SPEC_BW_GBPS = {
+    "V100": 900,
+    "A100": 2039,
+    "4090": 1008,
+    "L40S": 864,
+    "5090": 1792,
+    "A6000": 768,
+    "H100": 3350,
+}
+
+
+def _plausibility_check(gpu_name: str, measured: float | None) -> dict[str, Any]:
+    """Warn (never silently accept) when a measurement is off by an order of magnitude.
+
+    这个检查是有来历的，而且它真的救了一次：第一版探针漏了"除以迭代数"这一步，
+    在 RTX 5090 上报出 76 GB/s（同卡真值约 1520 GB/s，恰好差 timed=20 倍）。
+    结果**看起来完全合理**——数值稳定、CoV 0.1%、三次重复一致——只有跟规格一比
+    才会露馅。若不加这个告警，那个数字会被当成"实测可达带宽"写进结果，
+    而依据它的每一个带宽达成率都会 >100%（docs/METRICS.md §3 要求解释这种情况）。
+    """
+    if not measured:
+        return {"warning": None}
+    for key, spec in _SPEC_BW_GBPS.items():
+        if key.lower() in (gpu_name or "").lower():
+            ratio = measured / spec
+            warn = None
+            if ratio < 0.25:
+                warn = (
+                    "measured %.1f GB/s is only %.0f%% of the %s datasheet value "
+                    "%.0f GB/s -- investigate BEFORE using it for any roofline "
+                    "calculation" % (measured, ratio * 100, key, spec)
+                )
+            return {
+                "warning": warn,
+                "measured_over_spec": round(ratio, 4),
+                "spec_is_informational_only": True,
+            }
+    return {"warning": None}
+
+
+def bandwidth_gbps(bytes_moved: int, total_ms: float, iters: int = 1) -> float:
+    """Loop-timed bandwidth. `total_ms` is the time for **all** `iters` iterations.
+
+    ★ 这个函数存在的唯一理由是：把那次的 bug 变成可测的。
+    第一版直接 `bytes / (total_ms/1000)`，把整段循环的耗时当成一次迭代，
+    于是带宽被低估了 `iters` 倍（`iters=20` 时在 5090 上报出 76 GB/s，真值 ~1520）。
+    数值稳定、CoV 极低，**看起来完全可信**——只有跟规格一比才露馅。
+
+    所以换算只此一处，且必须有测试。
+    """
+    if iters <= 0:
+        raise ValueError("iters 必须 > 0")
+    if total_ms <= 0:
+        return 0.0
+    per_iter_ms = total_ms / iters
+    return bytes_moved / (per_iter_ms / 1000.0) / 1e9
+
+
 def _bandwidth_method(size_mb: int, warmup: int, timed: int, runs: int) -> str:
     """Method string for both the measured and the skipped case.
 
@@ -222,8 +320,8 @@ def _bandwidth_method(size_mb: int, warmup: int, timed: int, runs: int) -> str:
     consumers can rely on the wording (and on the fact that it says how it is summarized).
     """
     return (
-        "cuda events; buffers %d MiB x2; warmup %d, timed %d iters x %d runs; "
-        "median + dispersion (copy and read-only reduction patterns)"
+        "cuda events; **float32** buffers of %d MiB x2 (vectorized access); warmup %d, "
+        "timed %d iters x %d runs; median + dispersion (copy and read-only reduction)"
         % (size_mb, warmup, timed, runs)
     )
 
@@ -233,6 +331,10 @@ def probe_bandwidth(*, runs: int, size_mb: int, timed: int, warmup: int) -> dict
 
     Decode is read-dominated, so a pure device copy (read+write) **understates** the
     read ceiling. Both are therefore measured and reported.
+
+    ★ 计时必须换算到**单次迭代**。第一版返回整段循环的总耗时却按单次字节数相除，
+    在 5090 上报出 76 GB/s（真值 ~1520 GB/s，恰差 timed 倍）。用 >=4 字节的元素类型
+    也重要（float32，便于向量化），但它不是那次偏差的原因。
     """
     method = _bandwidth_method(size_mb, warmup, timed, runs)
     out = _unmeasured(method, measured_gbps=None, read_only_gbps=None, pattern={})
@@ -253,19 +355,21 @@ def probe_bandwidth(*, runs: int, size_mb: int, timed: int, warmup: int) -> dict
             fn()
         end.record()
         torch.cuda.synchronize()
+        # 返回**整段循环**的总毫秒。换算到单次迭代由 bandwidth_gbps() 负责，
+        # 只此一处，避免重复除法。
         return start.elapsed_time(end)
 
-    n = size_mb * 1024 * 1024
-    bytes_copy = 2 * n  # read src + write dst
-    bytes_read = n  # read src only
+    n_bytes = size_mb * 1024 * 1024
+    n_elems = n_bytes // 4  # float32 -> 4-byte elements keep the access vectorized
+    bytes_copy = 2 * n_bytes  # read src + write dst
+    bytes_read = n_bytes  # read src only
 
     # 缓冲区与闭包定义在 try 之外，这样 ruff 能静态看到绑定；
     # 分配本身单独包在 try 里（OOM 是预期内的失败模式）。
-    src = dst = src_f = None
+    src = dst = None
     try:
-        src = torch.empty(n, dtype=torch.uint8, device="cuda")
-        dst = torch.empty(n, dtype=torch.uint8, device="cuda")
-        src_f = src.view(torch.float32)
+        src = torch.empty(n_elems, dtype=torch.float32, device="cuda")
+        dst = torch.empty(n_elems, dtype=torch.float32, device="cuda")
     except Exception as exc:  # noqa: BLE001
         out["error"] = "%s: %s" % (type(exc).__name__, exc)
         return out
@@ -275,7 +379,7 @@ def probe_bandwidth(*, runs: int, size_mb: int, timed: int, warmup: int) -> dict
 
     def do_read() -> None:
         # 只读 pattern：求和会完整读一遍 src
-        src_f.sum()
+        src.sum()
 
     try:
         for fn in (do_copy, do_read):
@@ -286,10 +390,8 @@ def probe_bandwidth(*, runs: int, size_mb: int, timed: int, warmup: int) -> dict
         copy_gbps: list[float] = []
         read_gbps: list[float] = []
         for _ in range(runs):
-            ms = _time_ms(do_copy, timed)
-            copy_gbps.append(bytes_copy / (ms / 1000.0) / 1e9)
-            ms = _time_ms(do_read, timed)
-            read_gbps.append(bytes_read / (ms / 1000.0) / 1e9)
+            copy_gbps.append(bandwidth_gbps(bytes_copy, _time_ms(do_copy, timed), timed))
+            read_gbps.append(bandwidth_gbps(bytes_read, _time_ms(do_read, timed), timed))
 
         def _med(xs: list[float]) -> float:
             s = sorted(xs)
@@ -300,33 +402,38 @@ def probe_bandwidth(*, runs: int, size_mb: int, timed: int, warmup: int) -> dict
             var = sum((x - m) ** 2 for x in xs) / len(xs)
             return (var**0.5) / m if m else 0.0
 
+        read_med = round(_med(read_gbps), 1)
         out.update(
             {
                 "status": "measured",
                 "measured_gbps": round(_med(copy_gbps), 1),
-                "read_only_gbps": round(_med(read_gbps), 1),
+                "read_only_gbps": read_med,
                 # read-only 才是 decode 的相关上限
-                "value": round(_med(read_gbps), 1),
+                "value": read_med,
                 "n_runs": runs,
                 "dispersion": {
                     "copy_cov": round(_cov(copy_gbps), 4),
                     "read_cov": round(_cov(read_gbps), 4),
                 },
                 "pattern": {
-                    "copy": "dst.copy_(src) -> bytes = 2 x N",
-                    "read_only": "float32 view sum -> bytes = N",
-                    "note": "decode 是读主导；用 copy 会低估上限，故两者都报",
+                    "copy": "fp32 dst.copy_(src) -> bytes = 2 x N",
+                    "read_only": "fp32 src.sum() -> bytes = N",
+                    "note": (
+                        "decode 是读主导；用 copy 会低估上限，故两者都报。"
+                        "★ 用 >=4 字节的元素类型（float32）以便向量化访问"
+                    ),
+                    "dtype": "float32",
                 },
                 "raw_gbps": {
                     "copy": [round(x, 1) for x in copy_gbps],
                     "read_only": [round(x, 1) for x in read_gbps],
                 },
-                "buffers": {"size_mb_each": size_mb, "count": 2},
+                "buffers": {"size_mb_each": size_mb, "count": 2, "dtype": "float32"},
+                "plausibility": _plausibility_check(torch.cuda.get_device_name(0), read_med),
             }
         )
-        # 用重绑定代替 del：del 会让 lint 认为这些名字在闭包里未绑定（F821），
-        # 而重绑定同样能释放引用，之后再 empty_cache() 把块还给 allocator。
-        src = dst = src_f = None
+        # 用重绑定代替 del：del 会让 lint 认为这些名字在闭包里未绑定（F821）
+        src = dst = None
         torch.cuda.empty_cache()
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"{type(exc).__name__}: {exc}"
@@ -368,8 +475,8 @@ def probe_compile() -> dict[str, Any]:
     out = _unmeasured("torch.utils.cpp_extension.load_inline on a trivial kernel")
     out.update(
         {
-            "nvcc_present": bool(shutil.which("nvcc")),
-            "ptxas_present": bool(shutil.which("ptxas")),
+            "nvcc_present": bool(_find_tool("nvcc")),
+            "ptxas_present": bool(_find_tool("ptxas")),
             "cpp_extension_compiles": None,
             "torch_cuda_build": None,
         }
@@ -398,14 +505,33 @@ def probe_compile() -> dict[str, Any]:
         )
         return out
 
-    src = "at::Tensor f(at::Tensor x){ return x + 1; }"
+    # ★ 让 torch 的构建系统能找到 nvcc：容器镜像里 /usr/local/cuda/bin 常常不在 PATH，
+    #   而 cpp_extension 依赖 CUDA_HOME 或 PATH 来定位 nvcc。父进程环境也会被设置，
+    #   这样后续任何 cpp_extension 调用都自动受益。
+    nvcc_path = _find_tool("nvcc") or ""
+    cuda_home = os.path.dirname(os.path.dirname(nvcc_path)) if nvcc_path else ""
+    if cuda_home and os.path.isdir(cuda_home):
+        os.environ["CUDA_HOME"] = cuda_home
+        os.environ["CUDA_PATH"] = cuda_home
+        cuda_bin = os.path.join(cuda_home, "bin")
+        if cuda_bin not in os.environ.get("PATH", "").split(os.pathsep):
+            os.environ["PATH"] = cuda_bin + os.pathsep + os.environ.get("PATH", "")
+        out["cuda_home"] = cuda_home
+        out["cuda_home_source"] = "derived from nvcc location (was not on PATH)"
+
+    # ★ `cpp_sources` 必须给出**声明**：load_inline 会生成一个 main.cpp 去调用 f，
+    #   如果 f 只在 cuda_sources 里定义，main.cpp 看不到它，报
+    #   "'f' was not declared in this scope"。第一版传了空 cpp_sources，于是把
+    #   "环境里缺 ninja / nvcc" 与"我的源码分层写错"混在了一起。
+    decl = "at::Tensor f(at::Tensor x);"
+    defn = "at::Tensor f(at::Tensor x){ return x + 1; }"
     try:
         from torch.utils.cpp_extension import load_inline
 
         mod = load_inline(
             name="lemoq_probe_compile",
-            cpp_sources="",
-            cuda_sources=src,
+            cpp_sources=decl,
+            cuda_sources=defn,
             functions=["f"],
             verbose=False,
             with_cuda=True,
@@ -484,15 +610,15 @@ def probe_triton() -> dict[str, Any]:
 
 def probe_profiler() -> dict[str, Any]:
     """ncu/nsys availability. Profiling is a hard requirement for the target roles."""
-    ncu = shutil.which("ncu")
-    nsys = shutil.which("nsys")
+    ncu = _find_tool("ncu")
+    nsys = _find_tool("nsys")
     out: dict[str, Any] = {
         "status": "measured",
         "ncu_available": bool(ncu),
         "nsys_available": bool(nsys),
         "ncu_path": ncu,
         "nsys_path": nsys,
-        "method": "shutil.which on PATH",
+        "method": "PATH plus the usual CUDA / Nsight install locations",
         "n_runs": 1,
         "dispersion": None,
     }
@@ -574,7 +700,7 @@ def build_report(
         compile_info = _unmeasured(
             "torch.utils.cpp_extension.load_inline on a trivial kernel",
             cpp_extension_compiles=None,
-            nvcc_present=bool(shutil.which("nvcc")),
+            nvcc_present=bool(_find_tool("nvcc")),
             skipped_because=why,
         )
         triton_info = _unmeasured(
