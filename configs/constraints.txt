@@ -23,6 +23,10 @@ safetensors
 pyyaml
 
 # --- 开发 ---
+# ★ ninja 是 torch.utils.cpp_extension 的**硬依赖**（没有它会报
+#   "Ninja is required to load C++ extensions"）。Gate-0 的编译探针与后续自写
+#   CUDA kernel 都依赖它，所以它不是可选项。
+ninja
 pytest
 pytest-cov
 black>=22.0

@@ -4,10 +4,18 @@
 # 用法：
 #   bash scripts/bootstrap.sh              # 自动判断 CPU/GPU（无 nvidia-smi 则装 CPU 轮子）
 #   bash scripts/bootstrap.sh --cpu        # 强制 CPU（Mac 上验证流程用）
-#   bash scripts/bootstrap.sh --no-torch   # 只建 venv 与装其余依赖（torch 已就绪时）
+#   bash scripts/bootstrap.sh --no-torch   # 不装 torch（torch 已就绪时）
+#   bash scripts/bootstrap.sh --python     # 复用已有解释器（镜像自带 conda python 等）
+#   bash scripts/bootstrap.sh --python=/root/miniconda3/bin/python
 #   bash scripts/bootstrap.sh --dry-run    # 只打印将要执行的命令
 #
 # 幂等：重复执行不破坏已有 .venv。
+#
+# ★ 云镜像上的推荐组合（例如 AutoDL 的 "PyTorch 2.8.0 / CUDA 12.8" 镜像）：
+#       bash scripts/bootstrap.sh --no-torch --python
+#   理由：镜像自带的 torch 已由平台验证过能在目标 arch 上跑，且与镜像的 CUDA
+#   toolkit 匹配（自写 kernel 要用那个 nvcc 编译）。重新装一个别的版本既慢又可能
+#   引入构建不匹配。`--no-torch` 会把 torch 从依赖列表里剔除以免覆盖它。
 #
 # ★ 为什么 torch 必须单独一步、且用 --index-url：
 #   `uv pip install --index-url X` 会**替换** PyPI。
@@ -16,7 +24,7 @@
 # ★ 为什么最后一定要做「死亡测试」：
 #   sm_120 上 torch < 2.7 的轮子没有对应 kernel，会报
 #   `CUDA error: no kernel image is available for execution on the device`。
-#   在花了 ¥3/h 的机器上，这个错误必须**在这里就炸出来**，而不是等到跑实验时。
+#   在计费的机器上，这个错误必须**在这里就炸出来**，而不是等到跑实验时。
 
 set -uo pipefail
 
@@ -26,11 +34,17 @@ cd "${REPO_ROOT}"
 FORCE_CPU=0
 SKIP_TORCH=0
 DRY_RUN=0
+USE_EXISTING_PY=0
+EXPLICIT_PY=""
+SKIP_PREFLIGHT=0
 for arg in "$@"; do
   case "${arg}" in
     --cpu)      FORCE_CPU=1 ;;
     --no-torch) SKIP_TORCH=1 ;;
     --dry-run)  DRY_RUN=1 ;;
+    --no-preflight) SKIP_PREFLIGHT=1 ;;
+    --python)   USE_EXISTING_PY=1 ;;
+    --python=*) USE_EXISTING_PY=1; EXPLICIT_PY="${arg#--python=}" ;;
     *) echo "unknown arg: ${arg}" >&2; exit 64 ;;
   esac
 done
@@ -47,6 +61,8 @@ INDEX="${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
 TORCH_VERSION="${TORCH_VERSION:-2.14.0}"
 CUDA_INDEX="${TORCH_CUDA_INDEX:-https://download.pytorch.org/whl/cu130}"
 HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+# 目标解释器：默认自建 venv；--python 时复用已有的解释器（例如镜像自带的 conda python）
+EXISTING_PY="${EXPLICIT_PY:-${LEMOQ_PYTHON:-}}"
 
 # 自动判断 CPU / GPU
 if [ "${FORCE_CPU}" = "1" ] || ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -63,31 +79,60 @@ run() {
 
 echo "=== LeanMoE-Quant bootstrap ==="
 echo "  mode          : ${MODE}"
-echo "  python        : ${PY_VERSION}"
-echo "  venv          : ${VENV}"
-echo "  torch         : ${TORCH_VERSION}  <- ${TORCH_INDEX}"
+if [ "${USE_EXISTING_PY}" = "1" ]; then
+  echo "  python        : 复用已有解释器 (--python) —— 不新建 venv"
+else
+  echo "  python        : ${PY_VERSION}  (新建 venv: ${VENV})"
+fi
+echo "  torch         : $([ "${SKIP_TORCH}" = "1" ] && echo "跳过（复用已有）" || echo "${TORCH_VERSION} <- ${TORCH_INDEX}")"
 echo "  other pkgs    : ${INDEX}"
 echo "  HF_ENDPOINT   : ${HF_ENDPOINT}"
 echo
 
 # ---------- 0. preflight ----------
-echo "[0/5] preflight（只读）"
-run bash scripts/preflight.sh --no-json || true
+if [ "${SKIP_PREFLIGHT}" = "1" ]; then
+  echo "[0/5] preflight —— 跳过 (--no-preflight)"
+else
+  echo "[0/5] preflight（只读）"
+  run bash scripts/preflight.sh --no-json || true
+fi
 
 # ---------- 1. uv ----------
 echo
 echo "[1/5] uv"
 if ! command -v uv >/dev/null 2>&1; then
   echo "  error: 找不到 uv。安装：curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+  echo "         或（国内镜像已可用时）: python3 -m pip install uv" >&2
   exit 3
 fi
 uv --version
 
-# ---------- 2. venv ----------
+# ---------- 2. 目标解释器 ----------
 echo
-echo "[2/5] venv（幂等）"
-run uv venv -p "${PY_VERSION}" "${VENV}"
-PY="${VENV}/bin/python"
+if [ "${USE_EXISTING_PY}" = "1" ]; then
+  echo "[2/5] 复用已有解释器（--python）"
+  if [ -n "${EXISTING_PY}" ]; then
+    PY="${EXISTING_PY}"
+  else
+    PY="$(command -v python3 || command -v python)"
+  fi
+  if [ -z "${PY}" ] || [ ! -x "${PY}" ]; then
+    echo "  error: 找不到可用的解释器（尝试了 --python= / LEMOQ_PYTHON / python3 / python）" >&2
+    exit 3
+  fi
+  echo "  interpreter: ${PY}"
+  "${PY}" -c 'import sys;print("  version    :", sys.version.split()[0])'
+  # 复用已有解释器时，必须确认它已经有 torch；否则后面所有 GPU 测试都会失败
+  if ! "${PY}" -c 'import torch' 2>/dev/null; then
+    echo "  error: ${PY} 里没有 torch。要么去掉 --python 自建 venv，要么先在该解释器里装 torch。" >&2
+    exit 3
+  fi
+  "${PY}" -c 'import torch;print("  torch      :", torch.__version__, "| cuda", torch.version.cuda)'
+else
+  echo "[2/5] venv（幂等）"
+  run uv venv -p "${PY_VERSION}" "${VENV}"
+  PY="${VENV}/bin/python"
+fi
 
 # ---------- 3. torch（单独一步！）----------
 if [ "${SKIP_TORCH}" = "0" ]; then

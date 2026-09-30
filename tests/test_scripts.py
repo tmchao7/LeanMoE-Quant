@@ -83,6 +83,71 @@ def test_bootstrap_stops_on_death_test_failure():
     assert re.search(r"exit 4", text), "死亡测试失败后没有退出"
 
 
+def test_bootstrap_supports_reusing_an_existing_interpreter():
+    """云镜像上最有用的路径：复用镜像自带的 torch，而不是重装一个。
+
+    AutoDL 的 "PyTorch 2.8.0 / CUDA 12.8" 镜像里 torch/triton 都已就绪且经平台验证，
+    重装只会更慢、并可能引入与镜像 nvcc 不匹配的构建。
+    """
+    with open(os.path.join(SCRIPTS, "bootstrap.sh"), encoding="utf-8") as fh:
+        text = fh.read()
+    assert "USE_EXISTING_PY" in text
+    assert "--python=*" in text, "缺少 --python=PATH 形式的参数解析"
+    assert "EXPLICIT_PY" in text
+    # 复用已有解释器时必须先确认它真的有 torch，否则后面所有 GPU 测试都会失败
+    assert "import torch" in text, "没有校验目标解释器里是否存在 torch"
+    assert "复用已有解释器" in text or "不新建 venv" in text
+
+
+def test_bootstrap_dry_run_accepts_both_python_forms():
+    """`--python` 与 `--python=PATH` 都必须能被解析。
+
+    用 `--no-preflight` 避免真实网络探测 —— 单元测试不该依赖网络，也不该跑几十秒。
+    """
+    script = os.path.join(SCRIPTS, "bootstrap.sh")
+    import sys
+
+    # 复用解释器时必须带 torch，所以显式指向当前测试的 Python（venv）；
+    # 裸 `--python` 的情形用 LEMOQ_PYTHON 注入。
+    env = dict(os.environ, LEMOQ_PYTHON=sys.executable)
+    for args in (
+        ["--no-preflight", "--dry-run"],
+        ["--no-preflight", "--no-torch", "--dry-run"],
+        ["--no-preflight", "--python=%s" % sys.executable, "--dry-run"],
+        ["--no-preflight", "--python", "--dry-run"],
+    ):
+        proc = subprocess.run(
+            ["bash", script] + args,
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, "%s 失败 (rc=%d):\n%s" % (args, proc.returncode, proc.stderr)
+        assert "unknown arg" not in proc.stdout, "%s 未被识别" % args
+
+
+def test_bootstrap_rejects_a_missing_interpreter(tmp_path):
+    """指向不存在的解释器必须干净地失败（退出非零 + 明确报错），而不是继续往下跑。"""
+    script = os.path.join(SCRIPTS, "bootstrap.sh")
+    proc = subprocess.run(
+        [
+            "bash",
+            script,
+            "--no-preflight",
+            "--dry-run",
+            "--python=%s/definitely-not-a-python" % tmp_path,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode != 0, "不存在的解释器竟然通过了"
+    assert "unknown arg" not in proc.stdout
+
+
 def test_fetch_models_verifies_byte_count():
     """仓库名写错（少 `-0924`）时必须能立刻发现，而不是安静地下错东西。"""
     with open(os.path.join(SCRIPTS, "fetch_models.sh"), encoding="utf-8") as fh:
