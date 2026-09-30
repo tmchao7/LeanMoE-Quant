@@ -83,8 +83,13 @@ task score:                  GSM8K / MMLU subset (if applicable)
 TTFT p50 / p99 (ms):
 per-token p50 / p99 (ms)  @ batch = 1:
 throughput (tok/s)        @ batch ∈ {1,2,4,8}:
-theoretical floor (ms/step) = bytes-per-token / measured achievable bandwidth = _
-bandwidth attainment = floor / measured latency = _%
+bytes-per-token [W] = _   # 权重：attention _ + router _ + experts+scale _ + shared _ + lm_head _
+bytes-per-token [T] = _   # = [W] + KV 读(ctx)；KV @ctx = (2 × 层数 × kv_heads × head_dim × ctx × dtype字节)
+context length = _        # 达成率必须带 ctx（口径见 docs/METRICS.md §3.2）
+floor_W (ms/step) = [W] ÷ measured bw = _
+floor_T (ms/step) = [T] ÷ measured bw = _
+quantization attainment = floor_W ÷ measured latency = _%   # 量化兑现了多少
+bandwidth attainment    = floor_T ÷ measured latency = _%   # 端到端离墙多远
 
 # 显存（必须分列，用 allocator 峰值）
 weights:      _ GB

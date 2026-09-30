@@ -41,16 +41,62 @@
 
 ## 3. 带宽指标（本项目的"物理口径"）
 
-这是把本项目与 [MegaKernel-vLLM](../MegaKernel-vLLM/README.md) 连起来的指标。
+这是把本项目与 [MegaKernel-vLLM](../../MegaKernel-vLLM/README.md) 连起来的**物理口径**。
+
+### 3.1 单位约定（先读这条，否则数字必错）
+
+| 量 | 单位 | 说明 |
+|---|---|---|
+| 带宽 | **GB/s = 10^9 B/s** | 与 datasheet / `nvidia-smi` 一致 |
+| 字节预算 | 同时给 **GB (10^9)** 与 **GiB** | 两者差 7.4%；混用会让达成率凭空漂移 |
+| 显存 | **GiB** | allocator 报字节，除以 1024³ |
+
+全文沿用此约定；任何表格若用别的单位，必须在表头声明。
+
+### 3.2 两个分母 —— 必须分开报
+
+`bytes-per-token` 有**两个不同定义**，它们随 context 长度分叉，**不得混用**
+（这是本项目最容易出错、也最容易被面试官抓住的地方）。
 
 ```text
-每 token 字节数(bytes-per-token)
-  = attention 权重 + router 权重 + (top-k 专家权重及其 scale) + shared expert + lm_head(若 untied)
-  + KV 读写
+[W] 权重字节（与 context 无关 —— 量化的直接杠杆）
+    = attention 权重 + router 权重 + top-k 专家权重及其 scale
+      + shared expert（OLMoE 无）+ lm_head（若 untied）
+    ※ 不含 embedding 查表：每 token 只取 1 行（2048 × 2 B = 4 KiB），可忽略
 
-理论下限(ms/step) = bytes-per-token ÷ 实测可达带宽
-带宽达成率         = 理论下限 ÷ 实测 per-token 延迟
+[T] 总字节（决定实测单步延迟 —— 与 context 有关）
+    = [W] + KV 读
+    KV 读 = 2 × 层数 × num_kv_heads × head_dim × ctx × dtype 字节
+            （decode 每步要读完整 context 的 K 和 V）
 ```
+
+两个口径各回答一个不同的问题，**都要报**：
+
+```text
+量化杠杆下限  ： floor_W(ms/step) = [W] ÷ 实测可达带宽          # 不含 KV
+端到端下限    ： floor_T(ms/step) = [T]@ctx ÷ 实测可达带宽       # 含 KV
+带宽达成率    ： floor_T(ctx) ÷ 实测 per-token 延迟             # 必须标注 ctx
+量化达成率    ： floor_W ÷ 实测 per-token 延迟                  # 回答"量化兑现了多少"
+```
+
+**必报三件套**：任何写进结论的达成率，必须同时给出 **① ctx ② 用的是 [W] 还是 [T]
+③ [W] 的逐项拆分**。只写"达成率 78%"而没有这三样 = 未测（见下方硬规则 5）。
+
+**为什么必须分开**：随 ctx 增长，[T] 会显著大于 [W]（OLMoE 上 @4K 时 KV 占 [T] 的 18.5%，
+见 [MODELS.md](MODELS.md) §3.2）。若有人用 [W] 当分子、用实测延迟含 KV 当分母，
+达成率会**虚高**，这正是"达成率 >100%"最常见的来源之一。
+
+### 3.3 本项目的锚点数字（OLMoE-1B-7B，fp16，batch=1）
+
+| 量 | 值 | 出处 |
+|---|---|---|
+| `[W]` 权重字节/token | **2.358 GB (2.196 GiB)** | [MODELS.md](MODELS.md) §3.2，逐项推导 |
+| `[W]` 中专家占比 | **68.3%** | 同上 |
+| KV 读 @1K / @4K | 0.134 GB / 0.537 GB | 同上 |
+| KV 池显存 @4K | 0.5 GiB | 同上 |
+| 全量权重 fp16 | 13.84 GB (12.89 GiB) | 同上 |
+
+**这些是推导值，不是实测值**；它们用于阶段 2 之后的理论下限，**上机时必须复核**。
 
 **硬规则**
 
@@ -64,6 +110,8 @@
    - **规格带宽**（datasheet）；
    - **实测可达带宽**（本机、本访问模式）。
    两者混用是本领域最常见的错误来源。
+5. 达成率必须带 **ctx + 分母口径（[W] 还是 [T]）+ [W] 逐项拆分**；
+   `[W]` 与 `[T]` 不得混用（见 §3.2）。
 
 ---
 

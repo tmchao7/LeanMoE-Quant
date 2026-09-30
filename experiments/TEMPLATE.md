@@ -77,9 +77,12 @@ PPL (wikitext-2):      fp16 = _, this = _, delta = _
 TTFT p50 / p99 (ms):
 per-token p50 / p99 (ms) @ batch=1:
 throughput (tok/s) @ batch ∈ {1,2,4,8}:
-bytes-per-token (breakdown):   attention _ + router _ + experts _ + shared _ + lm_head _ + KV _
-theoretical floor (ms/step) = bytes / measured bw =
-bandwidth attainment (%):
+bytes-per-token [W] (breakdown):  attention _ + router _ + experts+scale _ + shared _ + lm_head _ = _
+bytes-per-token [T]:              [W] + KV 读(ctx) = _
+theoretical floor_W (ms/step) = [W] ÷ measured bw =
+theoretical floor_T (ms/step) = [T] ÷ measured bw =
+quantization attainment = floor_W / measured latency = _%    # 量化兑现了多少
+bandwidth attainment    = floor_T / measured latency = _%    # 端到端离墙多远（口径见 docs/METRICS.md §3.2）
 
 # VRAM (allocator peaks, split)
 weights _ GB / KV _ GB / activations _ GB / workspace _ GB / peak total _ GB
