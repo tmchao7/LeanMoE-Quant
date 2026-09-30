@@ -24,9 +24,9 @@ EXP-p4-01-moe-routing-overhead
 ### Model
 
 ```text
-model:              allenai/OLMoE-1B-7B  (primary MoE; note any deviation)
+model:              allenai/OLMoE-1B-7B-0924  (primary MoE; note any deviation)
 arch:               olmoe
-dtype:              float16            # V100: 一律 fp16；bf16 不可用
+dtype:              float16            # 参考一律 fp16；若卡支持 bf16 并用了它，必须显式标注
 layers:
 hidden:
 num experts:
@@ -39,11 +39,14 @@ activated params:
 ### Hardware
 
 ```text
-GPU:                Tesla V100 (SXM2 / PCIe — 型号必填)
-GPU memory:         32 GB per card
-GPU count:          physical cards on the machine (15)
+GPU:                <确切型号，从 nvidia-smi 取；不要写系列名>
+compute capability: sm_120 / sm_89 / sm_70   (必填 —— 结论的适用区间由它决定)
+GPU memory:         <GB per card>
 GPU count used:     1   # 本项目恒为 1；>1 必须显式说明并标注为扩展实验
 measured achievable bandwidth:  <GB/s>   # 来自 tools/probe_machine.py，勿用规格值
+measured read-only bandwidth:   <GB/s>   # decode 是读主导；copy 会低估上限
+host CPU:           <型号>   # host/launch 开销是敏感指标，它依赖主机 CPU
+clocks:             <运行时的 SM/mem 时钟，检查是否降频>
 ```
 
 ### Runtime
@@ -59,10 +62,11 @@ triton:             (if used)
 ### Configuration
 
 ```text
-bit-width:          W8A8 / W8A16 / W4A16 / fp16
+bit-width:          fp16 / W8A8 / W8A16 / W4A16
 group size:         32 / 64 / 128 / per-channel / per-tensor   (W4A16 必填)
 dequant:            fused-into-gemm / separate-kernel / library
 fusion:             none / rmsnorm+rope / swiglu / attention
+execution:          eager / cudagraph   # ★ E7 的自变量：launch 是否被消除
 kv cache dtype:     fp16 / int8
 context length:
 batch size:
@@ -98,9 +102,12 @@ activations:  _ GB
 workspace:    _ GB
 peak total:   _ GB
 
-# 归因
-dequant share of step time:  _%    # 融合 vs 不融合的关键指标
-routing/packing share:       _%    # MoE 专用；见 E4
+# 归因（★ 这一节是本项目的深度指标，缺一项该实验视为未测）
+kernel p50 (ms):             _    # CUDA event 测得的纯 GPU 时间
+host p50 (ms):               _    # wall - kernel；host/launch 开销
+host/launch share:           _%   # ★ 与 dequant share 并列的一等指标：量化的收益上限由它决定
+dequant share of step time:  _%   # 融合 vs 不融合的关键指标
+routing/packing share:       _%   # MoE 专用；见 E4
 ```
 
 ### Verdict

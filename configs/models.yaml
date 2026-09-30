@@ -50,21 +50,27 @@ models:
     verified_on_v100: false
 
   - role: primary_moe
-    repo: "allenai/OLMoE-1B-7B"
+    # ⚠️ `-0924` 后缀必需：`allenai/OLMoE-1B-7B` 不存在（hf-mirror 对不存在仓库返回 401）。
+    repo: "allenai/OLMoE-1B-7B-0924"
     arch: "olmoe"
     layers: 16
     hidden: 2048
     num_experts: 64
     top_k: 8
     expert_ffn_dim: 1024
-    total_params_b: 6.9
-    activated_params_b: 1.3
+    total_params_b: 6.92
+    activated_params_b: 1.18
     dtype: "float16"
-    size_gb_fp16: 13.8
-    purpose: "MoE 主线实验（路由开销、专家层量化敏感度、收益上限）"
+    checkpoint_dtype: "bfloat16"   # config.json 自述；上机必须转 fp16（无 bf16 张量核的卡）
+    size_gb_fp16: 13.84
+    # 3 个 shard 的实测总字节数（2026-09 由 hf-mirror HEAD 取得）——下载后必须校验
+    total_bytes: 13838721960
+    num_shards: 3
     local_path: null
-    verified_on_v100: false
-    note: "架构数字待以 HF config.json 复核后落盘（docs/MODELS.md §3）"
+    verified_config: true          # 架构数字已由 config.json 逐项核实，见 docs/MODELS.md §3.1
+    verified_on_target: false      # 是否已在目标机上加载并前向
+    purpose: "MoE 主线实验（路由开销、专家层量化敏感度、收益上限）"
+    note: "config.json 已核实；每-token 权重字节 [W] = 2,357,723,136 B，专家占 68.3%（docs/MODELS.md §3.2）"
 
   - role: dense_comparison
     repo: "Qwen/Qwen3-4B"

@@ -6,14 +6,21 @@
 
 ## 1. 分层
 
-| 角色 | 模型 | 精度 | 用途 | 32GB V100 |
+| 角色 | 模型 | 精度 | 用途 | 32GB 卡 |
 |---|---|---|---|---|
-| dev | `Qwen/Qwen2.5-0.5B` | fp16 | kernel 迭代、单测、`--dry-run` | ✅ |
+| dev | `Qwen/Qwen2.5-0.5B` | fp16 | kernel 迭代、单测、`--dry-run`、**Mac CPU 冒烟测试** | ✅ |
 | dev | `Qwen/Qwen2.5-1.5B` | fp16 | dense 曲线主体 | ✅ |
-| **primary (MoE)** | **`allenai/OLMoE-1B-7B`** | fp16 | **MoE 主线实验** | ✅ |
+| **primary (MoE)** | **`allenai/OLMoE-1B-7B-0924`** | fp16 | **MoE 主线实验** | ✅（13.84 GB） |
 | dense 对照 | `Qwen/Qwen3-4B` | fp16 | 同规模 dense vs MoE 对比 | ✅ |
 | dense 对照 | `Qwen/Qwen3-8B` | fp16 | 上界对照 | ✅（紧） |
-| stretch | `Qwen/Qwen3-30B-A3B` | INT4 | scale 单点，**只在租的 48GB 卡上做** | ❌ |
+| stretch | `Qwen/Qwen3-30B-A3B` | INT4 | scale 单点，**需 48GB 卡** | ❌ |
+
+> ⚠️ `-0924` 后缀**必需**：`allenai/OLMoE-1B-7B` 不存在（hf-mirror 对不存在仓库返回 401，
+> 2026-09 核实）。
+>
+> 用 **base** checkpoint，不用 `-Instruct`：本项目的主门槛是 KL / wikitext-2 PPL，
+> 以 base 模型为参考是量化文献的标准协议。若日后要 GSM8K/MMLU 任务指标，再单独加
+> `allenai/OLMoE-1B-7B-0924-Instruct` 臂，并标注两个 checkpoint **不可混比**。
 
 ---
 

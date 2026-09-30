@@ -21,13 +21,14 @@
 
 ---
 
-## 2. 性能指标（端侧：延迟与显存优先）
+## 2. 性能指标（batch=1：延迟与显存优先）
 
 | 指标 | 定义 | 口径要求 |
 |---|---|---|
 | **TTFT p50 / p99** | 首 token 延迟 | 必须报 p99，不只报均值 |
-| **per-token p50 / p99 @ batch=1** | 逐 token 解码延迟 | **端侧主指标** |
+| **per-token p50 / p99 @ batch=1** | 逐 token 解码延迟 | **主指标** |
 | **throughput @ batch ∈ {1,2,4,8}** | tok/s | 次要指标；用于展示量化收益随 batch 的衰减 |
+| **host/launch 占比** ★ | 主机+launch 开销 ÷ 单步总耗时 | **一等指标。** 它决定量化收益的**上限**（见 §2.1） |
 | **dequant 占比** | 反量化耗时 ÷ 单步总耗时 | 融合 vs 不融合的直接证据 |
 | **路由占比**（MoE） | 路由/打包耗时 ÷ 单步总耗时 | 量化在 MoE 上的收益上限来源 |
 
@@ -35,7 +36,41 @@
 - warmup ≥ 5，计次 ≥ 20，报 **p50 / p99** 与离散度（stddev 或 bootstrap CI）；
 - **不得用 min-of-3** 这类旧做法作为正式数字；
 - 明确声明是否包含 kernel launch 开销；
-- JIT/autotune 的首次编译时间不能计入稳态数字，但**要单独记录**。
+- JIT/autotune 的首次编译时间不能计入稳态数字，但**要单独记录**；
+- **必须同时报绝对值与比值**——只给加速比无法解释（Hoefler 规则 #1）；
+- **必须报 host/kernel 拆分**（`benchmarks/hostgap.py`），并用 nsys 交叉验证。
+
+### 2.1 为什么 host/launch 占比是一等指标
+
+batch=1 的单步时间可以拆成互不重叠的四项：
+
+```text
+T_step = T_bytes + T_compute + T_routing + T_host
+           ↑          ↑           ↑          ↑
+        权重流字节   张量核     路由/打包   kernel launch + 框架
+        ÷ 实测带宽  (b=1 极小)  (MoE 专有)
+```
+
+**`T_host` 不随量化下降。** 所以量化对 token 延迟的收益被截断：
+
+```text
+speedup_E2E = (T_bytes_fp16 + T_host) / (T_bytes_quant + T_host)
+```
+
+**示意**（借 `MegaKernel-vLLM` 在 A100 + Qwen3-0.6B 上实测的 host:kernel ≈ 3:1；**这是推导，
+不是实测**）：`T_bytes_fp16 = 1.00`、`T_host = 3.00`、`T_bytes_w4 = 0.25`
+→ `speedup = 4.00 / 3.25 = 1.23×`。**字节降到 1/4，token 只快 1.23 倍。**
+
+这个机制同时解释了第三方观测到的
+["real-FP4 在 GEMM 赢 4×、在 token 输 3–4×"](https://hf-mirror.com/datasets/witcheer/sm120-field-guide/raw/main/README.md)。
+
+**推论**：
+1. 只报"量化后 GGEM 快 N 倍"而没有 host 占比 → **无法解释端到端收益**；
+2. 本项目必须包含 **E7：`{fp16,W8A8,W4A16} × {eager,cudagraph}`** 这个 2 维矩阵，
+   用来隔离截断效应（假设与反证信号见 `PLAN.md` §7）；
+3. 卡越快，`T_bytes` 越小、`T_host` 不变 → **host 占比越大、截断越严重**。
+   所以 V100(900 GB/s) 与 5090(1792 GB/s) 的对照本身就是这个效应的实验。
+
 
 ---
 
