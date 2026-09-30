@@ -524,3 +524,15 @@ ls /root/autodl-tmp/ms/models/allenai--OLMoE-1B-7B-0924/snapshots/master/*.safet
 # 关机前把结果拉回 Mac
 rsync -az 5090:/root/LeanMoE-Quant/results/ ./results/
 ```
+
+**我已经拉过一份到 Mac 的 `results/`**（148 KB），包含两条真基线 + 探针 JSON。
+但注意 `results/` 里**大部分是 `planned` 骨架，不是真结果**：
+
+```
+EXP-p0-01-machine-probe/                    真（探针）
+EXP-p0-02-baseline-fp16__ctx={1024,4096}/   真（本文件第 5 节的数据来源）
+EXP-p1-01 / EXP-p2-01 / EXP-p4-01 / EXP-p4b-01 / _dryrun/   status=planned（空骨架）
+```
+
+判据是 `result.json` 里的 `status` 字段：`planned` = 没跑过。
+**引用数字前先看 `status` 和 `correctness.kl` 是否为 `null`。**
