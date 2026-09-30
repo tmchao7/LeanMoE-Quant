@@ -157,6 +157,48 @@ def test_fetch_models_verifies_byte_count():
     assert 'allenai/OLMoE-1B-7B"' not in text
 
 
+def test_fetch_models_detects_incomplete_downloads():
+    """只统计 *.safetensors 是不够的：下载中断时 `.incomplete` 会留在磁盘上，
+    而分片字节数可能"接近但不等于"期望值，容易被当成别的原因去排查。"""
+    with open(os.path.join(SCRIPTS, "fetch_models.sh"), encoding="utf-8") as fh:
+        text = fh.read()
+    assert ".incomplete" in text
+    assert "续传" in text or "resume" in text.lower()
+
+
+def test_fetch_models_supports_both_sources():
+    """两个源的实测差距是 7 倍（ModelScope ~15 MiB/s vs hf-mirror ~2.2 MiB/s），
+    所以两条路径都必须存在且都指向**可达**的主机。"""
+    with open(os.path.join(SCRIPTS, "fetch_models.sh"), encoding="utf-8") as fh:
+        text = fh.read()
+    assert "modelscope" in text and "snapshot_download" in text
+    assert "hf-mirror.com" in text
+    # ★ 绝不能把 huggingface.co 当作可用的**下载目标** —— 实测在该环境不可达
+    #   （curl 000），即使挂 AutoDL 的学术加速也只有 0.45 MiB/s。
+    #   注释里提到它（解释为什么不走）是可以的，所以要排除注释行再判断。
+    code = "\n".join(ln for ln in text.split("\n") if not ln.lstrip().startswith("#"))
+    assert "huggingface.co" not in code, "代码里出现了 huggingface.co（该环境不可达）"
+
+
+def test_fetch_models_creates_dirs_before_df():
+    """★ 顺序 bug：HF_HOME 默认指向 ~/.cache/huggingface，首次运行时不存在，
+    `df` 失败 → 可用空间读成 0 → 误报"磁盘不足"而拒绝下载。"""
+    with open(os.path.join(SCRIPTS, "fetch_models.sh"), encoding="utf-8") as fh:
+        text = fh.read()
+    mkdir_pos = text.find('mkdir -p "${HF_HOME}"')
+    df_pos = text.find('df -Pk "${HF_HOME}"')
+    assert mkdir_pos != -1, "没有先建目录"
+    assert df_pos != -1, "没有磁盘预检"
+    assert mkdir_pos < df_pos, "必须在 df 之前建目录，否则首次运行会误判磁盘不足"
+
+
+def test_fetch_models_check_mode_does_not_need_disk():
+    """--check 只做校验、不写盘，不该因为磁盘紧张而被拦住。"""
+    with open(os.path.join(SCRIPTS, "fetch_models.sh"), encoding="utf-8") as fh:
+        text = fh.read()
+    assert 'CHECK_ONLY}" != "1"' in text
+
+
 def test_scripts_do_not_contain_credentials():
     """脚本里不得出现真实凭据；只允许从 .env 读取。"""
     suspicious = re.compile(r"(api[_-]?key|token|password)\s*=\s*[\"']?[A-Za-z0-9_\-]{16,}", re.I)
