@@ -61,6 +61,18 @@ experiments:
     ctx: [1024, 4096]
     metrics: ["kl", "top1_agreement", "per_token_p50", "per_token_p99", "vram_split", "host_share"]
 
+  - id: EXP-p0-03-baseline-cudagraph
+    stage: "p0"
+    kind: "feasibility"
+    desc: "fp16 StaticCache + 单 token CUDA Graph capture/replay 可行性门"
+    hypothesis: "固定 batch=1/q_len=1 的连续 StaticCache 能让 OLMoE decode 完整 capture/replay"
+    refutation_signal: "prefill、capture、replay 或 graph/eager 正确性门失败；必须记录阻塞阶段，不填性能数字"
+    config:
+      bit_width: "fp16"
+      execution: "cudagraph"
+    ctx: [1024]
+    metrics: ["capture", "kl", "top1_agreement", "per_token_p50", "per_token_p99", "vram_split", "host_share"]
+
   # ---------- Phase 1：量化功能链路（只谈精度，不谈性能） ----------
   - id: EXP-p1-01-w8-w4-accuracy
     stage: "p1"

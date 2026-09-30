@@ -29,8 +29,22 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.bytes import ModelSpec, byte_budget, weight_budget
+from benchmarks.cudagraph import (
+    CudaGraphCaptureError,
+    CudaGraphConfig,
+    CudaGraphCorrectnessError,
+    StaticCacheDecodeSession,
+    blocked_result,
+    compare_logits,
+    failed_result,
+    failure_record,
+    graph_correctness_passed,
+    measure_graph_gap,
+    normalize_execution,
+)
 from benchmarks.harness import is_done, write_result
 from benchmarks.schema import empty_result
+from benchmarks.timing import summarize
 
 PROBE_PATH = "results/machine_probe.json"
 
@@ -137,6 +151,268 @@ def _decode_step(model, tok, past, device, dtype):
         out = model(tok, past_key_values=past, use_cache=True)
     nxt = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
     return nxt, out.past_key_values
+
+
+def _execution_for_exp(exp_id: str, requested: str | None) -> str:
+    """Resolve the execution arm without silently falling back."""
+    if requested is not None:
+        return normalize_execution(requested)
+    if "cudagraph" in exp_id:
+        return "cudagraph"
+    return "eager"
+
+
+def _load_model(model_id: str, dtype_name: str, device: str):
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[
+        dtype_name
+    ]
+    AutoTokenizer.from_pretrained(model_id)
+    model = AutoModelForCausalLM.from_pretrained(model_id, dtype=dtype)
+    return model.to(device).eval(), dtype
+
+
+def _weight_bytes_actual(model) -> int:
+    total = sum(p.numel() * p.element_size() for p in model.parameters())
+    if bool(getattr(model.config, "tie_word_embeddings", False)):
+        total -= (
+            model.get_input_embeddings().weight.numel()
+            * model.get_input_embeddings().weight.element_size()
+        )
+    return total
+
+
+def _eager_reference_logits(model, ids, *, max_new_tokens: int) -> dict[str, Any]:
+    """Collect eager logits and greedy token sequence for the graph gate."""
+    import torch
+
+    with torch.no_grad():
+        output = model(ids, use_cache=True)
+        seed_token = int(output.logits[:, -1:, :].argmax(dim=-1).item())
+        token = output.logits[:, -1:, :].argmax(dim=-1)
+        past = output.past_key_values
+        logits: list[Any] = []
+        output_tokens: list[int] = []
+        for _ in range(max_new_tokens):
+            output = model(token, past_key_values=past, use_cache=True)
+            logits.append(output.logits[:, -1:, :].detach())
+            token = output.logits[:, -1:, :].argmax(dim=-1)
+            output_tokens.append(int(token.item()))
+            past = output.past_key_values
+    return {"seed_token": seed_token, "output_tokens": output_tokens, "logits": logits}
+
+
+def _static_graph_correctness(
+    session: StaticCacheDecodeSession, *, max_new_tokens: int
+) -> dict[str, Any]:
+    """Run a graph sequence and return CPU logits/tokens for the correctness gate."""
+    candidate: list[Any] = []
+    output_tokens: list[int] = []
+    session.reset()
+    seed_token = session.seed_token_id
+    for _ in range(max_new_tokens):
+        session.replay(synchronize=True)
+        candidate.append(session.logits_cpu())
+        output_tokens.append(session.next_token_cpu())
+    return {"seed_token": seed_token, "output_tokens": output_tokens, "logits": candidate}
+
+
+def _cudagraph_metadata(model_id: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model": {"repo": model_id, "dtype": cfg.get("dtype")},
+        "hardware": _hardware_from_probe(_load_probe()),
+        "runtime": _runtime(),
+        "cudagraph": {
+            "static_cache": {
+                "max_cache_len": (cfg.get("ctx") or 0) + (cfg.get("max_new_tokens") or 0),
+                "layout": "continuous",
+            }
+        },
+    }
+
+
+def _graph_res(
+    *,
+    model: Any,
+    model_id: str,
+    ctx: int,
+    batch: int,
+    max_new_tokens: int,
+    warmup: int,
+    timed: int,
+    session: StaticCacheDecodeSession,
+    gap: dict[str, Any],
+    vram: dict[str, Any],
+    tr: Any,
+    measured_bw_gbps: float | None,
+) -> dict[str, Any]:
+    spec = _model_spec(model.config, model_id)
+    steps = gap["stats"]["wall"]
+    budget = byte_budget(spec, ctx=ctx, batch=batch)
+    weights = weight_budget(spec)
+    attainment: dict[str, Any] = {
+        "floor_w_ms": None,
+        "floor_t_ms": None,
+        "quant_attainment_pct": None,
+        "bw_attainment_pct": None,
+        "denominator_note": "measured bandwidth from results/machine_probe.json",
+    }
+    if measured_bw_gbps:
+        floor_w = (weights["total_bytes"] / (measured_bw_gbps * 1e9)) * 1000.0
+        floor_t = (budget["T"]["total_bytes"] / (measured_bw_gbps * 1e9)) * 1000.0
+        attainment.update(
+            floor_w_ms=round(floor_w, 4),
+            floor_t_ms=round(floor_t, 4),
+            quant_attainment_pct=round(100.0 * floor_w / steps["p50"], 1),
+            bw_attainment_pct=round(100.0 * floor_t / steps["p50"], 1),
+        )
+    breakdown = {
+        "gpu_total_ms_per_step": gap.get("gpu_busy_ms"),
+        "kernels_per_step": int(round(gap.get("kernels_per_call", 0))),
+        "bucket_ms": {"cudagraph_replay": gap.get("gpu_busy_ms")},
+        "bucket_share_pct": {"cudagraph_replay": 100.0},
+        "top_kernels": [],
+    }
+    return {
+        "spec": spec,
+        "weight_bytes_actual": _weight_bytes_actual(model),
+        "breakdown": breakdown,
+        "moe_block": None,
+        "ttft": {"p50": None, "p99": None, "samples": []},
+        "steps": steps,
+        "gap": gap,
+        "vram": vram,
+        "budget": budget,
+        "weight": weights,
+        "attainment": attainment,
+        "measured_bw_gbps": measured_bw_gbps,
+        "capture": dict(session.capture_info),
+        "tracker": tr,
+    }
+
+
+def _measure_static_prefill(session: StaticCacheDecodeSession, *, warmup: int, timed: int):
+    """Measure StaticCache prefill separately from single-token replay."""
+    import time
+
+    import torch
+
+    warmup = max(warmup, 2)
+    timed = max(timed, 5)
+    for _ in range(warmup):
+        session.reset()
+    torch.cuda.synchronize()
+    samples: list[float] = []
+    for _ in range(timed):
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        session.reset()
+        torch.cuda.synchronize()
+        samples.append((time.perf_counter() - t0) * 1000.0)
+    session.reset()
+    return summarize(samples)
+
+
+def run_cudagraph(
+    *,
+    model_id: str,
+    ctx: int,
+    batch: int,
+    max_new_tokens: int,
+    warmup: int,
+    timed: int,
+    dtype_name: str,
+    device: str = "cuda",
+) -> dict[str, Any]:
+    """Run the fp16 StaticCache + one-token CUDA Graph feasibility path."""
+    import torch
+
+    from benchmarks.vram import VramTracker, split_report
+
+    if dtype_name != "float16":
+        raise ValueError("EXP-p0-03 supports dtype=float16 only")
+    if batch != 1 or ctx != 1024:
+        raise ValueError("EXP-p0-03 supports batch=1 and ctx=1024 only")
+    CudaGraphConfig(ctx=ctx, max_new_tokens=max_new_tokens, batch=batch).validate_timing(timed)
+
+    tr = VramTracker()
+    tr.mark("after_torch_import")
+    model, _dtype = _load_model(model_id, dtype_name, device)
+    tr.mark("after_weights")
+    ids = torch.full((1, ctx), 1, dtype=torch.long, device=device)
+    try:
+        session = StaticCacheDecodeSession(
+            model,
+            ids,
+            ctx=ctx,
+            max_new_tokens=max_new_tokens,
+            device=device,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise CudaGraphCaptureError("prefill", exc) from exc
+    torch.cuda.synchronize()
+    tr.mark("after_kv")
+
+    try:
+        ttft = _measure_static_prefill(session, warmup=warmup, timed=timed)
+    except Exception as exc:  # noqa: BLE001
+        raise CudaGraphCaptureError("prefill", exc) from exc
+
+    capture = session.capture(warmup=warmup)
+    with tr.phase("forward"):
+        try:
+            reference = _eager_reference_logits(model, ids, max_new_tokens=max_new_tokens)
+        except Exception as exc:  # noqa: BLE001
+            raise CudaGraphCaptureError("correctness_reference", exc) from exc
+        try:
+            candidate = _static_graph_correctness(session, max_new_tokens=max_new_tokens)
+        except CudaGraphCaptureError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise CudaGraphCaptureError("replay", exc) from exc
+        try:
+            correctness = compare_logits(reference["logits"], candidate["logits"])
+            correctness.update(
+                seed_token_match=reference["seed_token"] == candidate["seed_token"],
+                token_sequence_match=reference["output_tokens"] == candidate["output_tokens"],
+                eager_seed_token=reference["seed_token"],
+                graph_seed_token=candidate["seed_token"],
+                eager_output_tokens=reference["output_tokens"],
+                graph_output_tokens=candidate["output_tokens"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise CudaGraphCaptureError("correctness_compare", exc) from exc
+        if not graph_correctness_passed(correctness):
+            raise CudaGraphCorrectnessError(correctness)
+        try:
+            gap = measure_graph_gap(session, warmup=warmup, timed=timed, repeats=3)
+        except CudaGraphCaptureError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise CudaGraphCaptureError("measurement", exc) from exc
+    vram = split_report(tr)
+    probe = _load_probe()
+    bw = (probe.get("bandwidth") or {}).get("read_only_gbps")
+    res = _graph_res(
+        model=model,
+        model_id=model_id,
+        ctx=ctx,
+        batch=batch,
+        max_new_tokens=max_new_tokens,
+        warmup=warmup,
+        timed=timed,
+        session=session,
+        gap=gap,
+        vram=vram,
+        tr=tr,
+        measured_bw_gbps=bw,
+    )
+    res["capture"] = capture
+    res["correctness"] = correctness
+    res["ttft"] = ttft
+    return res
 
 
 def run_baseline(
@@ -647,6 +923,149 @@ def build_payload(
     return payload
 
 
+def build_cudagraph_payload(
+    exp_id: str, res: dict[str, Any], cfg: dict[str, Any], hypothesis: dict[str, str]
+) -> dict[str, Any]:
+    """Build a result for a successful fp16 StaticCache CUDA Graph run."""
+    spec: ModelSpec = res["spec"]
+    probe = _load_probe()
+    steps = res["steps"]
+    ttft = res["ttft"]
+    gap = res["gap"]
+    vram = res["vram"]
+    bd = res["breakdown"]
+    consistency = _consistency_gate(res)
+    payload = empty_result(exp_id, status="done")
+    payload["hypothesis"] = hypothesis
+    payload["model"] = {
+        "repo": spec.name,
+        "arch": "olmoe" if spec.is_moe else "dense",
+        "dtype": cfg.get("dtype"),
+        "layers": spec.layers,
+        "hidden": spec.hidden,
+        "num_experts": spec.num_experts,
+        "top_k": spec.top_k,
+        "expert_ffn_dim": spec.expert_ffn_dim,
+        "total_params": spec.total_params(),
+        "activated_params": spec.activated_params_excl_embedding(),
+    }
+    payload["hardware"] = _hardware_from_probe(probe)
+    payload["runtime"] = _runtime()
+    payload["config"] = {
+        "bit_width": "fp16",
+        "group_size": None,
+        "dequant": "none",
+        "fusion": "none",
+        "execution": "cudagraph",
+        "kv_cache_dtype": "fp16",
+        "ctx": cfg.get("ctx"),
+        "batch": cfg.get("batch"),
+        "max_new_tokens": cfg.get("max_new_tokens"),
+        "warmup": cfg.get("warmup"),
+        "timed": cfg.get("timed"),
+    }
+    correctness = res["correctness"]
+    payload["correctness"] = {
+        "kl": correctness["kl"],
+        "top1_agreement": correctness["top1_agreement"],
+        "ppl_fp16": None,
+        "ppl_this": None,
+        "ppl_delta": None,
+        "gate": "PASS" if graph_correctness_passed(correctness) else "FAIL",
+        "thresholds": {
+            "kl_max_fp16_graph": 1e-5,
+            "top1_min_fp16_graph": 1.0,
+            "note": "CUDA Graph logits compared with eager fp16 reference on the same prompt",
+        },
+    }
+    budget = res["budget"]
+    payload["bytes"] = {
+        "W_total_bytes": budget["W"]["total_bytes"],
+        "T_total_bytes": budget["T"]["total_bytes"],
+        "kv_read_bytes": budget["KV"]["read_bytes"],
+        "breakdown": budget["W"]["items"],
+        "weight_bytes_actual": res["weight_bytes_actual"],
+        "budget_vs_actual_delta_pct": round(
+            100.0
+            * (res["weight_bytes_actual"] - budget["W"]["total_bytes"])
+            / budget["W"]["total_bytes"],
+            3,
+        ),
+        "budget_vs_actual_note": "W is per-token streamed weight bytes; resident model bytes include inactive experts.",
+    }
+    payload["latency"] = {
+        "ttft_p50_ms": round(ttft["p50"], 4),
+        "ttft_p99_ms": round(ttft["p99"], 4),
+        "per_token_p50_ms": round(steps["p50"], 4),
+        "per_token_p99_ms": round(steps["p99"], 4),
+        "tok_per_s": round(1000.0 / steps["p50"], 2) if steps["p50"] else None,
+        "samples": {"ttft_ms": ttft["samples"], "per_token_ms": steps["samples"]},
+    }
+    payload["attribution"] = {
+        "gpu_p50_ms": gap.get("gpu_p50_ms"),
+        "gpu_busy_ms": gap.get("gpu_busy_ms"),
+        "host_p50_ms": gap.get("host_p50_ms"),
+        "host_share_pct": gap.get("host_share_pct"),
+        "host_share_pct_residual": None,
+        "dequant_share_pct": None,
+        "routing_share_pct": None,
+        "kernels_per_call": gap.get("kernels_per_call"),
+    }
+    payload["bottleneck"] = {
+        "roofline_floor_T_ms": res["attainment"].get("floor_t_ms"),
+        "measured_p50_ms": steps["p50"],
+        "slack_factor": (
+            round(steps["p50"] / res["attainment"]["floor_t_ms"], 1)
+            if res["attainment"].get("floor_t_ms")
+            else None
+        ),
+        "gpu_total_ms_per_step": bd.get("gpu_total_ms_per_step"),
+        "kernels_per_step": bd.get("kernels_per_step"),
+        "bucket_ms": bd.get("bucket_ms", {}),
+        "bucket_share_pct": bd.get("bucket_share_pct", {}),
+        "top_kernels": bd.get("top_kernels", []),
+        "moe_block": None,
+        "conclusion": "This result isolates one captured CUDA Graph replay; it does not measure quantization.",
+    }
+    payload["attainment"] = res["attainment"]
+    payload["vram"] = {
+        "weights_gib": vram.get("weights_gib"),
+        "kv_gib": vram.get("kv_gib"),
+        "activations_gib": vram.get("activations_gib"),
+        "workspace_gib": vram.get("workspace_gib"),
+        "peak_total_gib": vram.get("peak_total_gib"),
+        "method": vram.get("method"),
+    }
+    graph_pass = graph_correctness_passed(correctness)
+    payload["verdict"] = {
+        "verdict": "PASS" if graph_pass and consistency["passed"] else "FAIL",
+        "outcome": "supported" if graph_pass and consistency["passed"] else "refuted",
+        "notes": "fp16 CUDA Graph feasibility and correctness gate; no quantization conclusion.",
+    }
+    payload["applicability"] = {
+        "applies_to": "fp16、单卡、batch=1、ctx=%s、%s"
+        % (cfg.get("ctx"), payload["hardware"].get("compute_capability")),
+        "does_not_apply_to": "quantized execution、PagedAttention、ctx>1024、other GPUs",
+        "why": "StaticCache and graph addresses/shapes are fixed to this feasibility gate.",
+    }
+    payload["_measurement"] = {
+        "timing_method": "perf_counter wall over CUDA Graph replay; CUDA event and profiler self-device time",
+        "ctx_window": "eager StaticCache prefill at ctx=%s, then fixed q_len=1 graph replays"
+        % cfg.get("ctx"),
+        "host_gap_caveats": gap.get("caveats"),
+        "vram_split_note": vram.get("note"),
+    }
+    payload["_cudagraph"] = {
+        "capture": res.get("capture"),
+        "correctness": correctness,
+        "static_cache": {
+            "max_cache_len": cfg.get("ctx") + cfg.get("max_new_tokens"),
+            "layout": "continuous",
+        },
+    }
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -660,6 +1079,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--timed", type=int, default=20)
     ap.add_argument("--dtype", default="float16")
+    ap.add_argument(
+        "--execution",
+        default=None,
+        help="execution arm: eager or cudagraph (default inferred from --exp)",
+    )
     ap.add_argument("--results-dir", default="results")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true")
@@ -670,9 +1094,24 @@ def main(argv: list[str] | None = None) -> int:
         print("skip (done): %s" % exp_id)
         return 0
 
+    execution = _execution_for_exp(args.exp, args.execution)
+    if execution == "cudagraph" and args.dtype != "float16":
+        print("runner 失败: EXP-p0-03 只支持 --dtype float16", file=sys.stderr)
+        return 2
+
     hypothesis = {
-        "statement": "fp16 能在目标卡上加载并前向；测量管线产出的延迟/显存/归因自洽",
-        "refutation_signal": "加载失败、OOM、或达成率 >100%（说明字节账或带宽错了）",
+        "statement": (
+            "fp16 StaticCache 能让固定 batch=1/q_len=1 的 OLMoE decode capture/replay；"
+            "graph 与 eager 的 logits/top-1 通过正确性门"
+            if execution == "cudagraph"
+            else "fp16 能在目标卡上加载并前向；测量管线产出的延迟/显存/归因自洽"
+        ),
+        "refutation_signal": (
+            "prefill、capture、replay 或 graph/eager 正确性门失败；必须记录阻塞阶段，"
+            "不填性能数字"
+            if execution == "cudagraph"
+            else "加载失败、OOM、或达成率 >100%（说明字节账或带宽错了）"
+        ),
     }
     cfg = {
         "bit_width": "fp16",
@@ -682,11 +1121,36 @@ def main(argv: list[str] | None = None) -> int:
         "max_new_tokens": args.max_new_tokens,
         "warmup": args.warmup,
         "timed": args.timed,
-        "execution": "eager",
+        "execution": execution,
         "dequant": "none",
         "fusion": "none",
         "group_size": None,
     }
+
+    if execution == "cudagraph":
+        if args.ctx != 1024 or args.batch != 1:
+            print("runner 失败: EXP-p0-03 supports only ctx=1024 and batch=1", file=sys.stderr)
+            return 2
+        try:
+            CudaGraphConfig(
+                ctx=args.ctx, max_new_tokens=args.max_new_tokens, batch=args.batch
+            ).validate_timing(args.timed)
+        except ValueError as exc:
+            print("runner 失败: %s" % exc, file=sys.stderr)
+            return 2
+        if not args.dry_run:
+            try:
+                import torch
+
+                if not torch.cuda.is_available():
+                    print(
+                        "runner 失败: EXP-p0-03 requires CUDA; Mac runs must not create result files",
+                        file=sys.stderr,
+                    )
+                    return 2
+            except Exception as exc:  # noqa: BLE001
+                print("runner 失败: cannot inspect CUDA availability: %s" % exc, file=sys.stderr)
+                return 2
 
     if args.dry_run:
         print("would run: %s" % exp_id)
@@ -696,23 +1160,79 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        res = run_baseline(
-            model_id=args.model,
-            ctx=args.ctx,
-            batch=args.batch,
-            max_new_tokens=args.max_new_tokens,
-            warmup=args.warmup,
-            timed=args.timed,
-            dtype_name=args.dtype,
+        if execution == "cudagraph":
+            res = run_cudagraph(
+                model_id=args.model,
+                ctx=args.ctx,
+                batch=args.batch,
+                max_new_tokens=args.max_new_tokens,
+                warmup=args.warmup,
+                timed=args.timed,
+                dtype_name=args.dtype,
+            )
+        else:
+            res = run_baseline(
+                model_id=args.model,
+                ctx=args.ctx,
+                batch=args.batch,
+                max_new_tokens=args.max_new_tokens,
+                warmup=args.warmup,
+                timed=args.timed,
+                dtype_name=args.dtype,
+            )
+    except CudaGraphCorrectnessError as exc:
+        payload = failed_result(
+            exp_id=exp_id,
+            config=cfg,
+            correctness=exc.report,
+            note=str(exc),
+            metadata=_cudagraph_metadata(args.model, cfg),
         )
+        path, problems = write_result(payload, root=args.results_dir)
+        print("CUDA Graph correctness gate failed; wrote %s" % path, file=sys.stderr)
+        for problem in problems:
+            print("  - %s" % problem, file=sys.stderr)
+        return 1 if problems else 0
+    except CudaGraphCaptureError as exc:
+        payload = blocked_result(
+            exp_id=exp_id,
+            config=cfg,
+            failure=failure_record(exc),
+            metadata=_cudagraph_metadata(args.model, cfg),
+        )
+        path, problems = write_result(payload, root=args.results_dir)
+        print("CUDA Graph feasibility blocked; wrote %s" % path, file=sys.stderr)
+        for problem in problems:
+            print("  - %s" % problem, file=sys.stderr)
+        return 1 if problems else 0
     except Exception as exc:  # noqa: BLE001
+        if execution == "cudagraph":
+            payload = blocked_result(
+                exp_id=exp_id,
+                config=cfg,
+                failure={
+                    "stage": "unknown",
+                    "type": type(exc).__name__,
+                    "message": str(exc)[:1000],
+                },
+                metadata=_cudagraph_metadata(args.model, cfg),
+            )
+            path, problems = write_result(payload, root=args.results_dir)
+            print("CUDA Graph feasibility blocked; wrote %s" % path, file=sys.stderr)
+            for problem in problems:
+                print("  - %s" % problem, file=sys.stderr)
+            return 1 if problems else 0
         import traceback
 
         print("runner 失败: %s: %s" % (type(exc).__name__, exc), file=sys.stderr)
         traceback.print_exc()
         return 1
 
-    payload = build_payload(exp_id, res, cfg, hypothesis)
+    payload = (
+        build_cudagraph_payload(exp_id, res, cfg, hypothesis)
+        if execution == "cudagraph"
+        else build_payload(exp_id, res, cfg, hypothesis)
+    )
     path, problems = write_result(payload, root=args.results_dir)
 
     s = res["steps"]

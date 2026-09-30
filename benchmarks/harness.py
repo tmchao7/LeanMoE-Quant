@@ -129,6 +129,7 @@ def expand(
             continue
 
         factors = exp.get("factors") or {}
+        static_cfg = dict(exp.get("config") or {})
         keys = list(factors.keys())
         value_lists = [list(factors[k]) for k in keys]
 
@@ -139,7 +140,8 @@ def expand(
         for combo in combos:
             factor_cfg = dict(zip(keys, combo))
             for ctx in ctx_list:
-                cfg = dict(factor_cfg)
+                cfg = dict(static_cfg)
+                cfg.update(factor_cfg)
                 if ctx is not None:
                     cfg["ctx"] = ctx
                 suffix_bits = ["%s=%s" % (k, _slug(v)) for k, v in factor_cfg.items()]
