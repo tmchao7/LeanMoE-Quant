@@ -95,8 +95,13 @@ RESULT_SCHEMA: dict[str, dict[str, tuple[type, ...]]] = {
     },
     "attribution": {
         "gpu_p50_ms": (float, int),
+        # ★ GPU 真正在跑 kernel 的时间（profiler），不是 event 窗口宽度。
+        #   在 launch-bound 时两者差一个数量级，见 benchmarks/hostgap.py。
+        "gpu_busy_ms": (float, int),
         "host_p50_ms": (float, int),
         "host_share_pct": (float, int),
+        "host_share_pct_residual": (float, int),
+        "kernels_per_call": (float, int),
         "dequant_share_pct": (float, int),
         "routing_share_pct": (float, int),
     },

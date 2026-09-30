@@ -575,8 +575,11 @@ def build_payload(
     gpu_total = bd.get("gpu_total_ms_per_step")
     payload["attribution"] = {
         "gpu_p50_ms": gap.get("gpu_p50_ms"),
+        "gpu_busy_ms": gap.get("gpu_busy_ms"),
         "host_p50_ms": gap.get("host_p50_ms"),
         "host_share_pct": gap.get("host_share_pct"),
+        "kernels_per_call": gap.get("kernels_per_call"),
+        "host_share_pct_residual": gap.get("host_share_pct_residual"),
         "dequant_share_pct": None,  # 本阶段没有反量化
         "routing_share_pct": (
             round(100.0 * bucket.get("routing_pack", 0.0) / gpu_total, 1) if gpu_total else None
