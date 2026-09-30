@@ -11,13 +11,51 @@
 
 ## 0. 下单前的检查清单（在网页上做，不花钱）
 
+**通用**
+
 - [ ] **GPU 确切型号**：`5090` 优先；若只有 40 系，`4090` 24GB 也可用（见 [SPECS.md](SPECS.md) §2.2）
 - [ ] 避开 **L40S**（带宽 864 GB/s，低于 V100 规格）与 **RTX A6000**（Ampere，无 FP8）
-- [ ] **镜像选「系统镜像 → `Ubuntu-nvidia` 22.04」**，不要选预装 PyTorch/vLLM 的平台镜像
-      （平台镜像是容器类型、不能再装 Docker，且 pin 了不透明的 torch 版本）
-- [ ] **计费方式选「按量」**，不要「抢占式」（抢占会中断长实验）
-- [ ] **确认关机保留系统盘**（否则每次开机重付 4–6 h 配置税）
-- [ ] 系统盘 ≥ 100 GB（OLMoE 12.89 GiB + torch/CUDA ~15 GB + 余量）
+- [ ] **计费方式选「按量」**，不要「抢占式」/包周（抢占会中断长实验）
+- [ ] **余额够**：一次性配置就要 4–6 h。按 ¥3/h 算，**先充 ¥50 再开机**。
+      余额耗尽通常会被强制关机，可能连装到一半的环境都保不住
+- [ ] **确认有空闲卡**（列表里的「空闲GPU」列不能是 `0 / N`）
+- [ ] GPU 数量选 **1**（单卡项目）
+- [ ] 确认实例**关机后磁盘保留**（否则每次开机重付配置税）
+
+**平台差异：基础镜像怎么选**
+
+| 平台 | 选什么 | 理由 |
+|---|---|---|
+| **AutoDL** | **基础镜像 → PyTorch**（如 `2.8.0 / 3.12(ubuntu22.04) / 12.8`） | ① AutoDL 已把 驱动+CUDA+torch+sm_120 这组测过，直接消掉本项目 1 号风险；② **自带 CUDA toolkit → 有 `nvcc`**，这是 `cpp_extension` 探针与自写 kernel 的前提；③ torch 2.8.0 已 ≥ 2.7，满足 sm_120 硬下限。<br>**不要选 Miniconda**——它不带 torch 也不带 toolkit，等于把上面三条全部自己重做一遍 |
+| 优云智算等有系统镜像的平台 | **系统镜像 → `Ubuntu-nvidia` 22.04** | 平台预装的 PyTorch/vLLM 镜像常是容器类型（不能再装 Docker）且 pin 不透明；系统镜像给一个正常 Ubuntu + 驱动，其余交给 `uv` |
+
+> **Miniconda 与 Miniforge 的区别**：只是默认 channel 不同（Miniconda 用 Anaconda `defaults`，
+> Miniforge 用 `conda-forge`）。**对本项目没有影响**，不要在这个选择上花时间。
+
+**AutoDL 特有的两个坑**
+
+1. **系统盘只有 30 GB，数据盘在 `/root/autodl-tmp`。**
+   OLMoE 12.89 GiB + torch/CUDA ≈ 28 GB，**几乎撑爆系统盘**。开机后第一件事：
+
+   ```bash
+   export HF_HOME=/root/autodl-tmp/hf          # 模型放数据盘
+   export VENV_DIR=/root/autodl-tmp/.venv      # venv 也放数据盘
+   ```
+
+   免费 50 GB 数据盘够用（OLMoE 13.84 + Qwen 0.5B 1 + venv ≈ 30 GB），**先不用扩容**。
+
+2. **镜像的 CUDA 版本决定 torch 索引，不是驱动、也不是镜像宣传名。**
+   例如镜像标 `CUDA 12.8` → 用 `cu128`。原因：Gate-0 的 `cpp_extension` 探针与后续自写
+   kernel 都用**镜像里的 `nvcc`** 编译，torch 的 CUDA 构建必须与之一致。
+   各索引可用版本不同（实测）：`cu126→2.14.0`、**`cu128→2.11.0`**、`cu129→2.13.0`、
+   `cu130→2.14.0`、`cu132→2.14.0`。
+
+   ```bash
+   # 想跳过 torch 安装、直接用镜像自带的 torch（最快到第一批数据）
+   bash scripts/bootstrap.sh --no-torch
+   # 注意：torch 版本会与 Mac 上的不同 —— 记进 results/env-<date>.md
+   ```
+
 
 ---
 

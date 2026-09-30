@@ -12,7 +12,11 @@
 # frozen: (未冻结 —— 待服务器首次验证)
 
 # --- 核心 ---
-torch==2.14.0
+# ★ torch 版本必须与**镜像里的 CUDA toolkit** 一致（cpp_extension / 自写 kernel 要用它的 nvcc）。
+#   各索引可用版本不同：cu126→2.14.0 / cu128→2.11.0 / cu129→2.13.0 / cu130→2.14.0 / cu132→2.14.0
+#   下面这行对应 CUDA 12.8 的镜像（AutoDL 的 "PyTorch 2.8.0/12.8"）。
+#   若直接使用镜像自带的 torch（bootstrap.sh --no-torch），把这一行改成实际版本。
+torch==2.11.0
 transformers==4.57.6
 numpy
 safetensors
