@@ -10,6 +10,7 @@ htmlcov/
 
 # Virtualenv
 .venv/
+.venv-mac/
 venv/
 
 # Experiment outputs: raw data stays local; stable records get excerpted into commits
@@ -23,6 +24,15 @@ models/
 *.gguf
 .cache/
 hf_cache/
+
+# ★ Credentials — NEVER commit. Only the .example template is tracked.
+.env
+.env.*
+!.env.example
+*.env
+!configs/env.env.example
+auth.json
+*credentials*.json
 
 # Editor / OS
 .DS_Store

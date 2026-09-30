@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lemoq"
 version = "0.1.0"
-description = "Byte-budget-driven quantization and kernel optimization for MoE decode under edge constraints."
+description = "Byte-budget-driven quantization and kernel optimization for MoE decode at batch=1."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -18,11 +18,13 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-# 注意：V100 是 sm_70，必须装带 sm_70 支持的 CUDA 12.x 构建。
-# 这里不锁死 torch 版本，避免在不同服务器上装不上；实际版本记录进 results/env-<date>.md。
+# 目标机是 RTX 5090 (sm_120)；第二数据点是学校 V100 (sm_70)。
+# 这里**不锁死 torch 版本**，避免在不同平台上装不上；
+# 精确版本由 configs/constraints.txt 冻结，实际版本记录进 results/env-<date>.md。
+# 注意：CUDA 轮子必须走 --index-url 单独安装（它会替换 PyPI），见 scripts/bootstrap.sh。
 dependencies = [
-    "torch",
-    "transformers",
+    "torch>=2.7",        # sm_120 的硬下限：低于 2.7 的轮子没有 sm_120 kernel
+    "transformers>=4.45,<5",   # OLMoE 需要 >=4.45；避开 5.x 的破坏性变更
     "numpy",
     "safetensors",
     "pyyaml",
@@ -57,6 +59,11 @@ exclude = [".git", ".venv", "build", "dist", "__pycache__", ".pytest_cache", ".m
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
+# `gpu` 标记：需要 CUDA 设备的测试。用 `-m "not gpu"` 在没有 GPU 的机器上跑全绿。
+# --strict-markers 意味着未注册的标记会直接报错 —— 所以这个 markers 列表是必需的。
+markers = [
+    "gpu: 需要 CUDA 设备（在 Mac / 无 GPU 机器上用 -m 'not gpu' 跳过）",
+]
 addopts = ["--strict-markers", "--strict-config"]
 
 [tool.mypy]

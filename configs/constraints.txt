@@ -1,0 +1,35 @@
+# configs/constraints.txt — 冻结的精确版本
+#
+# ★ 状态：**预置值，尚未在服务器上验证**。
+#   首次在 GPU 机器上 bootstrap 成功、且 pytest 全绿之后，
+#   用 `uv pip freeze` 的结果覆盖本文件，并把日期记在下面。
+#
+# 更新纪律：
+#   1. 只在"完整跑通一次 Gate-0 + 测试"之后才改本文件；
+#   2. 每次改都更新下面的 # frozen: 日期与机器；
+#   3. 不要在这里写 CUDA 索引（那是 env.env 的 TORCH_CUDA_INDEX 的事）。
+#
+# frozen: (未冻结 —— 待服务器首次验证)
+
+# --- 核心 ---
+torch==2.14.0
+transformers==4.57.6
+numpy
+safetensors
+pyyaml
+
+# --- 开发 ---
+pytest
+pytest-cov
+black>=22.0
+ruff>=0.11.0
+mypy
+
+# --- 说明 ---
+# triton：**不显式 pin**，交给 torch 的依赖解析。
+#   理由：Triton 自带 ptxas，不需要系统 CUDA toolkit；版本必须与 torch 匹配。
+#   实际版本记录在 results/env-<date>.md。
+#
+# vllm / bitsandbytes / torchao：**不进主依赖**。
+#   它们是可选对照臂（PLAN.md §4 的 L3/L4/L5），主矩阵
+#   {fp16,W8A8,W4A16} × {eager,cudagraph} 不依赖它们。

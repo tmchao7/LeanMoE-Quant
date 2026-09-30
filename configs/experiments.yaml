@@ -1,0 +1,180 @@
+# configs/experiments.yaml — 声明式实验矩阵
+#
+# 这是唯一来源：`benchmarks/harness.py` 读它展开成具体的 (EXP-ID, 配置) 列表，
+# 每个组合落一个 `results/<EXP-ID>/result.json`。`status: done` 的会被跳过，
+# 因此整条流水线支持断点续跑。
+#
+# 设计要点：
+#   1. **按 arch 挂载实验臂** —— 蹲到 4090 还是 5090，靠 `arch_arms` 自动裁剪，
+#      不需要改代码（见 docs/SPECS.md §2.2）。
+#   2. **一次一个变量**（AGENTS.md 规则 3）—— 每个实验只在一个轴上展开；
+#      组合实验必须显式标 `combined: true`。
+#   3. **假设先写**（EXPERIMENTS.md §3）—— 每个实验必须带 `hypothesis` 与
+#      `refutation_signal`，跑之前就定好，避免事后解释。
+
+version: 1
+
+defaults:
+  model: "allenai/OLMoE-1B-7B-0924"
+  tokenizer: "allenai/OLMoE-1B-7B-0924"
+  dev_model: "Qwen/Qwen2.5-0.5B"     # Mac CPU 冒烟 / --dry-run
+  dtype: "float16"                   # 参考精度；用 bf16 必须显式标注
+  batch: 1
+  max_new_tokens: 64
+  warmup: 5
+  timed: 20
+  repeats: 3
+
+# ---------------------------------------------------------------------------
+# 按 compute capability 挂载实验臂。
+# 依据：本地 LLVM NVPTX 谓词（见 docs/SPECS.md §2.1）
+#   cp.async -> Requires<[SM80]> ; wgmma -> [SM90a]（消费级都没有）
+#   fp8      -> SM90 | (SM89 & PTX8.1) ; mx_block_scale -> [SM120f]
+# ---------------------------------------------------------------------------
+arch_arms:
+  sm_120: ["cp_async", "tma", "fp8", "mx_block_scale", "bf16"]
+  sm_89:  ["cp_async", "fp8", "bf16"]
+  sm_86:  ["cp_async", "bf16"]
+  sm_70:  []
+
+# ---------------------------------------------------------------------------
+# 实验
+# ---------------------------------------------------------------------------
+experiments:
+
+  # ---------- Phase 0：环境与基线 ----------
+  - id: EXP-p0-01-machine-probe
+    stage: "p0"
+    kind: "probe"
+    requires: []
+    desc: "设备事实落盘：arch / 实测带宽 / 特性 / Triton / ncu / 编译能力"
+    command: "python -m tools.probe_machine --json results/machine_probe.json"
+    hypothesis: "该机器具备本项目所需的架构特性，且 Triton 与 ncu 可用"
+    refutation_signal: "Triton 跑不通 → Phase 2 全盘返工；无 ncu → 缺 kernel 级证据"
+
+  - id: EXP-p0-02-baseline-fp16
+    stage: "p0"
+    kind: "correctness"
+    desc: "fp16 基线与 HF 参考的分布一致性 + 首个系统级延迟/显存数字"
+    hypothesis: "本实现与 HF fp16 参考的 KL ≈ 0、top-1 一致率 ≈ 1.0"
+    refutation_signal: "KL 显著大于 0 → 我们的推理路径有 bug，先修再谈量化"
+    ctx: [1024, 4096]
+    metrics: ["kl", "top1_agreement", "per_token_p50", "per_token_p99", "vram_split", "host_share"]
+
+  # ---------- Phase 1：量化功能链路（只谈精度，不谈性能） ----------
+  - id: EXP-p1-01-w8-w4-accuracy
+    stage: "p1"
+    kind: "correctness"
+    desc: "W8A8 / W8A16 / W4A16 x group{32,64,128} 的精度门槛"
+    hypothesis: "位宽↓ → KL↑；group↓ → KL↓"
+    refutation_signal: "W4 无法通过 KL 门槛 → 触发 REMEDIATION_LADDER（见 lemoq.quant.api）"
+    factors:
+      bit_width: ["w8a8", "w8a16", "w4a16"]
+      group_size: [32, 64, 128]
+    single_variable_axis: "bit_width, group_size（分组独立轴，不叠融合策略）"
+    metrics: ["kl", "top1_agreement", "ppl"]
+
+  # ---------- Phase 2：融合 kernel（核心，超时 25 GPU 小时） ----------
+  - id: EXP-p2-01-dequant-fusion
+    stage: "p2"
+    kind: "perf"
+    requires: ["cp_async"]
+    desc: "E2：dequant 融合进 GEMM vs 独立反量化 kernel"
+    hypothesis: "融合带来 1.3-2x（E2）"
+    refutation_signal: "差值 <10% → 反量化不是瓶颈，融合判断被否证"
+    factors:
+      bit_width: ["w8a8", "w4a16"]
+      dequant: ["separate", "fused"]
+    timeout_gpu_hours: 25
+    fallback: "用现成融合 kernel（vLLM/torchao）当'已融合'臂，贡献转落字节预算分析 + E7"
+    metrics: ["per_token_p50", "per_token_p99", "dequant_share", "bw_attainment", "ncu_metrics"]
+
+  # ---------- Phase 4b：★ E7 收益截断（本项目的头号结论） ----------
+  - id: EXP-p4b-01-truncation
+    stage: "p4b"
+    kind: "perf"
+    combined: true            # 同时改 bit-width 与 execution —— 必须显式标注
+    desc: "E7：{fp16,w8a8,w4a16} x {eager,cudagraph}，逐格拆 host/kernel"
+    hypothesis: "量化对 token 延迟的收益被 host/launch 开销截断：W4A16+eager < 1.5x，W4A16+cudagraph > 2x"
+    refutation_signal: "两者接近 → 截断效应不存在，量化可独立兑现"
+    factors:
+      bit_width: ["fp16", "w8a8", "w4a16"]
+      execution: ["eager", "cudagraph"]
+    ctx: [1024, 4096]
+    metrics: ["host_share", "gpu_p50", "host_p50", "per_token_p50", "bw_attainment"]
+
+  # ---------- Phase 3：架构特性臂（**arch 门控真正生效的地方**） ----------
+  - id: EXP-p3-01-fp8-w8a8
+    stage: "p3"
+    kind: "perf"
+    requires: ["fp8"]              # sm_89+ ；V100(sm_70) 会被自动裁剪
+    desc: "FP8 权重+激活（W8A8-FP8）：位宽阶梯里 V100 拿不到的那一档"
+    hypothesis: "FP8 的字节收益与 INT8 同级，但精度更好或相当"
+    refutation_signal: "FP8 精度明显差于 INT8 → 该档对本模型无价值"
+    factors:
+      bit_width: ["w8a8-fp8"]
+    metrics: ["kl", "per_token_p50", "bw_attainment"]
+
+  - id: EXP-p3-02-mxfp4-block-scale
+    stage: "p3"
+    kind: "perf"
+    requires: ["mx_block_scale"]   # sm_120 独有；4090(sm_89) 会被自动裁剪
+    desc: "MXFP4/NVFP8 block-scale：解释'FP4 在 GEMM 赢 4x、在 token 输 3-4x'"
+    hypothesis: "FP4 的 GEMM 优势被反量化与 host 开销吃掉，端到端收益远小于 4x（E7 的机制）"
+    refutation_signal: "端到端也拿到接近 4x → 截断机制不成立"
+    factors:
+      bit_width: ["mxfp4"]
+      dequant: ["separate", "fused"]
+    metrics: ["per_token_p50", "host_share", "dequant_share", "bw_attainment", "kl"]
+
+  # ---------- Phase 4：MoE 主线 ----------
+  - id: EXP-p4-01-moe-routing-overhead
+    stage: "p4"
+    kind: "perf"
+    desc: "E4：路由/打包开销分解，量化在 MoE 上的收益上限"
+    hypothesis: "路由/打包开销不随量化下降，构成收益上限"
+    refutation_signal: "路由开销 <5% → 上限假设不成立"
+    metrics: ["routing_share", "per_token_p50"]
+
+  - id: EXP-p4-02-expert-sensitivity
+    stage: "p4"
+    kind: "analysis"
+    desc: "E5：逐层/逐专家的量化敏感度，寻找更优的混合位宽"
+    hypothesis: "不同专家对量化的敏感度不均，存在更优的混合位宽"
+    refutation_signal: "敏感度均匀 → 混合位宽无意义"
+    metrics: ["kl_per_layer", "kl_per_expert"]
+
+  # ---------- Phase 5：KV（已降级，见 PLAN.md §3） ----------
+  - id: EXP-p5-01-kv-int8
+    stage: "p5"
+    kind: "perf"
+    desc: "E6：KV INT8 x ctx{1K,2K,4K}"
+    hypothesis: "KV 量化省的是带宽不是显存；@4K 约省 9% 总流量"
+    refutation_signal: "收益 <5% 或精度崩塌 → 该杠杆对本模型无意义"
+    ctx: [1024, 2048, 4096]
+    # OLMoE 的 max_position_embeddings = 4096 —— 不得扫到 8K
+    ctx_hard_limit: 4096
+    metrics: ["kl", "per_token_p50", "kv_share"]
+
+  # ---------- Phase 8：跨带宽（E8，用免费的 V100 作第二点） ----------
+  - id: EXP-p8-01-cross-bandwidth
+    stage: "p8"
+    kind: "perf"
+    desc: "E8：同一配置在 V100(~900) 与 5090(~1792 GB/s) 上的量化加速比对比"
+    hypothesis: "卡越快 → T_bytes 越小、T_host 不变 → host 占比越大、截断越严重，加速比随带宽衰减"
+    refutation_signal: "加速比随带宽上升 → 上述机制被否证"
+    requires_second_machine: true
+    metrics: ["per_token_p50", "host_share", "bw_attainment", "quant_attainment"]
+
+# ---------------------------------------------------------------------------
+# 裁剪开关（按可用预算）
+# ---------------------------------------------------------------------------
+scope:
+  minimal_credible:
+    desc: "约 35-60 GPU 小时 / 一周 —— 去掉 dense 曲线与 30B 单点"
+    include: ["EXP-p0-01-machine-probe", "EXP-p0-02-baseline-fp16",
+              "EXP-p1-01-w8-w4-accuracy", "EXP-p2-01-dequant-fusion",
+              "EXP-p4b-01-truncation", "EXP-p4-01-moe-routing-overhead"]
+  full:
+    desc: "约 60-110 GPU 小时 / 1.5-3 周"
+    include: ["*"]
