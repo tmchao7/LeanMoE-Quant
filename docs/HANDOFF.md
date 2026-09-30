@@ -131,7 +131,7 @@ bash scripts/bootstrap.sh --no-torch --python=/root/miniconda3/bin/python
 ## 3. 代码与模型位置
 
 ```bash
-# 仓库（git 干净，HEAD = 4b6fe0a）
+# 仓库（Mac 当前开发分支 HEAD = 124e0c4；服务器需同步该提交或更新版本）
 /root/LeanMoE-Quant
 
 # 模型（ModelScope 下载，字节数已校验 = 13,838,721,960）
@@ -217,7 +217,7 @@ python3 -m benchmarks.runner --exp EXP-p0-02-baseline-fp16 --ctx 1024 \
 
 ```bash
 cd /root/LeanMoE-Quant
-/root/miniconda3/bin/python -m pytest -m "not gpu" -q      # 140 passed
+/root/miniconda3/bin/python -m pytest -m "not gpu" -q      # 当前应与 Mac 同步，约 155 passed
 ```
 
 ### 下模型（换源后）
@@ -444,19 +444,24 @@ tests/                # 140 个测试，-m "not gpu" 全绿（Mac 与服务器�
 
 ### 🔴 第一步（必做，且是后面一切的前提）
 
-**给 runner 加 CUDA Graph 执行臂。**
+**已在 Mac 完成 runner 的 CUDA Graph 执行臂实现；服务器上只剩真实 capture/replay 验证。**
 
 理由：不做这一步，量化实验的端到端数字**无法解释** —— 89.5% 的时间在 host，
 量化的影响会被完全淹没（上面算过：只做量化 = 1.011x）。等于烧钱测噪音。
 
-预期：100 ms → 10 ms 量级（消除 8,277 个 kernel 的逐个 launch）。
+预期：100 ms → 10 ms 量级（消除 8,277 个 kernel 的逐个 launch），但这仍是待服务器实测，
+不能写成已达成结果。
 
 `configs/experiments.yaml` 里已经有 `execution: eager / cudagraph` 这个因子，
-runner 的 `config` 段也已经写入 `execution` 字段，但没有实现。
+runner 的 `config` 段也已经写入 `execution` 字段；本地实现见 `124e0c4`，服务器只做真实验证。
 
 配套要做的：
-- 按 `EXP-p0-02` 的同一配置再跑一遍 cudagraph 臂，做对照；
+- 先跑 GPU toy graph smoke，再按 `docs/SERVER_RUNBOOK.md §3.1` 跑 `EXP-p0-03` 的 ctx=1024；
+- 当前实现使用 Transformers `StaticCache`，不是 PagedAttention；
 - 注意 CUDA Graph 要求静态 shape → 需要固定 KV 长度（或用静态 buffer + 拷贝）。
+
+当前本地提交：`124e0c4 bench: add fp16 CUDA Graph feasibility gate (EXP-p0-03)`。
+Mac 已通过 `155 passed, 3 deselected`；CUDA capture/replay 尚未在服务器验证。
 
 ### 🟠 第二步
 
@@ -491,7 +496,7 @@ ssh 5090
 nvidia-smi --query-gpu=name,driver_version,memory.total,compute_cap --format=csv
 
 # 2. 代码是最新的
-cd /root/LeanMoE-Quant && git log --oneline -1     # 应为 4b6fe0a 或更新
+cd /root/LeanMoE-Quant && git log --oneline -1     # 应为 124e0c4 或更新
 git status --short                                  # 应为空
 
 # 3. 依赖齐全

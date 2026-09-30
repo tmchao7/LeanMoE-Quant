@@ -23,9 +23,15 @@ if [ -f .env ]; then
   set -a; . ./.env; set +a
 fi
 
-PY=".venv/bin/python"
-if [ ! -x "${PY}" ]; then
-  echo "error: 找不到 ${PY}。先跑 scripts/bootstrap.sh" >&2
+PY="${LEMOQ_PYTHON:-}"
+if [ -z "${PY}" ] && [ -x ".venv/bin/python" ]; then
+  PY=".venv/bin/python"
+fi
+if [ -z "${PY}" ] && [ -x "/root/miniconda3/bin/python" ]; then
+  PY="/root/miniconda3/bin/python"
+fi
+if [ -z "${PY}" ] || [ ! -x "${PY}" ]; then
+  echo "error: 找不到可用 Python。设置 LEMOQ_PYTHON，或先跑 scripts/bootstrap.sh" >&2
   exit 3
 fi
 

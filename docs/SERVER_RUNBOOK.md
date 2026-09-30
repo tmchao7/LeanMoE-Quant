@@ -127,6 +127,49 @@ bash scripts/fetch_models.sh              # 自动校验 OLMoE 字节数 = 13,83
 
 ---
 
+## 3.1 EXP-p0-03：CUDA Graph feasibility gate（必须先做，再碰量化）
+
+`codex/p0-03-cudagraph` 已在 Mac 完成本地测试，但 **CUDA Graph capture/replay 只能在
+RTX 5090 上验证**。这一步不是量化实验，也不允许用 Mac 产生任何结果。
+
+先确认服务器 checkout 已包含提交 `124e0c4` 或更新版本，然后只运行 `ctx=1024`：
+
+```bash
+cd /root/LeanMoE-Quant
+export HF_ENDPOINT=https://hf-mirror.com
+export HF_HOME=/root/autodl-tmp/hf
+export PATH=/root/miniconda3/bin:/usr/local/cuda/bin:$PATH
+
+# 1) 离线回归；必须先绿
+/root/miniconda3/bin/python -m pytest -m "not gpu" -q
+
+# 2) GPU toy graph smoke；失败就停止，不加载 13 GB 模型
+/root/miniconda3/bin/python -m pytest tests/test_cudagraph.py -m gpu -q
+
+# 3) 真实 OLMoE StaticCache + 单 token graph feasibility gate
+/root/miniconda3/bin/python -m benchmarks.runner \
+  --exp EXP-p0-03-baseline-cudagraph \
+  --model /root/autodl-tmp/ms/models/allenai--OLMoE-1B-7B-0924/snapshots/master \
+  --ctx 1024 \
+  --batch 1 \
+  --max-new-tokens 32 \
+  --warmup 5 \
+  --timed 20 \
+  --dtype float16 \
+  --force
+```
+
+合法结果只有两类：
+
+- `status=done`：capture/replay 成功且 KL/top-1 gate 通过，才可读取 latency；
+- `status=blocked` 或 `status=failed`：性能字段必须为 `null`，记录具体阶段/错误，
+  然后进入固定 metadata 的 MoE routing 设计。
+
+**不要**在 p0-03 失败后把 execution 改成 eager 继续写入同一个结果，也不要立即跑
+W8/W4。先保留失败证据；失败本身就是判断 HF 动态 routing 是否阻塞 CUDA Graph 的实验结果。
+
+---
+
 ## 4. 在服务器上跑 agent（opencode）
 
 **★ 两步走，严格区分凭据与配置：**

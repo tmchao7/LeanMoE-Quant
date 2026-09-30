@@ -2,9 +2,10 @@
 
 > **batch=1 单流 MoE 解码：字节预算（byte budget）驱动的量化与 kernel 优化**
 
-状态：**计划阶段（Phase 0 / 环境与基线准备）**。
-本仓库目前只有计划与工程骨架，**没有任何实测数字**。任何未测量的值都以 `planned` /
-`target` / `to be evaluated` 标注，绝不写成已达成结果。
+状态：**Phase 0：环境与基线已完成；fp16 CUDA Graph feasibility gate 已在本地实现，
+待 RTX 5090 上做真实 capture/replay 验证**。
+仓库已经包含 RTX 5090 上的 Gate-0 与 fp16 eager 基线记录；CUDA Graph、量化和 kernel
+优化仍以 `planned` / `target` / `to be evaluated` 标注，绝不把本机 Mac 测试当成 GPU 实测。
 
 ---
 

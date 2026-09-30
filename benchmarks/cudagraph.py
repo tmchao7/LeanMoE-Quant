@@ -289,6 +289,16 @@ def graph_correctness_passed(report: dict[str, Any]) -> bool:
     )
 
 
+def replay_timed_step(session: Any) -> Any:
+    """Run one user-visible autoregressive graph step.
+
+    Unlike a raw ``graph.replay()``, this advances the host-side greedy token
+    and cache position. Formal latency measurements must use this path so
+    they represent successive decode tokens rather than the same state.
+    """
+    return session.replay(synchronize=True)
+
+
 def measure_graph_gap(
     session: Any, *, warmup: int = 5, timed: int = 20, repeats: int = 3
 ) -> dict[str, Any]:
@@ -317,7 +327,7 @@ def measure_graph_gap(
         start.record(session.stream)
         t0 = time.perf_counter()
         for _ in range(timed):
-            session.replay(synchronize=False)
+            replay_timed_step(session)
         session.stream.synchronize()
         wall_samples.append((time.perf_counter() - t0) * 1000.0 / timed)
         end.record(session.stream)
@@ -331,7 +341,7 @@ def measure_graph_gap(
     session.reset()
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
         for _ in range(timed):
-            session.replay(synchronize=False)
+            replay_timed_step(session)
         session.stream.synchronize()
     events = [event for event in prof.key_averages() if event.self_device_time_total > 0]
     busy_ms = sum(event.self_device_time_total for event in events) / timed / 1000.0

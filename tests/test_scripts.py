@@ -207,3 +207,12 @@ def test_scripts_do_not_contain_credentials():
             text = fh.read()
         for m in suspicious.finditer(text):
             raise AssertionError("%s 里疑似硬编码凭据: %s" % (path, m.group(0)[:40]))
+
+
+def test_server_gate0_accepts_existing_interpreter_without_a_repo_venv():
+    """The rented image uses /root/miniconda3; Gate-0 must not require a new venv."""
+    with open(os.path.join(SCRIPTS, "run_server_gate0.sh"), encoding="utf-8") as fh:
+        text = fh.read()
+    assert "LEMOQ_PYTHON" in text
+    assert "/root/miniconda3/bin/python" in text
+    assert "找不到可用 Python" in text

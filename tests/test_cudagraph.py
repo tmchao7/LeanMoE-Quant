@@ -235,3 +235,41 @@ def test_graph_gate_rejects_nonfinite_logits_and_negative_kl():
                 "token_sequence_match": True,
             }
         )
+
+
+@pytest.mark.gpu
+@requires_cuda
+def test_tiny_olmoe_static_cache_graph_capture_and_replay(tiny_olmoe):
+    """Exercise the real session with a tiny model before loading the 13 GB checkpoint."""
+    torch = pytest.importorskip("torch")
+    from benchmarks.cudagraph import StaticCacheDecodeSession, compare_logits
+    from benchmarks.runner import _eager_reference_logits, _static_graph_correctness
+
+    model = tiny_olmoe.to("cuda")
+    ids = torch.tensor([[1, 2, 3, 4]], device="cuda")
+    session = StaticCacheDecodeSession(model, ids, ctx=4, max_new_tokens=4, device="cuda")
+    capture = session.capture(warmup=2)
+    assert capture["capture_success"] is True
+    reference = _eager_reference_logits(model, ids, max_new_tokens=4)
+    candidate = _static_graph_correctness(session, max_new_tokens=4)
+    report = compare_logits(reference["logits"], candidate["logits"])
+    assert reference["seed_token"] == candidate["seed_token"]
+    assert reference["output_tokens"] == candidate["output_tokens"]
+    assert report["kl"] <= 1e-5
+    assert report["top1_agreement"] == 1.0
+
+
+def test_timed_replay_advances_autoregressive_state():
+    from benchmarks.cudagraph import replay_timed_step
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        def replay(self, *, synchronize):
+            self.calls.append(synchronize)
+            return "logits"
+
+    session = FakeSession()
+    assert replay_timed_step(session) == "logits"
+    assert session.calls == [True]
