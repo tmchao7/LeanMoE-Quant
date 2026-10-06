@@ -263,6 +263,46 @@ def _tiny_model():
     return OlmoeForCausalLM(cfg).eval()
 
 
+def test_quantize_model_can_restrict_to_named_layers():
+    """`layers=` 把"哪一层"变成受控变量（归因实验用）。
+
+    `EXP-p1-02` 要问的是"误差在哪一层放大"，所以必须能只量化第 0 层并**记录**它。
+    这里同时钉住两件事：真的只换了那一层，以及 `layers` 进了 report（不记录的话
+    结果文件的 spec 会与实测不符）。
+    """
+    from transformers import OlmoeConfig, OlmoeForCausalLM
+
+    cfg = OlmoeConfig(
+        hidden_size=32,
+        intermediate_size=16,
+        num_hidden_layers=3,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+        vocab_size=64,
+        max_position_embeddings=32,
+        tie_word_embeddings=False,
+    )
+    torch.manual_seed(0)
+    model = OlmoeForCausalLM(cfg).eval()
+    _, report = quantize_model(
+        model, _spec("w8a16", 32, targets=("attention", "experts")), layers=[1]
+    )
+    assert report.spec["layers"] == [1]
+    assert report.replaced["attention"] == 4  # 1 层 × 4 个投影
+    assert report.replaced["experts"] == 4 * 3
+    assert not isinstance(model.model.layers[0].self_attn.q_proj, QuantLinear)
+    assert isinstance(model.model.layers[1].self_attn.q_proj, QuantLinear)
+    assert not isinstance(model.model.layers[2].self_attn.q_proj, QuantLinear)
+    assert any("layer=0" in s for s in report.skipped)
+    # 默认（layers=None）仍然是全部
+    model2 = OlmoeForCausalLM(cfg).eval()
+    _, report2 = quantize_model(model2, _spec("w8a16", 32, targets=("attention",)))
+    assert report2.spec["layers"] is None
+    assert report2.replaced["attention"] == 12
+
+
 def test_quantize_model_replaces_only_declared_targets():
     model = _tiny_model()
     _, report = quantize_model(model, _spec("w4a16", 32, targets=("attention", "experts")))

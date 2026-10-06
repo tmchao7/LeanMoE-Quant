@@ -156,6 +156,15 @@ TARGET_RULES: tuple[tuple[str, str], ...] = (
 )
 
 
+_LAYER_RE = re.compile(r"\.layers\.(\d+)\.")
+
+
+def _layer_index(module_name: str) -> int | None:
+    """`model.layers.7.mlp...` -> 7；顶层（`lm_head`）-> None。"""
+    match = _LAYER_RE.search(module_name)
+    return int(match.group(1)) if match else None
+
+
 def classify_linear(module_name: str) -> str | None:
     """把一个 `nn.Linear` 的**全名**归到 `[W]` 的某一项，或 None（不量化）。
 
@@ -336,16 +345,23 @@ def realized_bytes(module: Any) -> dict[str, int]:
 
 
 def quantize_model(
-    model: Any, spec: SchemeSpec, *, verbose: bool = False
+    model: Any, spec: SchemeSpec, *, verbose: bool = False, layers: Any = None
 ) -> tuple[Any, QuantizeReport]:
     """把模型里的 `nn.Linear` 就地换成 `QuantLinear`（按 `spec.targets` 选择）。
 
     返回 `(model, report)`。未被任何规则归类的 Linear 保持 fp16，并在
     `report.skipped` 里逐个列出 —— 不静默跳过。
+
+    `layers`：只量化这些层号（`None` = 全部）。存在的理由不是省事，而是
+    **归因**：`EXP-p1-01` 的结论是"整模型上 W8/W4 过不了门"，但那没有回答
+    "误差是在哪一层放大的"。把量化限制在 `layers=[0]` 就能把"哪一层"变成
+    受控变量（`REMEDIATION_LADDER` 的第 4 档也需要它）。限制必须进 report。
     """
     report = QuantizeReport(spec=spec.to_dict())
     if not spec.enabled:
         return model, report
+    layer_filter = None if layers is None else {int(x) for x in layers}
+    report.spec["layers"] = None if layer_filter is None else sorted(layer_filter)
 
     # ★ 只收集**名字**（字符串），不要 `list(model.named_modules())`。
     #
@@ -373,6 +389,12 @@ def quantize_model(
             continue
         if target == "lm_head" and spec.keep_lm_head_fp16:
             report.skipped.append("%s (keep_lm_head_fp16=True)" % module_name)
+            continue
+        if layer_filter is not None and _layer_index(module_name) not in layer_filter:
+            report.skipped.append(
+                "%s (layer=%s 不在 layers=%s 内)"
+                % (module_name, _layer_index(module_name), sorted(layer_filter))
+            )
             continue
 
         parent_name, _, leaf = module_name.rpartition(".")
