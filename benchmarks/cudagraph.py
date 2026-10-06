@@ -66,6 +66,7 @@ class GraphBuffers:
     position_ids: Any
     attention_mask: Any
     next_token: Any
+    filled_len: Any = None
 
     @classmethod
     def allocate(
@@ -90,6 +91,11 @@ class GraphBuffers:
             position_ids=torch.zeros((batch, 1), dtype=torch.long, device=device),
             attention_mask=torch.zeros((batch, 1, 1, max_cache_len), dtype=dtype, device=device),
             next_token=torch.zeros((batch, 1), dtype=torch.long, device=device),
+            # ★ 设备端"已填充长度"：decode attention kernel 的**循环上界**。
+            #   形状静态（(1,) int32）、地址固定，每步在图**外** `fill_`。
+            #   这就是"launch 形状不随长度变，但答案随长度变"的全部机制：
+            #   CUDA Graph 记录的是 launch，kernel 在运行时从设备内存读边界。
+            filled_len=torch.zeros((1,), dtype=torch.int32, device=device),
         )
 
     def set_step(self, *, token: int, position: int) -> None:
@@ -97,18 +103,20 @@ class GraphBuffers:
         self.token.fill_(int(token))
         self.cache_position.fill_(int(position))
         self.position_ids.fill_(int(position))
+        if self.filled_len is not None:
+            self.filled_len.fill_(int(position) + 1)
 
-    def addresses(self) -> tuple[int, int, int, int, int]:
-        return tuple(
-            int(t.data_ptr())
-            for t in (
-                self.token,
-                self.cache_position,
-                self.position_ids,
-                self.attention_mask,
-                self.next_token,
-            )
+    def addresses(self) -> tuple[int, int, int, int, int, int]:
+        tensors = (
+            self.token,
+            self.cache_position,
+            self.position_ids,
+            self.attention_mask,
+            self.next_token,
         )
+        if self.filled_len is not None:
+            tensors = tensors + (self.filled_len,)
+        return tuple(int(t.data_ptr()) for t in tensors)
 
 
 class CudaGraphCaptureError(RuntimeError):
@@ -495,6 +503,10 @@ class StaticCacheDecodeSession:
             max_cache_len=self.config.max_cache_len,
             dtype=self.dtype,
         )
+        # ★ 把设备端长度挂到 cache 对象上：被替换的 attention core 通过
+        #   `past_key_values` 拿到它（**不用模块级全局变量**）。挂载是幂等的，
+        #   不替换 attention 的路径（HF 自己）完全不受影响。
+        self.cache._lemoq_filled_len = self.buffers.filled_len
         self.graph = None
         self.stream = None
         self.logits = None
@@ -585,6 +597,11 @@ class StaticCacheDecodeSession:
         if self.position >= self.config.max_cache_len:
             raise RuntimeError("decode position exceeded StaticCache capacity")
         self.buffers.attention_mask[..., : self.position + 1].zero_()
+        # ★ 长度唯一来源：设备端 int32。它在图**外**更新，图里只有它的地址。
+        #   注意 mask 仍然每步更新：kernel 不读 mask，但 **eager 臂需要它**，
+        #   而两条臂的 host 侧开销必须相同，否则交错对照量到的是 host 差异。
+        #   去掉这两次 fill_ 是后续单独的改动（一次一个变量）。
+        self.buffers.filled_len.fill_(self.position + 1)
 
     def capture(self, *, warmup: int = 5) -> dict[str, Any]:
         """Warm up and capture one fixed-shape decode forward."""
@@ -647,6 +664,41 @@ class StaticCacheDecodeSession:
         """Replay one decode step; optionally synchronize and advance state."""
         if self.graph is None or self.stream is None or self.logits is None:
             raise RuntimeError("capture must succeed before replay")
+        try:
+            with self.torch.cuda.stream(self.stream), self.torch.no_grad():
+                self._set_step_inputs()
+                self.graph.replay()
+            if synchronize:
+                self.stream.synchronize()
+                self.current_token_id = int(self.logits[:, -1:, :].argmax(dim=-1).item())
+                self.position += 1
+            self.capture_info["replay_success"] = True
+            return self.logits
+        except Exception as exc:  # noqa: BLE001
+            raise CudaGraphCaptureError("replay", exc) from exc
+
+    def set_position(self, position: int) -> None:
+        """Move the decode position **without touching the captured graph**.
+
+        ★ 为什么需要它：K4（换长度）判据的全部内容是"在长度 N 捕获、改成 M 重放"。
+        长度在这里就是设备端的 `filled_len`（见 `_set_step_inputs`），改它不需要
+        重新捕获 —— 也不需要 host 同步。这是本任务立身之本的可测入口。
+        """
+        if position < 0 or position >= self.config.max_cache_len:
+            raise RuntimeError(
+                "position %d 超出 StaticCache 容量 %d" % (position, self.config.max_cache_len)
+            )
+        self.position = int(position)
+
+    def replay_at_position(self, position: int, *, synchronize: bool = True) -> Any:
+        """在指定位置重放**已捕获**的图；返回 graph 写出的 logits。
+
+        与 `replay()` 的唯一区别是位置由调用方给（`replay()` 用 self.position 并
+        自增）。`synchronize=False` 时不做 sync、也不推进 token，用于纯计时。
+        """
+        if self.graph is None or self.stream is None or self.logits is None:
+            raise RuntimeError("capture must succeed before replay")
+        self.set_position(position)
         try:
             with self.torch.cuda.stream(self.stream), self.torch.no_grad():
                 self._set_step_inputs()
