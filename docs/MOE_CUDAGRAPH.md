@@ -217,3 +217,24 @@ M=/root/autodl-tmp/ms/models/allenai--OLMoE-1B-7B-0924/snapshots/master
 - 整模型替换后输出一致，且原始 `experts` 被释放（否则 16 层会多占 12 GiB）。
 
 这些在 CPU 上跑，**不需要 GPU，也不产生任何可引用到 `results/` 的数字**。
+
+---
+
+## 6. 后续实验对本文档的修正
+
+| 位置 | 原文 | 实测修正 | 依据 |
+|---|---|---|---|
+| §3.3 | gather 税 2.07 ms | 实际可省 1.19 ms（副本落在 L2） | `EXP-p2-02` |
+| §3.3 | "其它 1.59 ms = attention 扫 1056 槽位" | **方向对**，但当时用字节账反驳它是错的 —— attention 是延迟受限 | `EXP-p2-02` / `EXP-p2-03` |
+| — | （未涉及） | FMHA 的 64x128 tile 对 q_len=1 浪费 98.4%，换 `attn_implementation="eager"` 在 ctx=4096 值 2.440× | `EXP-p2-04` |
+
+**结论的当前状态（per-token p50，同机同 driver）**：
+
+```text
+eager 基线（SDPA，无图）      82.64 ms      1.0x    达成率  1.8%
++ CUDA Graph（p0-04）          5.2637 ms    15.73x          28.7%   ctx=1024
++ grouped GEMV（p2-02）        4.0715 ms    20.3x           37.1%
++ eager attention（p2-04）     3.1051 ms    26.6x           48.6%
+
+ctx=4096（p0-04 -> p2-04）     8.4873 -> 3.4788 ms         1.0x -> 23.8x
+```
