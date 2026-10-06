@@ -225,22 +225,40 @@ GATE = os.path.join(SCRIPTS, "run_cudagraph_gate.sh")
 
 
 def test_cudagraph_gate_refuses_without_cuda():
-    """★ 在 Mac（无 CUDA）上必须**干净地拒绝**，而不是跑出半截结果。
+    """★ 在没有 CUDA 的机器上必须**干净地拒绝**，而不是跑出半截结果。
 
-    这条比看起来重要：Mac 上产生的数字绝不能进 results/。如果脚本在无 GPU 的
-    机器上"能跑"，就迟早会有人用它写出假结果。
+    这条比看起来重要：非 GPU 机器上产生的数字绝不能进 results/。如果脚本在无 GPU
+    的机器上"能跑"，就迟早会有人用它写出假结果。
+
+    ★ 必须用 `sys.executable` 而不是硬编码 Mac 的 `.venv-mac/bin/python`：
+    那个路径在服务器上不存在，于是脚本会在"解释器找不到"这一步就退出，
+    测试便永远断言不到 CUDA 分支 —— 而它在 Mac 上却是绿的。
+    这种"只在本机成立"的测试等于没测（真的在服务器上炸过一次）。
     """
+    import sys as _sys
+
+    try:
+        import torch
+
+        cuda_available = bool(torch.cuda.is_available())
+    except Exception:  # noqa: BLE001
+        cuda_available = False
+
     proc = subprocess.run(
         ["bash", GATE, "--check"],
         cwd=ROOT,
         capture_output=True,
         text=True,
-        timeout=180,
-        env=dict(os.environ, LEMOQ_PYTHON=os.path.join(ROOT, ".venv-mac", "bin", "python")),
+        timeout=300,
+        env=dict(os.environ, LEMOQ_PYTHON=_sys.executable),
     )
-    assert proc.returncode != 0, "无 CUDA 时竟然返回 0"
     combined = proc.stdout + proc.stderr
-    assert "CUDA" in combined
+    if cuda_available:
+        # 有 GPU 的机器上，脚本应当一路通过自检（这也是在验证它确实能跑）
+        assert proc.returncode == 0, "有 CUDA 但自检失败：\n" + combined
+    else:
+        assert proc.returncode != 0, "无 CUDA 时竟然返回 0"
+        assert "CUDA" in combined, "没走到 CUDA 检查分支：\n" + combined
 
 
 def test_cudagraph_gate_runs_p0_03_before_p0_04():
