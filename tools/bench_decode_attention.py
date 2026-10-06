@@ -141,6 +141,60 @@ def replay_after_length_change(
         }
 
 
+def _interleaved(
+    arms: dict[str, Any], *, rounds: int, warmup: int, iters: int, torch
+) -> dict[str, Any]:
+    """Round-robin the arms so interference cannot be mistaken for an arm difference.
+
+    ★ 为什么这里必须交错：这台机器是共享的，`pareto_offload.py`（另一个项目）
+    会随时抢 GPU。顺序测每个臂时，后一个臂继承了前一个的时钟/L2/争用状态 ——
+    上一轮 grouped GEMM 就因为这个问题得到过同一个 config 相差 29% 的结果。
+    交错执行让每个臂在每一轮经历相同的邻居，另一个人跑不跑对所有臂是同等的。
+
+    报 median / MAD / 逐轮 wins：在所有轮里都赢，比"总中位数最小"强得多。
+    """
+    for fn in arms.values():
+        for _ in range(warmup):
+            fn()
+    torch.cuda.synchronize()
+    samples: dict[str, list[float]] = {k: [] for k in arms}
+    ranks: list[dict[str, int]] = []
+    for _ in range(rounds):
+        round_ms: dict[str, float] = {}
+        for name, fn in arms.items():
+            t0 = time.perf_counter()
+            for _ in range(iters):
+                fn()
+            torch.cuda.synchronize()
+            ms = (time.perf_counter() - t0) * 1000.0 / iters
+            samples[name].append(ms)
+            round_ms[name] = ms
+        order = sorted(round_ms, key=lambda n: round_ms[n])
+        ranks.append({n: order.index(n) + 1 for n in arms})
+    report: dict[str, Any] = {}
+    for name, values in samples.items():
+        ordered = sorted(values)
+        med = statistics.median(ordered)
+        report[name] = {
+            "median_ms": round(med, 5),
+            "min_ms": round(ordered[0], 5),
+            "max_ms": round(ordered[-1], 5),
+            "mad_ms": round(statistics.median([abs(v - med) for v in values]), 6),
+            "wins": sum(1 for r in ranks if r[name] == 1),
+            "rounds": len(values),
+            "samples_ms": [round(v, 5) for v in values],
+        }
+    noise = statistics.median([v["mad_ms"] for v in report.values()])
+    return {
+        "method": "interleaved round-robin",
+        "rounds": rounds,
+        "iters": iters,
+        "per_arm": report,
+        "noise_floor_ms": round(noise, 6),
+        "caveat": "可分辨的最小差异约等于 MAD；比 MAD 小的差值不要当成结论",
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--kv-len", type=int, default=1056)
@@ -255,13 +309,18 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:  # noqa: BLE001
                 result["arms"][name] = {"error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
 
+    live = {n: f for n, f in arms.items() if "error" not in result["arms"][n]}
+    interleaved = _interleaved(
+        live, rounds=args.repeats * 2, warmup=args.warmup, iters=args.iters, torch=torch
+    )
+    result["interleaved"] = {k: v for k, v in interleaved.items() if k != "per_arm"}
+    for name in live:
+        result["arms"][name]["speed"] = interleaved["per_arm"][name]
+
     for name, fn in arms.items():
         entry = result["arms"][name]
         if "error" in entry:
             continue
-        entry["speed"] = _median_time(
-            fn, warmup=args.warmup, iters=args.iters, repeats=args.repeats, torch=torch
-        )
         if not args.no_length_check:
             with torch.no_grad():
                 want = correct_for(filled1)
