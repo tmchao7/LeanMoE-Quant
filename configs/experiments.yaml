@@ -98,6 +98,21 @@ experiments:
     metrics: ["capture", "kl", "top1_agreement", "per_token_p50", "per_token_p99", "vram_split", "host_share"]
 
   # ---------- Phase 1：量化功能链路（只谈精度，不谈性能） ----------
+  # p1-02 是 p1-01 的**归因**实验：p1-01 留了两个非单调性信号没解释，
+  # 在解释清楚之前不许调用 REMEDIATION_LADDER（那会把"实现可能有缺陷"当成
+  # "RTN 精度不够"来处理）。本条不调阶梯、不动门槛，只测三层证据：
+  # 权重域误差（因）、逐层输出误差（放大在哪）、KL（果），外加噪声对照（指标的尺子）。
+  # 结果：两个信号都是"模型真敏感"，信号 1 更是"指标没有分辨力"。
+  - id: EXP-p1-02-quant-error-attribution
+    stage: "p1"
+    kind: "correctness"
+    desc: "把 p1-01 的两个非单调性信号归因到实现缺陷 vs 模型敏感"
+    hypothesis: "权重域误差随 group 单调、W4/W8 界比 ≡ 127/7；KL 的非单调来自非线性放大与指标分辨力"
+    refutation_signal: "权重域非单调 / 逐元素越界 / W4-W8 界比 ≠ 18.143 / 打包往返不一致 / 单层量化后 ordering 消失"
+    ctx: [1024]
+    metrics: ["kl", "top1_agreement", "weight_rel_fro", "layer_output_rel_err"]
+
+
   - id: EXP-p1-01-w8-w4-accuracy
     stage: "p1"
     kind: "correctness"

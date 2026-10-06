@@ -99,7 +99,9 @@ def test_sm120_expands_to_expected_total(matrix):
     # p2 从 7 变成 9：EXP-p2-05（自研 split-KV attention kernel，ctx 轴 2 个）。
     # 它与 p2-04 是**不同实现**、不同假设（一个换 HF 实现、一个换自研 kernel），
     # 所以不是同一次实验的另一个臂。ctx 轴与 p2-04 相同，便于逐点对照。
-    assert len(real) == 45
+    # p1 再 9 变 10：EXP-p1-02（归因实验，ctx=1024 单点）。它是 p1-01 的**后续**
+    # 而不是它的另一个臂 —— 回答的是"那两个非单调性信号是实现缺陷还是模型敏感"。
+    assert len(real) == 46
 
 
 def test_exp_ids_are_unique(matrix):
