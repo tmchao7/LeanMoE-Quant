@@ -209,6 +209,69 @@ def _time_arm(fn, *, warmup: int, iters: int, repeats: int, torch) -> dict[str, 
     return _summarize(wall)
 
 
+def _interleaved_compare(
+    candidates: dict[str, Any], *, rounds: int, warmup: int, iters: int, torch
+) -> dict[str, Any]:
+    """Round-robin the candidates so drift cannot be mistaken for a config difference.
+
+    ★ 为什么需要这个模式（实测踩到）：同一个 config 在第一轮 sweep 里是
+    0.11872 ms、在第二轮里是 0.15293 ms —— **同机同权重，差 29%**。
+    顺序式 sweep 里后一个 config 继承了前一个留下的 GPU 状态（时钟、L2 残留、
+    allocator），于是"最好的 config"里混进了顺序效应；第一轮 36 点的排名因此
+    不可复现。
+
+    交错执行把这个效应摊平：每个候选在每一轮都经历相同的邻居。同时报：
+      - median / min / max（跨轮）
+      - MAD（median absolute deviation）—— 可分辨率的直接量度
+      - `wins`：在多少轮里它是最快的。**每一轮都赢**比"中位数最小"强得多。
+    """
+    for fn in candidates.values():
+        for _ in range(warmup):
+            fn()
+    torch.cuda.synchronize()
+
+    samples: dict[str, list[float]] = {name: [] for name in candidates}
+    round_ranks: list[dict[str, int]] = []
+    for _ in range(rounds):
+        round_ms: dict[str, float] = {}
+        for name, fn in candidates.items():
+            t0 = time.perf_counter()
+            for _ in range(iters):
+                fn()
+            torch.cuda.synchronize()
+            ms = (time.perf_counter() - t0) * 1000.0 / iters
+            samples[name].append(ms)
+            round_ms[name] = ms
+        order = sorted(round_ms, key=lambda n: round_ms[n])
+        round_ranks.append({name: order.index(name) + 1 for name in candidates})
+
+    report: dict[str, Any] = {}
+    for name, values in samples.items():
+        ordered = sorted(values)
+        median = statistics.median(ordered)
+        mad = statistics.median([abs(v - median) for v in values]) if len(values) > 1 else 0.0
+        wins = sum(1 for ranks in round_ranks if ranks[name] == 1)
+        report[name] = {
+            "median_ms": round(median, 5),
+            "min_ms": round(ordered[0], 5),
+            "max_ms": round(ordered[-1], 5),
+            "mad_ms": round(mad, 5),
+            "rounds": len(values),
+            "wins": wins,
+            "win_rate": round(wins / len(values), 3) if values else None,
+            "samples_ms": [round(v, 5) for v in values],
+        }
+    return {
+        "method": "interleaved round-robin; reports MAD and per-round rank",
+        "rounds": rounds,
+        "iters": iters,
+        "per_config": report,
+        "per_round_ranks": round_ranks,
+        "noise_floor_ms": round(statistics.median([v["mad_ms"] for v in report.values()]), 5),
+        "caveat": "可分辨的最小差异约等于 MAD；比 MAD 小的差值不要当成结论",
+    }
+
+
 def _ncu_run(target: str, output: str) -> dict[str, Any] | None:
     """用 ncu 取 kernel 级 DRAM 证据。失败要记录，不能假装成功。"""
     ncu = _find_tool("ncu")
@@ -271,6 +334,12 @@ def main(argv: list[str] | None = None) -> int:
         help="围绕第一轮赢家收紧地再扫一次（验证主因是 grid 大小）",
     )
     ap.add_argument("--ncu", action="store_true", help="用 ncu 取 kernel 级 DRAM 证据")
+    ap.add_argument(
+        "--compare",
+        action="store_true",
+        help="交错对照候选 config（消除顺序效应，报 MAD 与逐轮排名）",
+    )
+    ap.add_argument("--compare-rounds", type=int, default=7)
     ap.add_argument("--no-ncu", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--print-ncu", action="store_true", help="只打印 ncu 命令")
     ap.add_argument("--json", default=None)
@@ -487,6 +556,51 @@ def main(argv: list[str] | None = None) -> int:
                 else None
             ),
         }
+
+    if args.compare:
+        # 候选来自两轮 sweep，但**不按 sweep 的排名**取 —— 那个排名被顺序效应污染了
+        # （同一 config 在两轮里差 29%）。这里只取"方向明确"的三类：
+        #   1. 原默认（最慢的一角，作为对照）
+        #   2. down_sum SPLIT_K >= 4（第一轮前 6 名共有的性质）
+        #   3. 再加 gate_up_act BLOCK_K=128（第二轮的赢家区）
+        candidates_cfg = {
+            "default_BN64x64_SK1__down128x64_SK1": {
+                "gate_up_act": {"BLOCK_N": 64, "BLOCK_K": 64, "SPLIT_K": 1, "num_warps": 4},
+                "down_sum": {"BLOCK_N": 128, "BLOCK_K": 64, "SPLIT_K": 1, "num_warps": 4},
+            },
+            "down_only_SK4__BN64x128_w8": {
+                "gate_up_act": {"BLOCK_N": 64, "BLOCK_K": 64, "SPLIT_K": 1, "num_warps": 4},
+                "down_sum": {"BLOCK_N": 64, "BLOCK_K": 128, "SPLIT_K": 4, "num_warps": 8},
+            },
+            "sweep1_winner__BN64x128_w8_down_SK4": {
+                "gate_up_act": {"BLOCK_N": 64, "BLOCK_K": 128, "SPLIT_K": 1, "num_warps": 8},
+                "down_sum": {"BLOCK_N": 64, "BLOCK_K": 128, "SPLIT_K": 4, "num_warps": 4},
+            },
+            "refine_winner__BN32x128_w4_down_SK4_w8": {
+                "gate_up_act": {"BLOCK_N": 32, "BLOCK_K": 128, "SPLIT_K": 1, "num_warps": 4},
+                "down_sum": {"BLOCK_N": 64, "BLOCK_K": 128, "SPLIT_K": 4, "num_warps": 8},
+            },
+        }
+        candidates = {name: arm("grouped", cfg) for name, cfg in candidates_cfg.items()}
+        candidates["GATHER_BASELINE"] = arm("gather")
+        result["compare"] = {
+            "candidates": candidates_cfg,
+            "grouped_only": _interleaved_compare(
+                {k: v for k, v in candidates.items() if k != "GATHER_BASELINE"},
+                rounds=args.compare_rounds,
+                warmup=args.warmup,
+                iters=args.iters,
+                torch=torch,
+            ),
+        }
+        # 再和 gather 基线交错一次，得到"相对基线"的可分辨倍数
+        result["compare"]["vs_gather"] = _interleaved_compare(
+            candidates,
+            rounds=args.compare_rounds,
+            warmup=args.warmup,
+            iters=args.iters,
+            torch=torch,
+        )
 
     if args.ncu and not args.no_ncu:
         result["ncu"] = {
