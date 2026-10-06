@@ -94,6 +94,28 @@ _SWEEP = {
     ],
 }
 
+# ★ 第一轮 sweep 的第 6 名之后**全部**有 down_sum.SPLIT_K == 1，而前 6 名
+#   **全部**有 SPLIT_K >= 2。原因可以直接算出来：
+#       down_sum 的 grid = (cdiv(hidden, BLOCK_N), SPLIT_K)
+#   BLOCK_N=128、SK=1 时是 (16, 1) —— **只有 16 个 program 落在 170 个 SM 上**
+#   （9% occupancy）。BLOCK_N=256 更差：(8, 1)。
+#   第二轮围绕赢家收紧，并检验"SK 是主因"还是巧合。
+_SWEEP_REFINE = {
+    "gate_up_act": [
+        {"BLOCK_N": 64, "BLOCK_K": 128, "SPLIT_K": 1, "num_warps": 8},
+        {"BLOCK_N": 64, "BLOCK_K": 128, "SPLIT_K": 1, "num_warps": 16},
+        {"BLOCK_N": 32, "BLOCK_K": 128, "SPLIT_K": 1, "num_warps": 4},
+        {"BLOCK_N": 32, "BLOCK_K": 128, "SPLIT_K": 2, "num_warps": 4},
+    ],
+    "down_sum": [
+        {"BLOCK_N": 64, "BLOCK_K": 128, "SPLIT_K": 4, "num_warps": 4},
+        {"BLOCK_N": 64, "BLOCK_K": 128, "SPLIT_K": 4, "num_warps": 8},
+        {"BLOCK_N": 64, "BLOCK_K": 128, "SPLIT_K": 8, "num_warps": 4},
+        {"BLOCK_N": 32, "BLOCK_K": 128, "SPLIT_K": 4, "num_warps": 4},
+        {"BLOCK_N": 64, "BLOCK_K": 64, "SPLIT_K": 8, "num_warps": 4},
+    ],
+}
+
 
 def _find_tool(name: str) -> str | None:
     """同 `tools.probe_machine._find_tool`：ncu 常常不在 PATH 上。"""
@@ -243,6 +265,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--repeats", type=int, default=3)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--sweep", action="store_true", help="扫参数空间并报每个 config 的时间")
+    ap.add_argument(
+        "--sweep-refine",
+        action="store_true",
+        help="围绕第一轮赢家收紧地再扫一次（验证主因是 grid 大小）",
+    )
     ap.add_argument("--ncu", action="store_true", help="用 ncu 取 kernel 级 DRAM 证据")
     ap.add_argument("--no-ncu", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--print-ncu", action="store_true", help="只打印 ncu 命令")
@@ -424,14 +451,16 @@ def main(argv: list[str] | None = None) -> int:
                 "gate"
             ] = "INVALID：correctness 未过（见 result.correctness）—— 时间对照无意义"
 
-    if args.sweep:
+    if args.sweep or args.sweep_refine:
+        grid_a = _SWEEP_REFINE["gate_up_act"] if args.sweep_refine else _SWEEP["gate_up_act"]
+        grid_d = _SWEEP_REFINE["down_sum"] if args.sweep_refine else _SWEEP["down_sum"]
         default_cfg = {
             "gate_up_act": {"BLOCK_N": 64, "BLOCK_K": 64, "SPLIT_K": 1, "num_warps": 4},
             "down_sum": {"BLOCK_N": 128, "BLOCK_K": 64, "SPLIT_K": 1, "num_warps": 4},
         }
         sweep = []
-        for ga in _SWEEP["gate_up_act"]:
-            for ds in _SWEEP["down_sum"]:
+        for ga in grid_a:
+            for ds in grid_d:
                 cfg = {"gate_up_act": dict(ga), "down_sum": dict(ds)}
                 stats = _time_arm(
                     arm("grouped", cfg),
@@ -447,6 +476,8 @@ def main(argv: list[str] | None = None) -> int:
                 "参数敏感性本身就是结果（lemoq.kernels.autotune 的要求）；"
                 "报全部与最好，不只报最好的那个"
             ),
+            "refine": bool(args.sweep_refine),
+            "grid": {"gate_up_act": grid_a, "down_sum": grid_d},
             "rows": sweep,
             "best": sweep[0] if sweep else None,
             "default": next((r for r in sweep if r["config"] == default_cfg), None),
