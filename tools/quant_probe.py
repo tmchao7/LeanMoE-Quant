@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import statistics
 import sys
 import time
 import zlib
@@ -363,6 +364,21 @@ def build_arms(
                 ),
             },
         )
+    # ---- EXP-p1-01 的 9 格，用来把门搬到真实 prompt 集上重测 ----
+    # 注意 w8a8 的激活是 fake-quant（QuantLinear 内做），所以它测的是"权重+激活"两个来源。
+    for scheme in ("w8a8", "w8a16", "w4a16"):
+        for g in (32, 64, 128):
+            add(
+                "prompt_set",
+                {
+                    "id": "%s_attn_experts_g%d" % (scheme, g),
+                    "kind": "rtn",
+                    "scheme": scheme,
+                    "group_size": g,
+                    "targets": ["attention", "experts"],
+                    "layers": None,
+                },
+            )
     add("noop", {"id": "noop_a", "kind": "noop", "targets": [], "layers": None})
     add("noop", {"id": "noop_b", "kind": "noop", "targets": [], "layers": None})
     add("noop", {"id": "noop_final", "kind": "noop", "targets": [], "layers": None})
@@ -663,6 +679,23 @@ def main(argv: list[str] | None = None) -> int:
         "--prompt-cache", default=None, help="wikitext token id 缓存（与 tools/quant_ppl 共用）"
     )
     ap.add_argument(
+        "--prompt-windows",
+        type=int,
+        default=1,
+        help="★ 把 KL 门做成 **prompt 集**：连续 N 个真实窗口（步长 --prompt-stride），跨窗口报 mean/sd/min/max",
+    )
+    ap.add_argument("--prompt-stride", type=int, default=None, help="窗口步长，默认 = --ctx")
+    ap.add_argument(
+        "--include-ones-control",
+        action="store_true",
+        help="再挂一个退化对照（1024 个 token id=1），用于并排展示 EXP-p1-01 的口径",
+    )
+    ap.add_argument(
+        "--kl-gate-w8", type=float, default=0.01, help="docs/METRICS.md §1 的门槛，不在本工具里改"
+    )
+    ap.add_argument("--kl-gate-w4", type=float, default=0.05, help="同上")
+    ap.add_argument("--top1-gate", type=float, default=0.95, help="同上")
+    ap.add_argument(
         "--prompt-offset",
         type=int,
         default=0,
@@ -706,43 +739,36 @@ def main(argv: list[str] | None = None) -> int:
     device = "cuda"
     model, _ = _load_model(args.model, "float16", device)
     n_layers = int(model.config.num_hidden_layers)
-    if args.prompt_source == "wikitext":
-        if not args.prompt_cache or not os.path.exists(args.prompt_cache):
-            print(
-                "--prompt-source wikitext 需要 --prompt-cache 指向已缓存的 token id",
-                file=sys.stderr,
-            )
-            return 2
-        cached = torch.load(args.prompt_cache, weights_only=True)
-        if cached.numel() < args.ctx:
-            print("缓存的 token 数 %d < ctx %d" % (int(cached.numel()), args.ctx), file=sys.stderr)
-            return 2
-        start = int(args.prompt_offset)
-        if cached.numel() < start + args.ctx:
-            print(
-                "缓存 token 不够：%d < offset %d + ctx %d" % (int(cached.numel()), start, args.ctx),
-                file=sys.stderr,
-            )
-            return 2
-        ids = cached[start : start + args.ctx].view(1, -1).to(device)
-    else:
-        # EXP-p1-01/02 的口径：1024 个 token id=1。保留它以便逐位复现历史数字。
-        ids = torch.full((1, args.ctx), 1, dtype=torch.long, device=device)
 
-    print("=== 取轨迹（fp16 贪心 %d 步）===" % args.max_new_tokens, flush=True)
-    tokens: list[int] = []
-    with torch.no_grad():
-        out = model(ids, use_cache=True)
-        past = out.past_key_values
-        tok = out.logits[:, -1:, :].argmax(dim=-1)
-        for _ in range(args.max_new_tokens):
-            tokens.append(int(tok.item()))
-            out = model(tok, past_key_values=past, use_cache=True)
-            past = out.past_key_values
-            tok = out.logits[:, -1:, :].argmax(dim=-1)
-    reference_logits = teacher_forced_logits(model, ids, tokens, device=device)
-    reference_hidden = _capture_hidden(model, ids, n_layers=n_layers)
-    torch.cuda.synchronize()
+    def _prompt_ids(source: str, offset: int) -> Any:
+        if source == "ones":
+            # EXP-p1-01/02 的口径：1024 个 token id=1。保留它作为**退化对照**。
+            return torch.full((1, args.ctx), 1, dtype=torch.long, device=device)
+        if not args.prompt_cache or not os.path.exists(args.prompt_cache):
+            raise SystemExit("--prompt-source wikitext 需要 --prompt-cache 指向已缓存的 token id")
+        cached = torch.load(args.prompt_cache, weights_only=True)
+        if cached.numel() < offset + args.ctx:
+            raise SystemExit(
+                "缓存 token 不够：%d < offset %d + ctx %d" % (int(cached.numel()), offset, args.ctx)
+            )
+        return cached[offset : offset + args.ctx].view(1, -1).to(device)
+
+    # ★ prompt **集**：METRICS.md 说的是"固定 prompt 集上的逐位置 KL 平均"。
+    #   单个窗口的估计本身有 5.6x 的窗口间散布（见 EXP-p1-03），所以门必须建在集合上。
+    stride = int(args.prompt_stride or args.ctx)
+    prompts: list[tuple[str, Any]] = []
+    if args.prompt_source == "wikitext":
+        for i in range(int(args.prompt_windows)):
+            prompts.append(
+                ("w%d" % i, _prompt_ids("wikitext", int(args.prompt_offset) + i * stride))
+            )
+    else:
+        prompts.append(("ones", _prompt_ids("ones", 0)))
+    if args.include_ones_control and args.prompt_source == "wikitext":
+        prompts.append(("ones_control", _prompt_ids("ones", 0)))
+    print(
+        "prompt 集: %d 个窗口 (%s)" % (len(prompts), ", ".join(p[0] for p in prompts)), flush=True
+    )
 
     result: dict[str, Any] = {
         "tool": "tools/quant_probe.py",
@@ -751,22 +777,14 @@ def main(argv: list[str] | None = None) -> int:
         "max_new_tokens": args.max_new_tokens,
         "n_layers": n_layers,
         "prompt_source": args.prompt_source,
-        "prompt_first_tokens": [int(x) for x in ids[0, :8].tolist()],
-        "trajectory_tokens": tokens,
+        "prompt_windows": len(prompts),
+        "prompt_labels": [p[0] for p in prompts],
+        "prompt_stride": stride,
         "step_ratio_w4_over_w8": STEP_RATIO_W4_OVER_W8,
-        # 自检：参考与自己的 KL 必须是 0 —— 这是"指标实现没写错"的最小断言
-        "reference_self_kl": float(compare_logits(reference_logits, reference_logits)["kl"]),
+        "gates": {"kl_w8": args.kl_gate_w8, "kl_w4": args.kl_gate_w4, "top1": args.top1_gate},
+        "windows": {},
         "arms": {},
     }
-    if args.published_summary and os.path.exists(args.published_summary):
-        with open(args.published_summary, encoding="utf-8") as fh:
-            published = json.load(fh)
-        ref_tokens = published.get("trajectory_tokens")
-        result["published_summary"] = args.published_summary
-        result["trajectory_matches_published"] = ref_tokens == tokens
-        result["published_w8a16_kl"] = {
-            k.split("__")[-1]: v.get("kl") for k, v in (published.get("cells") or {}).items()
-        }
 
     # 所有臂可能用到的 Linear：快照一次，供全部 arm 恢复
     all_names: list[str] = []
@@ -807,129 +825,242 @@ def main(argv: list[str] | None = None) -> int:
             with open(args.json, "w", encoding="utf-8") as fh:
                 json.dump(result, fh, ensure_ascii=False, indent=2, default=str)
 
-    for arm in arms:
-        t0 = time.perf_counter()
-        moved = _restore(model, snapshot)
-        entry: dict[str, Any] = {
-            "kind": arm["kind"],
-            "group": arm["group"],
-            "restored_modules": moved,
-        }
-        # ★ 必须在扰动**之前**收集名字：`quantize_model` 会把 nn.Linear 换成
-        #   QuantLinear（**不是** nn.Linear 的子类），之后再按类型找就一个也找不到 ——
-        #   那样 weight_domain 会静默变成 0，而 0 看起来像"没有误差"。
-        arm_targets = arm.get("targets") or ["attention"]
-        if arm["kind"] == "mixed":
-            arm_targets = sorted({t for entry in arm["plan"] for t in entry["targets"]})
-        arm_names = _candidate_names(model, targets=arm_targets, layers=arm.get("layers"))
-        if arm.get("filter"):
-            arm_names = [n for n in arm_names if arm["filter"] in n]
-            entry["filter"] = arm["filter"]
-        entry["n_target_tensors"] = len(arm_names)
-        try:
-            if arm["kind"] == "rtn":
-                spec = SchemeSpec.from_flags(
-                    arm["scheme"], arm["group_size"], targets=tuple(arm["targets"])
-                )
-                _, qreport = (
-                    quantize_model(model, spec, layers=arm.get("layers"), names=arm_names or None)
-                    if arm.get("filter")
-                    else quantize_model(model, spec, layers=arm.get("layers"))
-                )
-                entry["spec"] = qreport.spec
-                entry["replaced"] = qreport.replaced
-                entry["realized_bytes_total"] = qreport.to_dict()["realized_bytes_total"]
-                entry["realized_bytes_by_target"] = qreport.to_dict()["realized_bytes_by_target"]
-                entry["weight_domain"] = _weight_domain_stats(
-                    snapshot,
-                    arm_names,
-                    bits=int(spec.weight_bits),
-                    group_size=int(arm["group_size"]),
-                )
-            elif arm["kind"] == "mixed":
-                sub_reports = []
-                for entry in arm["plan"]:
-                    spec = SchemeSpec.from_flags(
-                        entry["scheme"], entry["group_size"], targets=tuple(entry["targets"])
-                    )
-                    names = [n for n in arm_names if entry["filter"] in n]
-                    if not names:
-                        raise ValueError("mixed 子计划 %s 没匹配到张量" % entry)
-                    _, sub = quantize_model(model, spec, names=names)
-                    sub_reports.append(
-                        {
-                            "filter": entry["filter"],
-                            "scheme": entry["scheme"],
-                            "group_size": entry["group_size"],
-                            "replaced": sub.replaced,
-                            "bytes": sub.to_dict()["realized_bytes_by_target"],
-                            "n_names": len(names),
-                        }
-                    )
-                entry["plan"] = sub_reports
-                entry["realized_bytes_total"] = int(
-                    sum(
-                        bucket["total_bytes"]
-                        for report in sub_reports
-                        for bucket in report["bytes"].values()
-                    )
-                )
-            elif arm["kind"] == "noise":
-                entry["weight_domain"] = _inject_noise(
-                    model,
-                    arm_names,
-                    sigma_table,
-                    lam=float(arm["lam"]),
-                    direction=int(arm["direction"]),
-                )
-                entry["lam"] = float(arm["lam"])
-                entry["direction"] = int(arm["direction"])
-                entry["sigma_source"] = "W8A16 g128 rmse per attention tensor (measured)"
-            elif arm["kind"] == "noop":
-                entry["note"] = "恢复但不扰动：KL 必须**恰好** 0.0，否则恢复不干净"
-            else:
-                raise ValueError("unknown kind %r" % arm["kind"])
-
-            entry.update(
-                _measure(
-                    model,
-                    ids=ids,
-                    tokens=tokens,
-                    reference_logits=reference_logits,
-                    reference_hidden=reference_hidden,
-                    device=device,
-                    n_layers=n_layers,
-                )
-            )
-        except Exception as exc:  # noqa: BLE001
-            entry["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:300])
-        entry["seconds"] = round(time.perf_counter() - t0, 2)
-        result["arms"][arm["id"]] = entry
-        _write()
+    for label, ids in prompts:
         print(
-            "  %-36s kl=%-12s top1=%-6s layer0_rel=%-10s (%.1f s)"
-            % (
-                arm["id"],
-                round(entry.get("kl", float("nan")), 6) if entry.get("kl") is not None else "ERR",
-                entry.get("top1_agreement"),
-                (
-                    round(entry.get("layer_output_rel_err", [0.0])[0], 6)
-                    if entry.get("layer_output_rel_err")
-                    else "-"
+            "=== 窗口 %s: 取轨迹（fp16 贪心 %d 步）===" % (label, args.max_new_tokens), flush=True
+        )
+        tokens: list[int] = []
+        with torch.no_grad():
+            out = model(ids, use_cache=True)
+            past = out.past_key_values
+            tok = out.logits[:, -1:, :].argmax(dim=-1)
+            for _ in range(args.max_new_tokens):
+                tokens.append(int(tok.item()))
+                out = model(tok, past_key_values=past, use_cache=True)
+                past = out.past_key_values
+                tok = out.logits[:, -1:, :].argmax(dim=-1)
+        reference_logits = teacher_forced_logits(model, ids, tokens, device=device)
+        reference_hidden = _capture_hidden(model, ids, n_layers=n_layers)
+        torch.cuda.synchronize()
+        result["windows"][label] = {
+            "prompt_first_tokens": [int(x) for x in ids[0, :8].tolist()],
+            "trajectory_tokens": tokens,
+            # 自检：参考与自己的 KL 必须是 0 —— 指标实现没写错的最小断言
+            "reference_self_kl": float(compare_logits(reference_logits, reference_logits)["kl"]),
+        }
+
+        for arm in arms:
+
+            t0 = time.perf_counter()
+            moved = _restore(model, snapshot)
+            rec = result["arms"].setdefault(arm["id"], {"kind": arm["kind"], "group": arm["group"]})
+            rec.setdefault("windows", {})
+            entry: dict[str, Any] = {"restored_modules": moved}
+            # ★ 必须在扰动**之前**收集名字：`quantize_model` 会把 nn.Linear 换成
+            #   QuantLinear（**不是** nn.Linear 的子类），之后再按类型找就一个也找不到 ——
+            #   那样 weight_domain 会静默变成 0，而 0 看起来像"没有误差"。
+            arm_targets = arm.get("targets") or ["attention"]
+            if arm["kind"] == "mixed":
+                arm_targets = sorted({t for entry in arm["plan"] for t in entry["targets"]})
+            arm_names = _candidate_names(model, targets=arm_targets, layers=arm.get("layers"))
+            if arm.get("filter"):
+                arm_names = [n for n in arm_names if arm["filter"] in n]
+                entry["filter"] = arm["filter"]
+            entry["n_target_tensors"] = len(arm_names)
+            try:
+                if arm["kind"] == "rtn":
+                    spec = SchemeSpec.from_flags(
+                        arm["scheme"], arm["group_size"], targets=tuple(arm["targets"])
+                    )
+                    _, qreport = (
+                        quantize_model(
+                            model, spec, layers=arm.get("layers"), names=arm_names or None
+                        )
+                        if arm.get("filter")
+                        else quantize_model(model, spec, layers=arm.get("layers"))
+                    )
+                    entry["spec"] = qreport.spec
+                    entry["replaced"] = qreport.replaced
+                    entry["realized_bytes_total"] = qreport.to_dict()["realized_bytes_total"]
+                    entry["realized_bytes_by_target"] = qreport.to_dict()[
+                        "realized_bytes_by_target"
+                    ]
+                    entry["weight_domain"] = _weight_domain_stats(
+                        snapshot,
+                        arm_names,
+                        bits=int(spec.weight_bits),
+                        group_size=int(arm["group_size"]),
+                    )
+                elif arm["kind"] == "mixed":
+                    sub_reports = []
+                    # ★ 循环变量不能叫 entry：那会覆盖外层的 arm entry，
+                    #   于是 plan/字节/测量结果全写进了最后一个子计划字典（记录被污染）。
+                    for sub_plan in arm["plan"]:
+                        spec = SchemeSpec.from_flags(
+                            sub_plan["scheme"],
+                            sub_plan["group_size"],
+                            targets=tuple(sub_plan["targets"]),
+                        )
+                        names = [n for n in arm_names if sub_plan["filter"] in n]
+                        if not names:
+                            raise ValueError("mixed 子计划 %s 没匹配到张量" % sub_plan)
+                        _, sub = quantize_model(model, spec, names=names)
+                        sub_reports.append(
+                            {
+                                "filter": sub_plan["filter"],
+                                "scheme": sub_plan["scheme"],
+                                "group_size": sub_plan["group_size"],
+                                "replaced": sub.replaced,
+                                "bytes": sub.to_dict()["realized_bytes_by_target"],
+                                "n_names": len(names),
+                            }
+                        )
+                    entry["plan"] = sub_reports
+                    entry["realized_bytes_total"] = int(
+                        sum(
+                            bucket["total_bytes"]
+                            for report in sub_reports
+                            for bucket in report["bytes"].values()
+                        )
+                    )
+                elif arm["kind"] == "noise":
+                    entry["weight_domain"] = _inject_noise(
+                        model,
+                        arm_names,
+                        sigma_table,
+                        lam=float(arm["lam"]),
+                        direction=int(arm["direction"]),
+                    )
+                    entry["lam"] = float(arm["lam"])
+                    entry["direction"] = int(arm["direction"])
+                    entry["sigma_source"] = "W8A16 g128 rmse per attention tensor (measured)"
+                elif arm["kind"] == "noop":
+                    entry["note"] = "恢复但不扰动：KL 必须**恰好** 0.0，否则恢复不干净"
+                else:
+                    raise ValueError("unknown kind %r" % arm["kind"])
+
+                entry.update(
+                    _measure(
+                        model,
+                        ids=ids,
+                        tokens=tokens,
+                        reference_logits=reference_logits,
+                        reference_hidden=reference_hidden,
+                        device=device,
+                        n_layers=n_layers,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                entry["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:300])
+            entry["seconds"] = round(time.perf_counter() - t0, 2)
+            entry["window"] = label
+            rec["windows"][label] = entry
+            _write()
+            print(
+                "  [%s] %-30s kl=%-12s top1=%-6s layer0_rel=%-10s (%.1f s)"
+                % (
+                    label,
+                    arm["id"],
+                    (
+                        round(entry.get("kl", float("nan")), 6)
+                        if entry.get("kl") is not None
+                        else "ERR"
+                    ),
+                    entry.get("top1_agreement"),
+                    (
+                        round(entry.get("layer_output_rel_err", [0.0])[0], 6)
+                        if entry.get("layer_output_rel_err")
+                        else "-"
+                    ),
+                    entry["seconds"],
                 ),
-                entry["seconds"],
+                flush=True,
+            )
+
+    _restore(model, snapshot)
+
+    # ---- 跨窗口聚合：门建在 prompt **集** 上（METRICS.md §1 的口径）----
+    first_label = next(iter(result["windows"]))
+    result["trajectory_tokens"] = result["windows"][first_label]["trajectory_tokens"]
+    result["prompt_first_tokens"] = result["windows"][first_label]["prompt_first_tokens"]
+    result["reference_self_kl"] = result["windows"][first_label]["reference_self_kl"]
+
+    print("\n=== 跨窗口聚合（ones* 是退化对照，不进 mean）===")
+    for arm_id, rec in result["arms"].items():
+        rows = rec.get("windows") or {}
+        real = {k: v for k, v in rows.items() if not k.startswith("ones")}
+        kls = [v["kl"] for v in real.values() if v.get("kl") is not None]
+        if not kls:
+            continue
+        mean = sum(kls) / len(kls)
+        top1s = [v["top1_agreement"] for v in real.values() if v.get("top1_agreement") is not None]
+        ones_kl = next((v.get("kl") for k, v in rows.items() if k.startswith("ones")), None)
+        rec["aggregate"] = {
+            "n_windows": len(kls),
+            "kl_mean": mean,
+            "kl_sd": statistics.pstdev(kls) if len(kls) > 1 else 0.0,
+            "kl_min": min(kls),
+            "kl_max": max(kls),
+            "kl_spread_x": (max(kls) / min(kls)) if min(kls) > 0 else None,
+            "top1_min": min(top1s) if top1s else None,
+            "ones_control_kl": ones_kl,
+        }
+        bits = 8
+        for v in real.values():
+            wb = (v.get("spec") or {}).get("weight_bits")
+            if wb:
+                bits = int(wb)
+                break
+        th = args.kl_gate_w8 if bits == 8 else args.kl_gate_w4
+        agg = rec["aggregate"]
+        rec["gate"] = {
+            "weight_bits": bits,
+            "kl_max": th,
+            "top1_min_required": args.top1_gate,
+            "kl_mean_pass": mean < th,
+            "all_windows_pass": all(k < th for k in kls),
+            "top1_min_pass": (agg["top1_min"] is None) or (agg["top1_min"] >= args.top1_gate),
+        }
+        if ones_kl is not None:
+            rec["gate"]["ones_control_pass"] = ones_kl < th
+        print(
+            "  %-30s kl mean=%-11.6g sd=%-9.4g [min %.6g max %.6g] spread=%-7s ones=%-11s mean_pass=%-5s all_pass=%s"
+            % (
+                arm_id,
+                mean,
+                agg["kl_sd"],
+                agg["kl_min"],
+                agg["kl_max"],
+                ("%.2fx" % agg["kl_spread_x"]) if agg["kl_spread_x"] else "-",
+                ("%.6g" % ones_kl) if ones_kl is not None else "-",
+                rec["gate"]["kl_mean_pass"],
+                rec["gate"]["all_windows_pass"],
             ),
             flush=True,
         )
 
-    _restore(model, snapshot)
     final_noop = next((a["id"] for a in arms if a["id"] == "noop_final"), None)
     if final_noop:
+        rows = (result["arms"].get(final_noop) or {}).get("windows") or {}
         result["restore_verified_by"] = {
             "arm": final_noop,
-            "kl": result["arms"].get(final_noop, {}).get("kl"),
-            "is_exact": result["arms"].get(final_noop, {}).get("kl") == 0.0,
+            "per_window_kl": {k: v.get("kl") for k, v in rows.items()},
+            "is_exact": all(v.get("kl") == 0.0 for v in rows.values()) if rows else None,
         }
+
+    if args.published_summary and os.path.exists(args.published_summary):
+        with open(args.published_summary, encoding="utf-8") as fh:
+            published_payload = json.load(fh)
+        ones_win = result["windows"].get("ones") or result["windows"].get("ones_control")
+        if ones_win:
+            result["published_summary"] = args.published_summary
+            result["trajectory_matches_published"] = (
+                published_payload.get("trajectory_tokens") == ones_win["trajectory_tokens"]
+            )
+            result["published_kl"] = {
+                k.split("__")[-1]: v.get("kl")
+                for k, v in (published_payload.get("cells") or {}).items()
+            }
     _write()
     print("\nwrote %s" % args.json if args.json else "", file=sys.stderr)
     return 0
