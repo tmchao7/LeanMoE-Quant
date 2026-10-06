@@ -261,6 +261,8 @@ def _inject_noise(
     """`w ← w + λ·σ·ε`（ε 用 CPU 生成，便于事后**精确**复算权重域统计）。"""
     import torch  # noqa: PLC0415
 
+    if not names:
+        raise ValueError("noise: 没有任何张量")
     sq = 0.0
     fro2 = 0.0
     for name in names:
@@ -289,6 +291,8 @@ def _weight_domain_stats(
     """
     from tools.quant_error_audit import error_stats  # noqa: PLC0415
 
+    if not names:
+        raise ValueError("weight_domain: 没有任何张量 —— 名字必须在**量化之前**收集")
     stride = max(1, len(names) // max_tensors)
     picked = names[::stride]
     total_sq = 0.0
@@ -537,6 +541,13 @@ def main(argv: list[str] | None = None) -> int:
             "group": arm["group"],
             "restored_modules": moved,
         }
+        # ★ 必须在扰动**之前**收集名字：`quantize_model` 会把 nn.Linear 换成
+        #   QuantLinear（**不是** nn.Linear 的子类），之后再按类型找就一个也找不到 ——
+        #   那样 weight_domain 会静默变成 0，而 0 看起来像"没有误差"。
+        arm_names = _candidate_names(
+            model, targets=arm.get("targets") or ["attention"], layers=arm.get("layers")
+        )
+        entry["n_target_tensors"] = len(arm_names)
         try:
             if arm["kind"] == "rtn":
                 spec = SchemeSpec.from_flags(
@@ -548,15 +559,14 @@ def main(argv: list[str] | None = None) -> int:
                 entry["realized_bytes_total"] = qreport.to_dict()["realized_bytes_total"]
                 entry["weight_domain"] = _weight_domain_stats(
                     snapshot,
-                    _candidate_names(model, targets=arm["targets"], layers=arm.get("layers")),
+                    arm_names,
                     bits=int(spec.weight_bits),
                     group_size=int(arm["group_size"]),
                 )
             elif arm["kind"] == "noise":
-                names = _candidate_names(model, targets=arm["targets"], layers=arm.get("layers"))
                 entry["weight_domain"] = _inject_noise(
                     model,
-                    names,
+                    arm_names,
                     sigma_table,
                     lam=float(arm["lam"]),
                     direction=int(arm["direction"]),
