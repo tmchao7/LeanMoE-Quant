@@ -201,6 +201,20 @@ experiments:
     ctx: [1024, 4096]
     metrics: ["per_token_p50", "per_token_p99", "bw_attainment", "host_share", "ncu_metrics"]
 
+  # p1-03 是 REMEDIATION_LADDER 第 4 档（敏感度驱动的混合位宽），输入来自 p1-02 的
+  # 逐投影实测（q/k 在 W4 只有 0.0017–0.0019，v/o 各 4.05–4.06）。
+  # ★ 它同时产出两个副产品：仓库里第一次真正实现的 PPL 指标，以及一个**仪器更正** ——
+  # p1-01/p1-02 的 KL 用的是 1024 个 token id=1 的退化输入；换成真实 prompt 后
+  # W8A16 从"9 格全 FAIL"变成"全部在门内"。
+  - id: EXP-p1-03-quant-mixed-bits
+    stage: "p1"
+    kind: "correctness"
+    desc: "混合位宽（q/k W4 + v/o W8）+ PPL 交叉验证 + KL 门的 prompt 口径更正"
+    hypothesis: "q/k 可降 W4 而 v/o 必须留 W8；PPL 与 KL 排序一致；专家 W4 仍是失败点"
+    refutation_signal: "q/k W4 显著抬高 KL（逐投影结论不能外推）；或 PPL 与 KL 排序矛盾（说明指标有问题）"
+    ctx: [1024]
+    metrics: ["kl", "top1_agreement", "ppl", "ppl_delta", "weight_bytes"]
+
   - id: EXP-p2-01-dequant-fusion
     stage: "p2"
     kind: "perf"

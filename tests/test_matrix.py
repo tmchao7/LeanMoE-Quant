@@ -101,7 +101,8 @@ def test_sm120_expands_to_expected_total(matrix):
     # 所以不是同一次实验的另一个臂。ctx 轴与 p2-04 相同，便于逐点对照。
     # p1 再 9 变 10：EXP-p1-02（归因实验，ctx=1024 单点）。它是 p1-01 的**后续**
     # 而不是它的另一个臂 —— 回答的是"那两个非单调性信号是实现缺陷还是模型敏感"。
-    assert len(real) == 46
+    # p1 再 10 变 11：EXP-p1-03（混合位宽 + PPL + prompt 口径更正，ctx=1024 单点）。
+    assert len(real) == 47
 
 
 def test_exp_ids_are_unique(matrix):
