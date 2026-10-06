@@ -336,6 +336,45 @@ def main(argv: list[str] | None = None) -> int:
         )
     }
 
+    # ★ 时间之前先确认两条臂算的是**同一个东西**。
+    #   一个快的错 kernel 不是结果 —— 没有这一步，1.4x 的"加速"可能只是它少算了。
+    with torch.no_grad():
+        y_gather = static_moe_forward(x, router, fused, top_k=shape["top_k"], impl="gather")[
+            0
+        ].float()
+        y_grouped = static_moe_forward(x, router, fused, top_k=shape["top_k"], impl="grouped")[
+            0
+        ].float()
+        # fp64 oracle：K1 门的参照只能是它，不是另一条 fp16 路径
+        from lemoq.kernels.moe_grouped import static_moe_forward_grouped_reference
+
+        y_oracle = static_moe_forward_grouped_reference(
+            x.float(),
+            router.float(),
+            fused.to(torch.float64),
+            top_k=shape["top_k"],
+        )[0]
+    err_g = float((y_gather - y_oracle).abs().max())
+    err_q = float((y_grouped - y_oracle).abs().max())
+    span = float(y_oracle.abs().max()) or 1.0
+    from lemoq.kernels.moe_grouped import PARITY_GATE
+
+    result["correctness"] = {
+        "note": "两条臂都必须先和 fp64 oracle 对齐；K1 门用的是相对基线的误差，不是魔数",
+        "max_abs_err_vs_fp64_gather": err_g,
+        "max_abs_err_vs_fp64_grouped": err_q,
+        "oracle_absmax": span,
+        "rel_err_gather": round(err_g / span, 6),
+        "rel_err_grouped": round(err_q / span, 6),
+        "grouped_within_slack": bool(err_q <= err_g * PARITY_GATE["tol_slack"] + 1e-6),
+        "gather_grouped_max_abs_diff": float((y_gather - y_grouped).abs().max()),
+    }
+    if not result["correctness"]["grouped_within_slack"]:
+        result["verdict_preliminary"] = (
+            "grouped 相对 fp64 的误差超过基线的 %.1fx —— 时间数字不可用，先修正确性"
+            % PARITY_GATE["tol_slack"]
+        )
+
     # 字节账（纯算术，与 benchmarks/attribution.py 同源，这里独立再算一遍以便自洽）
     gate_up_bytes = shape["top_k"] * 2 * shape["ffn"] * shape["hidden"] * 2
     down_bytes = shape["top_k"] * shape["hidden"] * shape["ffn"] * 2
@@ -351,9 +390,11 @@ def main(argv: list[str] | None = None) -> int:
             "ideal": round(ideal / (bw * 1e9) * 1000.0, 5),
             "gather_path_driven": round(3 * ideal / (bw * 1e9) * 1000.0, 5),
         }
-        for arm in ("gather", "grouped"):
-            p50 = result[arm]["wall_ms"]["p50"]
-            result[arm]["attainment"] = {
+        # ★ 变量名不能叫 `arm` —— 那会遮蔽上面的 `arm()` 闭包，随后 sweep 调用
+        #   `arm("grouped", cfg)` 就会报 "str object is not callable"（实测踩到）。
+        for arm_name in ("gather", "grouped"):
+            p50 = result[arm_name]["wall_ms"]["p50"]
+            result[arm_name]["attainment"] = {
                 "vs_ideal_pct": (
                     round(100.0 * result["floors_ms"]["ideal"] / p50, 1) if p50 else None
                 ),
@@ -375,7 +416,13 @@ def main(argv: list[str] | None = None) -> int:
                 if q < g
                 else "NULL：grouped 没有更快 —— 记录这个结果，不要接进模型（转 D-2）"
             ),
+            "correctness_ok": result.get("correctness", {}).get("grouped_within_slack"),
         }
+        # ★ 时间差必须建立在"算的是同一个东西"之上
+        if not result["verdict"]["correctness_ok"]:
+            result["verdict"][
+                "gate"
+            ] = "INVALID：correctness 未过（见 result.correctness）—— 时间对照无意义"
 
     if args.sweep:
         default_cfg = {
