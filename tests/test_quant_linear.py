@@ -476,3 +476,19 @@ def test_quant_accuracy_report_rejects_mismatched_position_counts():
     ref = [torch.randn(1, 1, 16) for _ in range(4)]
     with pytest.raises(ValueError):
         quant_accuracy_report(ref, ref[:3], scheme="w4a16", group_size=128)
+
+
+def test_quantize_model_can_restrict_to_an_explicit_name_whitelist():
+    """`names=` 是逐**张量类型**归因的开关（`EXP-p1-02` 用它区分 q/k/v/o）。
+
+    实测这个区分极重要：W8 量级下扰动 v_proj 造成的 KL 比扰动 q_proj 大三个数量级，
+    所以"该保护哪一类投影"必须能被单独测，而不是只能整层开关。
+    """
+    model = _tiny_model()
+    keep = {"model.layers.0.self_attn.v_proj"}  # 模块名，不是权重名
+    _, report = quantize_model(model, _spec("w8a16", 32, targets=("attention",)), names=keep)
+    assert report.spec["names"] == sorted(keep)
+    assert report.replaced["attention"] == 1
+    assert isinstance(model.model.layers[0].self_attn.v_proj, QuantLinear)
+    assert not isinstance(model.model.layers[0].self_attn.q_proj, QuantLinear)
+    assert any("不在 names=" in s for s in report.skipped)

@@ -167,6 +167,21 @@ def build_arms(
                     "filter": proj,
                 },
             )
+    # 逐投影的**真实 RTN**（不是噪声）：混合位宽该把哪一类投影留在高精度？
+    # W8 那组由 noise_*_proj_lam1_* 回答（同量级），这里补 W4，看 q/k 在 W4 是否也崩。
+    for proj in ("q_proj", "k_proj", "v_proj", "o_proj"):
+        add(
+            "perproj",
+            {
+                "id": "w4a16_%s_g128" % proj,
+                "kind": "rtn",
+                "scheme": "w4a16",
+                "group_size": 128,
+                "targets": ["attention"],
+                "layers": None,
+                "filter": proj,
+            },
+        )
     add("noop", {"id": "noop_a", "kind": "noop", "targets": [], "layers": None})
     add("noop", {"id": "noop_b", "kind": "noop", "targets": [], "layers": None})
     add("noop", {"id": "noop_final", "kind": "noop", "targets": [], "layers": None})
@@ -589,7 +604,11 @@ def main(argv: list[str] | None = None) -> int:
                 spec = SchemeSpec.from_flags(
                     arm["scheme"], arm["group_size"], targets=tuple(arm["targets"])
                 )
-                _, qreport = quantize_model(model, spec, layers=arm.get("layers"))
+                _, qreport = (
+                    quantize_model(model, spec, layers=arm.get("layers"), names=arm_names or None)
+                    if arm.get("filter")
+                    else quantize_model(model, spec, layers=arm.get("layers"))
+                )
                 entry["spec"] = qreport.spec
                 entry["replaced"] = qreport.replaced
                 entry["realized_bytes_total"] = qreport.to_dict()["realized_bytes_total"]

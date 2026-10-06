@@ -345,7 +345,12 @@ def realized_bytes(module: Any) -> dict[str, int]:
 
 
 def quantize_model(
-    model: Any, spec: SchemeSpec, *, verbose: bool = False, layers: Any = None
+    model: Any,
+    spec: SchemeSpec,
+    *,
+    verbose: bool = False,
+    layers: Any = None,
+    names: Any = None,
 ) -> tuple[Any, QuantizeReport]:
     """把模型里的 `nn.Linear` 就地换成 `QuantLinear`（按 `spec.targets` 选择）。
 
@@ -355,13 +360,19 @@ def quantize_model(
     `layers`：只量化这些层号（`None` = 全部）。存在的理由不是省事，而是
     **归因**：`EXP-p1-01` 的结论是"整模型上 W8/W4 过不了门"，但那没有回答
     "误差是在哪一层放大的"。把量化限制在 `layers=[0]` 就能把"哪一层"变成
-    受控变量（`REMEDIATION_LADDER` 的第 4 档也需要它）。限制必须进 report。
+    受控变量（`REMEDIATION_LADDER` 的第 4 档也需要它）。
+
+    `names`：更一般的显式白名单（完整模块名集合）。`EXP-p1-02` 用它做**逐张量类型**
+    归因（只量化 q_proj / v_proj ...）—— 实测这个区分极其重要：W8 量级下扰动
+    v_proj 造成的 KL 比扰动 q_proj 大三个数量级。两个限制都写进 report。
     """
     report = QuantizeReport(spec=spec.to_dict())
     if not spec.enabled:
         return model, report
     layer_filter = None if layers is None else {int(x) for x in layers}
+    name_filter = None if names is None else set(names)
     report.spec["layers"] = None if layer_filter is None else sorted(layer_filter)
+    report.spec["names"] = None if name_filter is None else sorted(name_filter)
 
     # ★ 只收集**名字**（字符串），不要 `list(model.named_modules())`。
     #
@@ -389,6 +400,9 @@ def quantize_model(
             continue
         if target == "lm_head" and spec.keep_lm_head_fp16:
             report.skipped.append("%s (keep_lm_head_fp16=True)" % module_name)
+            continue
+        if name_filter is not None and module_name not in name_filter:
+            report.skipped.append("%s (不在 names= 白名单内)" % module_name)
             continue
         if layer_filter is not None and _layer_index(module_name) not in layer_filter:
             report.skipped.append(
