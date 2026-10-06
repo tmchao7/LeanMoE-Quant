@@ -50,12 +50,19 @@ from typing import Any
 #   改这些数字必须单独成一个 commit 并写明理由 —— 否则就是事后调判据。
 # ---------------------------------------------------------------------------
 HYPO_THRESHOLDS = {
-    # H-A：MoE 专家路径四组（gather + bmm）实测之和 ≥ 此值 → 流量假设成立
+    # H-A：MoE 专家路径（gather + 专家 GEMM）实测之和 ≥ 此值 → 流量假设成立
     "dram_group_ms_min": 1.6,
     # H-B：均值 < latency_floor_us 的 kernel 之和 ≥ 此值 → 地板假设成立
     "latency_bucket_ms_min": 1.0,
     # "最短执行时间"的量级：sm_120 上一个空 kernel 的实测时间约 2-4 µs
     "latency_floor_us": 4.0,
+    # H-C：attention 实测 ≥ 此值 → 值得为它写 kernel
+    #
+    # ★ 这一条是**事后补的**，必须说清楚：判据的原始版本只有 gather/GEMM 与
+    #   地板两个桶，**根本没有 attention 桶**，所以它无法对最大的那一项排序。
+    #   补它的理由是"漏了一个桶"，不是"门槛太高"：阈值取 1.0，与 H-B 同一条线，
+    #   没有按实测的 4.48 ms 去凑。原有的两个阈值一个都没动。
+    "attention_ms_min": 1.0,
     # --- ctx 差分（H-C 的判别）---
     # MoE decode 的专家路径与 ctx **无关**（每 token 只读 top-k 个专家）。
     # 所以它的时间随 ctx 增长超过此倍数 = 有 bug，不是优化机会。
@@ -67,11 +74,25 @@ HYPO_THRESHOLDS = {
 }
 
 # kernel 名模式 → 组。宁可少匹配（报 unmatched）也不要错匹配。
+#
+# ★ 顺序是有意义的：第一个命中的模式获胜。这一条不是形式主义 ——
+#   实测的 attention kernel 叫
+#       fmha_cutlassF_f16_aligned_64x128_rf_sm80(PyTorchMemEfficientAttention...)
+#   它同时含 "cutlass"。如果 bmm 排在 attention 前面，这 4.48 ms（ctx=4096 下
+#   占总时间的 53%）会被算进"专家 GEMM 组"，于是判据会得出
+#   "dram group >= 1.6 ms → H-A：去写 grouped GEMM"，而真正的答案是 attention。
+#   这正是本模块 caveat 里说的"模式匹配不是语义识别"。
+#   下面每个 needle 都对着**实测出现过的 kernel 名**，并有回归测试钉住
+#   （tests/test_attribution.py 用 ctx=4096 那一跑的原始名字）。
 KERNEL_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("gather", ("indexFunc", "index_select", "index_copy", "gather", "take")),
-    ("bmm", ("gemm", "gemv", "cublas", "cutlass", "matmul", "bmm")),
-    ("attention", ("attention", "flash", "softmax", "scaled_dot", "efficient")),
-    ("elementwise", ("elementwise", "vectorized", "reduce", "cub::", "triton_")),
+    # 专家权重 gather —— 刻意**不**用裸 "gather"：at::native::sbtopk::gatherTopK
+    # 是路由的 top-k，不是专家拷贝，用它会把 routing 算成 expert_gather。
+    ("expert_gather", ("indexfunc", "vectorized_gather", "index_select", "index_copy")),
+    # attention 必须排在 expert_gemm 之前（见上）
+    ("attention", ("fmha", "attention", "flash", "scaled_dot", "memefficient")),
+    ("routing", ("topk", "sortkv", "bitonic", "softmax")),
+    ("expert_gemm", ("gemm", "gemv", "cublas", "cutlass", "matmul", "bmm")),
+    ("elementwise", ("elementwise", "reduce", "cub::", "triton_")),
     ("copy_fill", ("copy", "fill", "cast", "cat", "contiguous", "memcpy")),
 )
 
@@ -254,18 +275,22 @@ def _pattern_of(name: str) -> str | None:
 def resolve_hypothesis(
     measured: dict[str, Any], *, thresholds: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Apply the frozen Stage-A decision rule and name the bottleneck attribution.
+    """Apply the frozen decision rule and name which bucket deserves the next GPU hour.
 
     `measured` may be either the output of `group_kernels` or the `top_kernels`
-    list itself.  The two conditions are **independent** (amounts of time from
-    two different causes), and both may hold:
+    list itself.  The conditions are **independent** (time from three different
+    causes), and any combination may hold:
 
-        H-A   MoE 四组（gather + bmm）实测之和 >= 1.6 ms   -> gather 税是真的
-        H-B   均值 < 4 µs 的 kernel 之和      >= 1.0 ms   -> 地板是真的
+        H-A   gather + expert GEMM 之和 >= 1.6 ms   -> gather 拷贝是真的浪费
+        H-B   均值 < 4 µs 的 kernel 之和 >= 1.0 ms  -> 地板是真的（减 kernel 数）
+        H-C   attention 之和          >= 1.0 ms     -> 槽位扫描是真的（写 attention kernel）
 
-    Reporting them as one verdict would hide the case that actually needs *both*
-    fixes.  `dominant` then says which is currently larger, which is what orders
-    the work; it never overrides the verdict.
+    Reporting a single verdict would hide the case that needs more than one fix.
+    `dominant` names the largest **actionable** term, which is what orders the
+    work.  Note the size of the H-A opportunity is the gather alone, not
+    `dram_group`: a grouped GEMM removes the copies, not the expert GEMMs — the
+    trigger threshold is on the group (frozen before measuring) but the ranking
+    must use what the fix actually removes.
     """
     th = dict(HYPO_THRESHOLDS)
     th.update(thresholds or {})
@@ -274,40 +299,67 @@ def resolve_hypothesis(
     else:
         groups = measured
     pattern = groups.get("by_pattern", {})
-    dram_ms = round(
-        float(pattern.get("gather", {}).get("self_ms_per_token", 0.0))
-        + float(pattern.get("bmm", {}).get("self_ms_per_token", 0.0)),
+
+    def bucket_ms(name: str) -> float:
+        return round(float(pattern.get(name, {}).get("self_ms_per_token", 0.0)), 5)
+
+    gather_ms = bucket_ms("expert_gather")
+    gemm_ms = bucket_ms("expert_gemm")
+    attention_ms = bucket_ms("attention")
+    routing_ms = bucket_ms("routing")
+    other_ms = round(
+        sum(
+            float(v.get("self_ms_per_token", 0.0))
+            for k, v in pattern.items()
+            if k not in ("expert_gather", "expert_gemm", "attention")
+        ),
         5,
     )
+    dram_ms = round(gather_ms + gemm_ms, 5)
     latency_ms = float(groups.get("latency_floor", {}).get("self_ms_per_token", 0.0))
-    h_a = dram_ms >= th["dram_group_ms_min"]
-    h_b = latency_ms >= th["latency_bucket_ms_min"]
-    verdict = {(True, True): "H-A+H-B", (True, False): "H-A", (False, True): "H-B"}.get(
-        (h_a, h_b), "neither"
-    )
-    if dram_ms > latency_ms:
-        dominant = "H-A" if h_a else "neither"
-    elif latency_ms > dram_ms:
-        dominant = "H-B" if h_b else "neither"
-    else:
-        dominant = verdict
-    actions = {
-        "H-A": "Stage C：Triton grouped GEMM（去掉 gather 拷贝）",
-        "H-B": "D-2：融合 router+softmax+topk 与小 kernel，减少 kernel 数（地板是真的）",
-        "H-A+H-B": "Stage C 与 D-2 都要做：先 grouped GEMM 消掉确定性浪费，再按实测残差决定 D-2 的规模",
-        "neither": "两条假设都被否证 —— 重写 p0-04 的 Follow-ups，按实测归因重新定方向",
+
+    flags = {
+        "H-A": dram_ms >= th["dram_group_ms_min"],
+        "H-B": latency_ms >= th["latency_bucket_ms_min"],
+        "H-C": attention_ms >= th["attention_ms_min"],
     }
+    triggered = [key for key in ("H-A", "H-B", "H-C") if flags[key]]
+    verdict = "+".join(triggered) if triggered else "neither"
+    # 排序用的是"这个修法真正能省掉的部分"，不是触发判据用的总量
+    opportunity = {"H-A": gather_ms, "H-B": round(latency_ms, 5), "H-C": attention_ms}
+    dominant = max(triggered, key=lambda k: opportunity[k]) if triggered else "neither"
+    actions = {
+        "H-A": "Stage C：Triton grouped GEMM —— kernel 内由 expert id 算指针，去掉 gather 拷贝",
+        "H-B": "D-2a：融合 router+softmax+topk 与小 kernel，减少 kernel 数",
+        "H-C": (
+            "D-2b：写 attention kernel，把循环上界改成**设备端读出**的已填充长度 —— "
+            "launch 形状保持静态（图安全），但不再扫未填充槽位"
+        ),
+        "neither": "三条假设都被否证 —— 按实测归因重新定方向，不要硬凑",
+    }
+    plan_order = [key for key in ("H-C", "H-A", "H-B") if key in triggered]
     return {
         "verdict": verdict,
         "dominant": dominant,
+        "dominant_opportunity_ms": opportunity.get(dominant),
+        "opportunity_ms": dict(opportunity, dram_group=dram_ms),
+        "attention_ms_per_token": attention_ms,
+        "expert_gather_ms_per_token": gather_ms,
+        "expert_gemm_ms_per_token": gemm_ms,
+        "routing_ms_per_token": routing_ms,
+        "other_ms_per_token": other_ms,
         "dram_group_ms_per_token": dram_ms,
         "latency_bucket_ms_per_token": round(latency_ms, 5),
         "thresholds": th,
-        "action": actions[verdict],
+        "action": actions[dominant] if dominant != "neither" else actions["neither"],
+        "action_all": [actions[key] for key in ("H-A", "H-B", "H-C") if key in triggered],
+        "suggested_order": plan_order or ["neither: 先重新归因"],
         "caveats": [
             "分组是 kernel 名模式匹配，不是语义识别；unmatched_names 必须一起看",
             "H-B 的 4 µs 是空 kernel 量级，不是本卡实测的最小 kernel 时间",
             "单 kernel 的 DRAM 字节需 ncu dram__bytes.sum，本模块不提供",
+            "attention 是否随 ctx 增长要用 ctx_differential 复核 —— "
+            "它是'扫未填充槽位'与'本来就该算这么多'的区别",
         ],
     }
 
@@ -367,9 +419,13 @@ def ctx_differential(
         )
     total_delta = round(sum(e["delta_ms"] for e in per_pattern.values()), 5)
     moe_growth = None
-    if per_pattern.get("gather") and per_pattern.get("bmm"):
-        moe_low = per_pattern["gather"]["ctx_low_ms"] + per_pattern["bmm"]["ctx_low_ms"]
-        moe_high = per_pattern["gather"]["ctx_high_ms"] + per_pattern["bmm"]["ctx_high_ms"]
+    if per_pattern.get("expert_gather") and per_pattern.get("expert_gemm"):
+        moe_low = (
+            per_pattern["expert_gather"]["ctx_low_ms"] + per_pattern["expert_gemm"]["ctx_low_ms"]
+        )
+        moe_high = (
+            per_pattern["expert_gather"]["ctx_high_ms"] + per_pattern["expert_gemm"]["ctx_high_ms"]
+        )
         moe_growth = round(moe_high / moe_low, 3) if moe_low else None
     attn_delta = per_pattern.get("attention", {}).get("delta_ms", 0.0)
     attn_share = round(100.0 * attn_delta / total_delta, 1) if total_delta else None
@@ -390,9 +446,9 @@ def ctx_differential(
     elif attn_share is not None and attn_share >= th["ctx_attention_delta_share_pct_min"]:
         verdict = "attention_scales"
         finding = (
-            "ctx 增量有 %.1f%% 落在 attention 上（%.4f ms）—— 这与 StaticCache 每步 "
-            "attend 全部 %d 个槽位一致，残差里有相当一部分是**未填充槽位**。"
-            % (attn_share, attn_delta, ctx_high)
+            "ctx 增量有 %.1f%% 落在 attention 上（%.4f ms，%d -> %d 槽位）—— 这与 "
+            "StaticCache 每步 attend 全部槽位一致：扫的**主要是未填充的**那些。"
+            % (attn_share, attn_delta, ctx_low, ctx_high)
         )
     else:
         verdict = "mixed"

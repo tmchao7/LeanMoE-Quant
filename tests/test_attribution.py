@@ -180,7 +180,9 @@ def test_group_kernels_uses_per_token_contribution_not_mean():
         _row("MULTI_LEVEL_TREE", 0.30, 16.0),
     ]
     groups = group_kernels(rows)
-    assert groups["by_pattern"]["gather"]["self_ms_per_token"] == pytest.approx(0.02, abs=1e-6)
+    assert groups["by_pattern"]["expert_gather"]["self_ms_per_token"] == pytest.approx(
+        0.02, abs=1e-6
+    )
     assert groups["sums"]["pattern_total_ms_per_token"] == pytest.approx(0.32, abs=1e-6)
 
 
@@ -206,7 +208,7 @@ def test_latency_floor_bucket_uses_the_frozen_threshold():
 
 
 def test_resolve_hypothesis_ha_when_the_moe_group_dominates():
-    """H-A：MoE 四组之和 ≥ 1.6 ms → 下一步是 grouped GEMM。"""
+    """H-A：gather + 专家 GEMM 之和 ≥ 1.6 ms → 下一步是 grouped GEMM。"""
     rows = [
         _row("indexFuncSmallIndexKernel", 1.38, 16.0),
         _row("ampere_sgemm_128x64", 0.69, 32.0),
@@ -216,10 +218,12 @@ def test_resolve_hypothesis_ha_when_the_moe_group_dominates():
     assert out["verdict"] == "H-A"
     assert out["dram_group_ms_per_token"] == pytest.approx(2.07, abs=1e-6)
     assert "grouped GEMM" in out["action"]
+    # ★ 排序用的是"这个修法真正能省掉的部分"（只有 gather），不是触发判据用的总量
+    assert out["dominant_opportunity_ms"] == pytest.approx(1.38, abs=1e-6)
 
 
 def test_resolve_hypothesis_hb_when_the_latency_floor_dominates():
-    """H-B：小 kernel 之和 ≥ 1.0 ms 且 MoE 四组 < 0.5 ms → 主攻融合/减 kernel。"""
+    """H-B：小 kernel 之和 ≥ 1.0 ms → 主攻融合/减 kernel。"""
     rows = [_row("elementwise_kernel_%d" % i, 0.06, 300.0) for i in range(20)]
     out = resolve_hypothesis(rows)
     assert out["verdict"] == "H-B"
@@ -227,8 +231,28 @@ def test_resolve_hypothesis_hb_when_the_latency_floor_dominates():
     assert "融合" in out["action"]
 
 
-def test_resolve_hypothesis_reports_both_and_neither():
-    """两条假设**相互独立**，同时成立要报 H-A+H-B；都不成立要报 neither。
+def test_resolve_hypothesis_hc_for_attention_and_ranks_it_first():
+    """H-C：attention 是最大项时，修法必须是 attention，而不是 grouped GEMM。
+
+    ★ 这条就是实测（ctx=4096）的情形：attention 4.48 ms（53%）> gather 1.57 ms。
+    判据的原始版本没有 attention 桶，会把答案指向 grouped GEMM —— 那是错的。
+    """
+    rows = [
+        _row("fmha_cutlassF_f16_aligned_64x128_rf_sm80(PyTorchMemEfficientAttention)", 4.48, 16.0),
+        _row("vectorized_gather_kernel<16, long>", 1.57, 32.0),
+        _row("ampere_sgemm_128x64", 0.5, 32.0),
+    ]
+    out = resolve_hypothesis(rows)
+    assert "H-C" in out["verdict"]
+    assert out["dominant"] == "H-C"
+    assert out["attention_ms_per_token"] == pytest.approx(4.48, abs=1e-6)
+    assert out["expert_gather_ms_per_token"] == pytest.approx(1.57, abs=1e-6)
+    # suggested_order 把收益最大的排前面
+    assert out["suggested_order"][0] == "H-C"
+
+
+def test_resolve_hypothesis_reports_every_triggered_bucket_and_neither():
+    """多个桶同时成立要全部报出来 —— 单一 verdict 会藏掉"要修不止一处"。
 
     ★ 关键：`neither` 时**不得**默认去写 grouped GEMM —— 那是把"判据没成立"
     当成"假设成立"来用。`dominant` 只决定先做哪个，不改变 verdict。
@@ -238,21 +262,60 @@ def test_resolve_hypothesis_reports_both_and_neither():
     ]
     out = resolve_hypothesis(both)
     assert out["verdict"] == "H-A+H-B"
-    assert out["dominant"] == "H-A"  # 1.7 ms > 1.0 ms，先做 grouped GEMM
-    assert out["action"].startswith("Stage C 与 D-2 都要做")
+    assert out["dominant"] == "H-A"
+    assert len(out["action_all"]) == 2
+    # attention 没到 1.0 ms 门槛 → 不进 verdict（不许因为"也有一点"就列进来）
+    assert "H-C" not in out["verdict"]
 
     neither = [_row("ampere_sgemm_128x64", 0.2, 1.0)]
     out = resolve_hypothesis(neither)
     assert out["verdict"] == "neither"
     assert out["dominant"] == "neither"
+    assert out["suggested_order"] == ["neither: 先重新归因"]
     assert "否证" in out["action"]
+
+
+def test_real_kernel_names_from_the_ctx_4096_run_are_classified_correctly():
+    """★ 用**实测跑出来的原始 kernel 名**钉住分类，不用编的名字。
+
+    这一条抓的是一个会让判据给出错误方向的 bug：attention kernel 叫
+    `fmha_cutlassF_f16_...`，同时含 "cutlass"。如果 expert_gemm 排在 attention
+    之前，那 4.48 ms 会被算成"专家 GEMM"，判据就会说"去写 grouped GEMM"，
+    而真正的答案是 attention。
+    """
+    from benchmarks.attribution import group_kernels
+
+    rows = [
+        _row(
+            "fmha_cutlassF_f16_aligned_64x128_rf_sm80(PyTorchMemEfficientAttention)", 4.4794, 16.0
+        ),
+        _row("void at::native::vectorized_gather_kernel<16, long>(...)", 1.5723, 32.0),
+        _row("std::enable_if<!(false), void>::type internal::gemvx<int, int>(...)", 0.6334, 65.0),
+        _row("void cutlass::Kernel2<cutlass_80_wmma_tensorop_f16_s1688gemm...>(...)", 0.3558, 16.0),
+        _row("void at::native::sbtopk::gatherTopK<float, unsigned int, ...>(...)", 0.0518, 16.0),
+        _row("void at::native::bitonicSortKVInPlace<-2, -1, 16, 16, ...>(...)", 0.0464, 16.0),
+        _row("void at::native::vectorized_elementwise_kernel<4, ...>(...)", 0.0675, 65.0),
+    ]
+    got = {
+        k: round(v["self_ms_per_token"], 4) for k, v in group_kernels(rows)["by_pattern"].items()
+    }
+    assert got["attention"] == pytest.approx(4.4794, abs=1e-4)
+    assert got["expert_gather"] == pytest.approx(1.5723, abs=1e-4)
+    # gemvx + cutlass 都是专家/投影 GEMM，加在一起
+    assert got["expert_gemm"] == pytest.approx(0.6334 + 0.3558, abs=1e-4)
+    # top-k 与排序是 routing，**不是** expert_gather（裸 "gather" 会错在这里）
+    assert got["routing"] == pytest.approx(0.0518 + 0.0464, abs=1e-4)
+    assert got["elementwise"] == pytest.approx(0.0675, abs=1e-4)
 
 
 def test_thresholds_are_frozen_constants_not_arguments():
     """判据必须是模块级常量 —— 不允许在调用点临时给一个更好看的阈值。"""
+    # ★ 这两个是**测量之前**就写下的，一个都没改过（H-C 是后来补的桶，见下）
     assert HYPO_THRESHOLDS["dram_group_ms_min"] == 1.6
     assert HYPO_THRESHOLDS["latency_bucket_ms_min"] == 1.0
     assert HYPO_THRESHOLDS["latency_floor_us"] == 4.0
+    # H-C 的阈值刻意取与 H-B 同一条线，没有按实测的 4.48 ms 去凑
+    assert HYPO_THRESHOLDS["attention_ms_min"] == 1.0
     # 覆盖只能显式传入，且默认值不受影响（防止某人用 thresholds= 把门槛调低后不记录）
     relaxed = resolve_hypothesis(
         [_row("ampere_sgemm_128x64", 0.2, 1.0)], thresholds={"dram_group_ms_min": 0.1}
@@ -321,7 +384,7 @@ def test_ctx_differential_attention_scales_identifies_unfilled_slots():
     assert out["attention_delta_share_pct"] == pytest.approx(100.0)
     assert out["moe_growth_x"] == pytest.approx(1.0)
     assert out["slot_ratio"] == pytest.approx(4.0)
-    assert "未填充槽位" in out["finding"]
+    assert "未填充" in out["finding"]
 
 
 def test_ctx_differential_flags_moe_growth_as_a_regression_not_an_opportunity():
