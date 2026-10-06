@@ -168,6 +168,42 @@ export PATH=/root/miniconda3/bin:/usr/local/cuda/bin:$PATH
 **不要**在 p0-03 失败后把 execution 改成 eager 继续写入同一个结果，也不要立即跑
 W8/W4。先保留失败证据；失败本身就是判断 HF 动态 routing 是否阻塞 CUDA Graph 的实验结果。
 
+### 3.1.1 一键脚本（推荐）
+
+上面那串手工命令已经固化成脚本，**顺序和判据都写死在里面**，避免在计费机器上敲错：
+
+```bash
+cd /root/LeanMoE-Quant
+bash scripts/run_cudagraph_gate.sh              # 自检 -> 离线测试 -> GPU smoke -> p0-03 -> p0-04
+bash scripts/run_cudagraph_gate.sh --check      # 只自检（不加载模型、不跑实验）
+bash scripts/run_cudagraph_gate.sh --only p0-03 # 只跑一条
+```
+
+它做了这些容易忘的事：设 `HF_HOME`（否则塞满 30 GB 系统盘）、把
+`/usr/local/cuda/bin` 加进 PATH（否则 nvcc/ncu 找不到）、在加载 13 GB 模型**之前**
+校验字节数、以及跑完打印一张对照表。
+
+### 3.1.2 EXP-p0-04：固定形状 MoE（与 p0-03 是不同的假设）
+
+`EXP-p0-03` 测的是"HF 原版能不能进图"。我基于 profile 证据预判它**会失败**：
+单步恰好 1,024 次 `Memcpy DtoH` = 64 experts × 16 layers，来源是
+`torch.where(expert_mask[e])` 的数据依赖输出长度（详见 `docs/MOE_CUDAGRAPH.md`）。
+
+`EXP-p0-04` 测的是**另一个假设**：把逐专家循环换成固定形状前向
+（`lemoq.kernels.moe_static`）之后能不能进图。所以它是独立的 EXP id，
+**不能**复用 p0-03 的结果文件。
+
+```bash
+/root/miniconda3/bin/python -m benchmarks.runner \
+  --exp EXP-p0-04-cudagraph-static-moe \
+  --model /root/autodl-tmp/ms/models/allenai--OLMoE-1B-7B-0924/snapshots/master \
+  --ctx 1024 --dtype float16 --static-moe --force
+```
+
+`moe_static` 与 HF 原版的数值等价性已在 Mac 上用**真实的** `OlmoeSparseMoeBlock`
+验证过（`tests/test_moe_static.py`，18 个测试）—— 这样在 GPU 上失败时，
+才能确定问题在 capture，而不在"我的实现算错了"。
+
 ---
 
 ## 4. 在服务器上跑 agent（opencode）
