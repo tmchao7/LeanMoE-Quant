@@ -313,7 +313,10 @@ def _graph_res(
         "kernels_per_step": int(round(gap.get("kernels_per_call", 0))),
         "bucket_ms": {"cudagraph_replay": gap.get("gpu_busy_ms")},
         "bucket_share_pct": {"cudagraph_replay": 100.0},
-        "top_kernels": [],
+        # ★ 实测的 per-kernel 归因表。p0-04 的 1.59 ms 残差有两个互斥解释
+        #   （额外的 DRAM 流量 vs kernel 数 × 最短执行时间），这张表是唯一的判据。
+        #   之前这里是硬编码的空列表，等于把结论建立在散文上。
+        "top_kernels": gap.get("top_kernels", []),
     }
     return {
         "spec": spec,
