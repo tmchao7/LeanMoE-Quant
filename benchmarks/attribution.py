@@ -56,6 +56,14 @@ HYPO_THRESHOLDS = {
     "latency_bucket_ms_min": 1.0,
     # "最短执行时间"的量级：sm_120 上一个空 kernel 的实测时间约 2-4 µs
     "latency_floor_us": 4.0,
+    # --- ctx 差分（H-C 的判别）---
+    # MoE decode 的专家路径与 ctx **无关**（每 token 只读 top-k 个专家）。
+    # 所以它的时间随 ctx 增长超过此倍数 = 有 bug，不是优化机会。
+    "ctx_moe_growth_max": 1.25,
+    # 两个 ctx 之间总时间差小于此值 → 残差与 ctx 无关
+    "ctx_flat_delta_ms_max": 0.5,
+    # 若 ctx 带来的增量有 >= 此比例落在 attention 上 → 残差是 unfilled slots
+    "ctx_attention_delta_share_pct_min": 60.0,
 }
 
 # kernel 名模式 → 组。宁可少匹配（报 unmatched）也不要错匹配。
@@ -301,4 +309,118 @@ def resolve_hypothesis(
             "H-B 的 4 µs 是空 kernel 量级，不是本卡实测的最小 kernel 时间",
             "单 kernel 的 DRAM 字节需 ncu dram__bytes.sum，本模块不提供",
         ],
+    }
+
+
+def _by_name(rows: list[dict[str, Any]]) -> dict[str, float]:
+    """name -> self_ms_per_token, summing duplicate names."""
+    out: dict[str, float] = {}
+    for row in rows:
+        name = str(row.get("name") or "?")
+        out[name] = out.get(name, 0.0) + float(row.get("self_ms_per_token") or 0.0)
+    return out
+
+
+def ctx_differential(
+    low: list[dict[str, Any]],
+    high: list[dict[str, Any]],
+    *,
+    ctx_low: int,
+    ctx_high: int,
+    thresholds: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Diff two CUDA Graph runs at different ctx to place the ctx-driven cost.
+
+    ★ Why this is the decisive measurement for the residual:
+
+    `StaticCache` attends all `max_cache_len` slots every step, so the attention
+    sweep grows with ctx (1056 -> 4128 slots at ctx=1024/4096).  The MoE expert
+    path, by (the project's) construction, reads only `top_k` experts per token
+    and is therefore **ctx-independent**.  So:
+
+        residual grows with ctx   -> it is the attention over unfilled slots
+        residual stays flat       -> it is the kernel-count floor / DRAM traffic
+
+    which is exactly the fork that decides the next GPU hour.  The MoE group
+    growing is not an optimisation opportunity but a **regression**: it means the
+    fixed-shape decode path started depending on ctx.
+
+    Returns per-pattern ms at both ctx, the delta, and a verdict in
+    `attention_scales` / `flat` / `moe_regression` / `mixed`.
+    """
+    th = dict(HYPO_THRESHOLDS)
+    th.update(thresholds or {})
+    if ctx_high <= ctx_low:
+        raise ValueError("ctx_high 必须大于 ctx_low")
+    low_by = _by_name(low)
+    high_by = _by_name(high)
+    per_pattern: dict[str, dict[str, float]] = {}
+    for name in set(low_by) | set(high_by):
+        pattern = _pattern_of(name) or "unmatched"
+        entry = per_pattern.setdefault(pattern, {"ctx_low_ms": 0.0, "ctx_high_ms": 0.0})
+        entry["ctx_low_ms"] = round(entry["ctx_low_ms"] + low_by.get(name, 0.0), 5)
+        entry["ctx_high_ms"] = round(entry["ctx_high_ms"] + high_by.get(name, 0.0), 5)
+    for entry in per_pattern.values():
+        entry["delta_ms"] = round(entry["ctx_high_ms"] - entry["ctx_low_ms"], 5)
+        entry["growth_x"] = (
+            round(entry["ctx_high_ms"] / entry["ctx_low_ms"], 3) if entry["ctx_low_ms"] else None
+        )
+    total_delta = round(sum(e["delta_ms"] for e in per_pattern.values()), 5)
+    moe_growth = None
+    if per_pattern.get("gather") and per_pattern.get("bmm"):
+        moe_low = per_pattern["gather"]["ctx_low_ms"] + per_pattern["bmm"]["ctx_low_ms"]
+        moe_high = per_pattern["gather"]["ctx_high_ms"] + per_pattern["bmm"]["ctx_high_ms"]
+        moe_growth = round(moe_high / moe_low, 3) if moe_low else None
+    attn_delta = per_pattern.get("attention", {}).get("delta_ms", 0.0)
+    attn_share = round(100.0 * attn_delta / total_delta, 1) if total_delta else None
+
+    if moe_growth is not None and moe_growth > th["ctx_moe_growth_max"]:
+        verdict = "moe_regression"
+        finding = (
+            "MoE 专家组随 ctx 增长了 %.2fx —— 它与 ctx 无关，所以这是 bug（或图里混进了"
+            " ctx 相关的访存），不是优化机会。先查这个。" % moe_growth
+        )
+    elif total_delta < th["ctx_flat_delta_ms_max"]:
+        verdict = "flat"
+        finding = (
+            "残差与 ctx 无关（增量 %.4f ms < %.2f）—— 所以它不是 attention 扫槽位。"
+            "按 H-A/H-B 继续：grouped GEMM 与减 kernel 数。"
+            % (total_delta, th["ctx_flat_delta_ms_max"])
+        )
+    elif attn_share is not None and attn_share >= th["ctx_attention_delta_share_pct_min"]:
+        verdict = "attention_scales"
+        finding = (
+            "ctx 增量有 %.1f%% 落在 attention 上（%.4f ms）—— 这与 StaticCache 每步 "
+            "attend 全部 %d 个槽位一致，残差里有相当一部分是**未填充槽位**。"
+            % (attn_share, attn_delta, ctx_high)
+        )
+    else:
+        verdict = "mixed"
+        finding = (
+            "ctx 增量 %.4f ms 分散在多个组（attention 占 %s%%）—— 不足以指向单一原因，"
+            "不要据此下结论。" % (total_delta, attn_share)
+        )
+    return {
+        "verdict": verdict,
+        "ctx_low": ctx_low,
+        "ctx_high": ctx_high,
+        "slot_ratio": round(ctx_high / ctx_low, 3),
+        "per_pattern": per_pattern,
+        "total_delta_ms": total_delta,
+        "moe_growth_x": moe_growth,
+        "attention_delta_share_pct": attn_share,
+        "thresholds": th,
+        "finding": finding,
+        "unmatched": _unmatched_between(low_by, high_by),
+        "caveats": [
+            "两个 ctx 的 kernel 名集合可能不同；只在一侧出现的 name 按 0 处理并列入 unmatched",
+            "ctx 变化的还有 prefill 时间与 KV 占用；本函数只看 decode 的 per-token 增量",
+        ],
+    }
+
+
+def _unmatched_between(low_by: dict[str, float], high_by: dict[str, float]) -> dict[str, list[str]]:
+    return {
+        "only_at_low": sorted(n for n in low_by if n not in high_by),
+        "only_at_high": sorted(n for n in high_by if n not in low_by),
     }

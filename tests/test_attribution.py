@@ -19,6 +19,7 @@ from conftest import requires_torch
 
 from benchmarks.attribution import (
     HYPO_THRESHOLDS,
+    ctx_differential,
     expert_path_accounting,
     group_kernels,
     resolve_hypothesis,
@@ -283,3 +284,86 @@ def test_kernel_table_units_and_ordering():
     assert big["share_pct"] == pytest.approx(100 * 0.2 / 4.2, abs=0.01)
     # 每 token 贡献之和 = busy（这就是这张表能解释时间的原因）
     assert sum(r["self_ms_per_token"] for r in table) == pytest.approx(0.21, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# ctx 差分：把残差判给 attention 还是判给地板
+# ---------------------------------------------------------------------------
+def _moe_rows(scale: float = 1.0) -> list[dict]:
+    """The four MoE expert-path kernels at the measured p0-04 sizes."""
+    return [
+        _row("indexFuncSmallIndexKernel", 1.38 * scale, 2.0),
+        _row("ampere_sgemm_128x64", 0.69 * scale, 2.0),
+        _row("down_indexFuncSmallIndexKernel", 0.69 * scale, 2.0),
+        _row("down_sgemm_64x64", 0.34 * scale, 2.0),
+    ]
+
+
+def test_ctx_differential_flat_means_the_residual_is_not_attention():
+    """残差与 ctx 无关 → 不能把它归给 attention 扫槽位，回去按 H-A/H-B 走。
+
+    这条直接反驳 p0-04 记录里那句"其它 1.59 ms = attention 扫 1056 位置"。
+    """
+    low = _moe_rows() + [_row("elementwise_kernel_a", 1.0, 900.0)]
+    high = _moe_rows() + [_row("elementwise_kernel_a", 1.05, 900.0)]
+    out = ctx_differential(low, high, ctx_low=1024, ctx_high=4096)
+    assert out["verdict"] == "flat"
+    assert out["total_delta_ms"] == pytest.approx(0.05, abs=1e-6)
+    assert "grouped GEMM" in out["finding"]
+
+
+def test_ctx_differential_attention_scales_identifies_unfilled_slots():
+    """attention 时间随 ctx 增长、MoE 持平 → 残差是未填充槽位（H-C）。"""
+    low = _moe_rows() + [_row("flash_attention_forward", 0.4, 16.0)]
+    high = _moe_rows() + [_row("flash_attention_forward", 1.6, 16.0)]
+    out = ctx_differential(low, high, ctx_low=1024, ctx_high=4096)
+    assert out["verdict"] == "attention_scales"
+    assert out["attention_delta_share_pct"] == pytest.approx(100.0)
+    assert out["moe_growth_x"] == pytest.approx(1.0)
+    assert out["slot_ratio"] == pytest.approx(4.0)
+    assert "未填充槽位" in out["finding"]
+
+
+def test_ctx_differential_flags_moe_growth_as_a_regression_not_an_opportunity():
+    """★ MoE 专家组随 ctx 增长是**bug**，不是优化机会。
+
+    每 token 只读 top-k 个专家，与 ctx 无关。它若增长，说明固定形状路径
+    混进了 ctx 相关的访存 —— 这时**不能**继续往下报性能数字。
+    """
+    low = _moe_rows() + [_row("flash_attention_forward", 0.4, 16.0)]
+    high = _moe_rows(scale=2.5) + [_row("flash_attention_forward", 0.4, 16.0)]
+    out = ctx_differential(low, high, ctx_low=1024, ctx_high=4096)
+    assert out["verdict"] == "moe_regression"
+    assert out["moe_growth_x"] == pytest.approx(2.5)
+    assert "bug" in out["finding"]
+
+
+def test_ctx_differential_reports_mixed_instead_of_forcing_a_story():
+    """增量分散在多组时必须报 mixed —— 不许从噪声里挑一个原因。"""
+    low = _moe_rows() + [
+        _row("flash_attention_forward", 0.4, 16.0),
+        _row("elementwise_kernel_a", 1.0, 900.0),
+    ]
+    high = _moe_rows() + [
+        _row("flash_attention_forward", 0.6, 16.0),
+        _row("elementwise_kernel_a", 1.5, 900.0),
+    ]
+    out = ctx_differential(low, high, ctx_low=1024, ctx_high=4096)
+    assert out["total_delta_ms"] == pytest.approx(0.7, abs=1e-6)
+    assert out["attention_delta_share_pct"] == pytest.approx(100 * 0.2 / 0.7, abs=0.1)
+    assert out["verdict"] == "mixed"
+    assert "不足以指向单一原因" in out["finding"]
+
+
+def test_ctx_differential_lists_names_present_at_only_one_ctx():
+    """只在一侧出现的 kernel 名必须列出来，不能按 0 悄悄算进增量。"""
+    low = _moe_rows()
+    high = _moe_rows() + [_row("brand_new_kernel", 0.3, 1.0)]
+    out = ctx_differential(low, high, ctx_low=1024, ctx_high=4096)
+    assert "brand_new_kernel" in out["unmatched"]["only_at_high"]
+    assert out["per_pattern"]["unmatched"]["ctx_low_ms"] == 0.0
+
+
+def test_ctx_differential_rejects_a_non_increasing_ctx_pair():
+    with pytest.raises(ValueError):
+        ctx_differential(_moe_rows(), _moe_rows(), ctx_low=4096, ctx_high=1024)
