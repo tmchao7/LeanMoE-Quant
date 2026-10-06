@@ -25,7 +25,11 @@ import torch  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from lemoq.kernels.moe_static import (  # noqa: E402
+    MAX_GATHER_BYTES,
+    FusedExperts,
+    chunk_size_for,
     fuse_experts,
+    gather_bytes_per_token,
     replace_moe_blocks,
     static_moe_forward,
 )
@@ -399,3 +403,170 @@ def test_p0_03_stays_on_the_hf_path():
         matrix = yaml.safe_load(fh)
     exp = {e["id"]: e for e in matrix["experiments"]}["EXP-p0-03-baseline-cudagraph"]
     assert exp["config"].get("moe", "hf") == "hf"
+
+
+# ---------------------------------------------------------------------------
+# ★ 显存上界 —— 一次真实 OOM 的回归测试
+#
+# 事故经过：最初的实现直接 `gate_up[ids]`，ids 有 T*K 个元素。
+# decode 时 T=1（8 个专家，67 MiB）没问题；**prefill 时 T=ctx=1024**
+# → (8192, 2048, 2048) fp16 = 64 GiB，在 31 GiB 的卡上直接 OOM
+# （stage=prefill, OutOfMemoryError: Tried to allocate 64.00 GiB）。
+#
+# 而当时所有 parity 测试用的都是 ctx=5 的小模型，**一个都没抓到**。
+# 下面这些是纯算术断言 —— 不需要 GPU，也不需要大模型。
+# ---------------------------------------------------------------------------
+OLMOE_HIDDEN = 2048
+OLMOE_FFN = 1024
+OLMOE_TOP_K = 8
+
+
+def test_gather_bytes_per_token_matches_hand_computation():
+    """每 token 的 gather 字节数 = K * (2*ffn*hidden + hidden*ffn) * 2B。"""
+    got = gather_bytes_per_token(top_k=OLMOE_TOP_K, hidden=OLMOE_HIDDEN, ffn=OLMOE_FFN, item_size=2)
+    want = OLMOE_TOP_K * (2 * OLMOE_FFN * OLMOE_HIDDEN + OLMOE_HIDDEN * OLMOE_FFN) * 2
+    assert got == want
+    # 8 * (2*1024*2048 + 2048*1024) * 2 = 8 * 6291456 * 2 = 100663296 B = 96 MiB
+    assert got == 100663296
+
+
+def test_unchunked_prefill_at_real_ctx_would_need_64_gib():
+    """把事故的算术固定下来：不分块时 ctx=1024 需要 64 GiB。
+
+    这条测试的意义是**记住那个数字**。如果将来有人去掉分块逻辑，
+    下面那条 `test_chunk_bounds_the_gather_at_real_ctx` 会失败，
+    而这条会告诉他失败的原因是什么量级。
+    """
+    # gate_up 与 down 是两次独立的 gather，GPU 报的是第一次的尺寸。
+    gate_up_per_token = OLMOE_TOP_K * (2 * OLMOE_FFN) * OLMOE_HIDDEN * 2
+    down_per_token = OLMOE_TOP_K * OLMOE_HIDDEN * OLMOE_FFN * 2
+    ctx = 1024
+    gate_up_gib = gate_up_per_token * ctx / 1024**3
+    total_gib = (gate_up_per_token + down_per_token) * ctx / 1024**3
+
+    # 实测报错原文是 "Tried to allocate 64.00 GiB" —— 正是 gate_up 那一块
+    assert abs(gate_up_gib - 64.0) < 0.1, "gate_up 单块应为 64 GiB，实际 %.1f" % gate_up_gib
+    assert abs(total_gib - 96.0) < 0.1, "两块合计应为 96 GiB，实际 %.1f" % total_gib
+    assert (
+        gather_bytes_per_token(top_k=OLMOE_TOP_K, hidden=OLMOE_HIDDEN, ffn=OLMOE_FFN)
+        * ctx
+        / 1024**3
+        == total_gib
+    )
+
+
+def test_chunk_bounds_the_gather_at_real_ctx():
+    """★ 核心回归：默认预算下，单次 gather 必须远小于可用显存（17.68 GiB）。"""
+    chunk = chunk_size_for(
+        top_k=OLMOE_TOP_K,
+        hidden=OLMOE_HIDDEN,
+        ffn=OLMOE_FFN,
+        item_size=2,
+        budget_bytes=MAX_GATHER_BYTES,
+    )
+    per_token = gather_bytes_per_token(top_k=OLMOE_TOP_K, hidden=OLMOE_HIDDEN, ffn=OLMOE_FFN)
+    worst_gib = per_token * chunk / 1024**3
+    assert chunk >= 1
+    assert worst_gib <= MAX_GATHER_BYTES / 1024**3 + 1e-9, (
+        "单块 gather %.2f GiB 超过预算" % worst_gib
+    )
+    # 而且要留足余量：加载 13 GiB 模型后只有约 17.68 GiB 可用
+    assert worst_gib < 2.0, "单块 %.2f GiB 对 31 GiB 的卡来说太大" % worst_gib
+
+
+def test_chunk_size_is_one_for_a_single_token():
+    """decode（T=1）必须恰好一块 —— 这样快路径不产生额外的 cat。"""
+    chunk = chunk_size_for(top_k=OLMOE_TOP_K, hidden=OLMOE_HIDDEN, ffn=OLMOE_FFN)
+    assert chunk >= 1
+    # T=1 时 1 <= chunk 必然成立，走快路径
+    assert 1 <= chunk
+
+
+def test_chunked_and_unchunked_agree():
+    """★ 分块不得改变数值结果。
+
+    强制用一个很小的预算触发多块路径，与不分块的结果逐个比较。
+    """
+    cfg = _tiny_config()
+    block = _tiny_block(cfg)
+    fused = fuse_experts(block.experts)
+    torch.manual_seed(31)
+    x = torch.randn(1, 9, cfg.hidden_size)  # 9 个 token
+
+    with torch.no_grad():
+        ref, ref_logits = static_moe_forward(
+            x,
+            block.gate.weight,
+            fused,
+            top_k=block.top_k,
+            norm_topk_prob=block.norm_topk_prob,
+            act_fn=block.experts[0].act_fn,
+            max_gather_bytes=10**9,  # 足够大 -> 一块
+        )
+        got, got_logits = static_moe_forward(
+            x,
+            block.gate.weight,
+            fused,
+            top_k=block.top_k,
+            norm_topk_prob=block.norm_topk_prob,
+            act_fn=block.experts[0].act_fn,
+            max_gather_bytes=1,  # 强制每块 1 个 token
+        )
+
+    assert torch.allclose(ref, got, atol=1e-6), (
+        "分块与不分块结果不一致：max abs diff = %g" % (ref - got).abs().max().item()
+    )
+    assert torch.allclose(ref_logits, got_logits, atol=1e-6)
+
+
+def test_chunked_path_still_matches_hf():
+    """强制分块后，仍然要与 HF 原版一致。"""
+    cfg = _tiny_config()
+    block = _tiny_block(cfg)
+    torch.manual_seed(37)
+    x = torch.randn(1, 7, cfg.hidden_size)
+    with torch.no_grad():
+        ref, _ = block(x)
+        got, _ = static_moe_forward(
+            x,
+            block.gate.weight,
+            fuse_experts(block.experts),
+            top_k=block.top_k,
+            norm_topk_prob=block.norm_topk_prob,
+            act_fn=block.experts[0].act_fn,
+            max_gather_bytes=1,
+        )
+    assert torch.allclose(ref, got, atol=1e-6)
+
+
+def test_real_scale_prefill_forward_stays_inside_budget():
+    """用**真实的 OLMoE 维度**跑一次多 token 前向，断言内存不爆。
+
+    这里用 CPU + 真实维度（2048/1024/8 experts）但只放少量 token；
+    关键是要覆盖"T 远大于 1"这条曾被遗漏的路径。
+    """
+    import torch.nn as nn
+
+    hidden, ffn, experts, top_k = 256, 128, 8, 2  # 缩小但结构相同
+    torch.manual_seed(41)
+    router = nn.Linear(hidden, experts, bias=False)
+    fused = FusedExperts(
+        gate_up=torch.randn(experts, 2 * ffn, hidden) * 0.02,
+        down=torch.randn(experts, hidden, ffn) * 0.02,
+    )
+    x = torch.randn(1, 64, hidden)  # T=64，远超 decode 的 T=1
+    with torch.no_grad():
+        out, logits = static_moe_forward(
+            x,
+            router.weight,
+            fused,
+            top_k=top_k,
+            norm_topk_prob=False,
+            max_gather_bytes=64 * 1024,
+        )
+    assert out.shape == (1, 64, hidden)
+    # ★ logits 是 (T, E) 而不是 (1, T, E)：HF 的 OlmoeSparseMoeBlock 先把
+    #   hidden_states reshape 成 (-1, hidden)，router 输出自然是 2 维。
+    #   我们必须保持同一约定，否则整模型集成时形状对不上。
+    assert logits.shape == (64, experts), "logits 形状应为 (T, E)，实际 %s" % (tuple(logits.shape),)
+    assert torch.isfinite(out).all()

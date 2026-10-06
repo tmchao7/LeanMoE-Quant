@@ -101,6 +101,36 @@ def fuse_experts(experts: Any) -> FusedExperts:
     return FusedExperts(gate_up=gate_up.contiguous(), down=down.contiguous())
 
 
+# 每次 gather 的显存预算。★ 这个常量的存在是一个 OOM 事故的结果：
+#   本模块最初的实现直接 `gate_up[ids]`，其中 `ids` 有 T*K 个元素。
+#   decode 时 T=1（8 个专家，67 MiB）没问题，但 **prefill 时 T=1024**
+#   → (8192, 2048, 2048) fp16 = **64 GiB**，在 31 GiB 的卡上直接 OOM。
+#   小模型的 parity 测试（ctx=5）完全没暴露它 —— 只有真实 ctx 的算术才会。
+MAX_GATHER_BYTES = 512 * 1024 * 1024
+
+
+def gather_bytes_per_token(*, top_k: int, hidden: int, ffn: int, item_size: int = 2) -> int:
+    """每 token 因 gather 而额外分配的字节数（gate_up + down 两个张量）。
+
+    这是**纯算术**，所以可以在没有 GPU 的机器上断言"预填充路径不会爆显存"。
+    """
+    per_pair = (2 * ffn * hidden + hidden * ffn) * item_size
+    return top_k * per_pair
+
+
+def chunk_size_for(
+    *,
+    top_k: int,
+    hidden: int,
+    ffn: int,
+    item_size: int = 2,
+    budget_bytes: int = MAX_GATHER_BYTES,
+) -> int:
+    """在预算内一次能处理多少个 token。至少为 1。"""
+    per_token = gather_bytes_per_token(top_k=top_k, hidden=hidden, ffn=ffn, item_size=item_size)
+    return max(1, int(budget_bytes // max(per_token, 1)))
+
+
 def static_moe_forward(
     hidden_states: Any,
     router_weight: Any,
@@ -109,6 +139,7 @@ def static_moe_forward(
     top_k: int,
     norm_topk_prob: bool = False,
     act_fn: Callable[[Any], Any] | None = None,
+    max_gather_bytes: int = MAX_GATHER_BYTES,
 ) -> tuple[Any, Any]:
     """固定形状的 MoE 前向。返回 (output, router_logits)。
 
@@ -117,9 +148,21 @@ def static_moe_forward(
 
         - `torch.topk` 的输出是 (T, K)，K 固定；
         - 没有任何 `torch.where` / `nonzero` / `.item()` / `.cpu()`；
-        - 没有 `for expert in range(num_experts)` 这种随数据变化的循环。
+        - 没有 `for expert in range(num_experts)` 这种随模型规模变化的循环。
 
-    因此可以放进 CUDA Graph。
+    因此 decode 时可以放进 CUDA Graph。
+
+    ## ★ 为什么必须分块（一次真实 OOM 的教训）
+
+    最直接的写法是 `gate_up[ids]`，`ids` 有 `T*K` 个元素，会**物化**一个
+    `(T*K, 2*ffn, hidden)` 的张量。decode 时 T=1，只有 67 MiB，没问题；
+    但 **prefill 时 T=ctx=1024**：
+
+        (1024*8, 2048, 2048) x 2 B = 64 GiB     <- 在 31 GiB 的卡上直接 OOM
+
+    所以按 token 分块，把一次性 gather 的规模压在 `max_gather_bytes` 以内。
+    decode（T=1）永远只有一块，等于没有循环，仍然可以进图；
+    prefill 才走多块，而 prefill 是 eager 的、不进图，多几轮无妨。
     """
     import torch
     import torch.nn.functional as F
@@ -134,6 +177,67 @@ def static_moe_forward(
         tokens *= s
     x = hidden_states.reshape(tokens, hidden)
 
+    ffn = int(fused.down.shape[2])
+    item_size = int(fused.gate_up.element_size())
+    chunk = chunk_size_for(
+        top_k=top_k,
+        hidden=hidden,
+        ffn=ffn,
+        item_size=item_size,
+        budget_bytes=max_gather_bytes,
+    )
+
+    if tokens <= chunk:
+        # 快路径：一块就够（decode 永远走这里，且不产生额外的 cat）
+        return _project_tokens(
+            x,
+            router_weight,
+            fused,
+            top_k=top_k,
+            norm_topk_prob=norm_topk_prob,
+            act_fn=act_fn,
+            out_shape=shape,
+            hidden=hidden,
+        )
+
+    # 分块路径（prefill）：逐块算，最后拼接。块数由 T 决定，对固定的调用点仍是静态的。
+    outs = []
+    logits_parts = []
+    for begin in range(0, tokens, chunk):
+        piece = x[begin : begin + chunk]
+        out_piece, logits_piece = _project_tokens(
+            piece,
+            router_weight,
+            fused,
+            top_k=top_k,
+            norm_topk_prob=norm_topk_prob,
+            act_fn=act_fn,
+            out_shape=tuple(piece.shape),
+            hidden=hidden,
+        )
+        outs.append(out_piece)
+        logits_parts.append(logits_piece)
+    out = torch.cat(outs, dim=0).reshape(*shape)
+    logits = torch.cat(logits_parts, dim=0)
+    return out, logits
+
+
+def _project_tokens(
+    x: Any,
+    router_weight: Any,
+    fused: FusedExperts,
+    *,
+    top_k: int,
+    norm_topk_prob: bool,
+    act_fn: Callable[[Any], Any],
+    out_shape: tuple,
+    hidden: int,
+) -> tuple[Any, Any]:
+    """对已经 reshape 成 (n, hidden) 的一批 token 做一次固定形状前向。"""
+    import torch
+    import torch.nn.functional as F
+
+    tokens = int(x.shape[0])
     logits = F.linear(x, router_weight)  # (T, E)
     weights = F.softmax(logits, dim=-1, dtype=torch.float)
     top_w, top_i = torch.topk(weights, top_k, dim=-1)  # (T, K) —— K 固定
@@ -156,7 +260,7 @@ def static_moe_forward(
     y = y * top_w.reshape(-1, 1)
 
     out = y.reshape(tokens, top_k, hidden).sum(dim=1)  # (T, hidden)
-    return out.reshape(*shape), logits
+    return out.reshape(*out_shape), logits
 
 
 class StaticShapedMoE:
