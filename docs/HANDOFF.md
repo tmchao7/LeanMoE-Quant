@@ -2,18 +2,53 @@
 
 > 写给**下一个 agent** 或接手的人。读完这一份就能直接干活，不需要重跑探索。
 >
-> - **写于**: 2026-09-30（2026-10-01 更新）
-> - **仓库 HEAD**: `4ae5c5b`（分支 `codex/p0-03-cudagraph`，**已推 GitHub**）
->   - `main` 停在 `e9563ee`；CUDA Graph 相关工作都在特性分支上
-> - **阶段**: Phase 0 基线与瓶颈归因已完成。**CUDA Graph 可行性门已就绪但尚未在 GPU 上跑过。**
-> - **服务器状态**: **当前是关机状态**（`connect.westd.seetacloud.com:23960` 连接被拒）。
->   显卡资源紧张时开不了机；数据盘应保留。开机后先跑 `bash scripts/run_cudagraph_gate.sh --check`。
+> ## ⚠️ 本文档的 §5 与 §10 已过期（写于 p0-03/p0-04 时期）
+>
+> **当前状态（2026-10-06 晚）**：
+>
+> - **仓库 HEAD**: `main = 6a6b1c1`，**已推 GitHub，服务器已同步**。分支
+>   `codex/p0-03-cudagraph` 与 `codex/p2-grouped-gemm` 都已并入 `main`。
+> - **阶段**: Phase 0 完成、Phase 2 的前两项完成（grouped GEMV、eager attention）。
+>   258 个离线测试通过；`ruff` / `black` / `tools/check_docs.py` 全绿。
+> - **服务器**: `ssh 5090b` → `connect.weste.seetacloud.com:45735`（**免密可用**）。
+>   旧别名 `5090`（`westd…:23960`）已失效。**这是共享机器**，见下方警告。
+>
+> **累计成绩（per-token p50，同机同 driver）**：
+>
+> | 阶段 | per-token | 相对 eager | 达成率 |
+> |---|---|---|---|
+> | eager 基线（SDPA，无图） | 82.64 ms | 1.0× | 1.8% |
+> | + CUDA Graph（`EXP-p0-04`） | 5.2637 ms | 15.73× | 28.7% |
+> | + grouped GEMV（`EXP-p2-02`） | 4.0715 ms | 20.3× | 37.1% |
+> | **+ eager attention（`EXP-p2-04`）** | **3.1051 ms** | **26.6×** | **48.6%** |
+> | `ctx=4096`：`p0-04` → `p2-04` | 8.4873 → **3.4788 ms** | 1.0× → **23.8×** | 43.4% |
+>
+> ### ★ 下一步的任务在专门文档里
+>
+> **[docs/HANDOFF_ATTN_KERNEL.md](HANDOFF_ATTN_KERNEL.md)** —— 写 split-KV
+> flash-decoding decode attention kernel。那一份包含靶子、设计、门、以及
+> 本会话实测踩过的全部坑。**要接着做 kernel 就读那一份，不要读本文档的 §5/§10。**
+>
+> 本文档的 §1–§4、§6–§9、§11–§12（服务器接入、环境、命令速查、代码结构、
+> 硬规则、陷阱、协作纪律、自检清单、成本）**仍然有效**，只有具体数字过时。
+>
+> ### ⚠️ 共享机器警告（2026-10-06 实测）
+>
+> `pareto_offload.py`（**不属于本仓库**，工作目录 `/root/autodl-tmp/mf-work/`）
+> 当天至少三次抢占 GPU，其中一次横穿测量。它跑的是**同一个 OLMoE 模型**。
+>
+> - **不要杀、不要动**那个进程或 `/root/MegaKernel-vLLM`、`/root/models/Qwen3-0.6B`。
+> - 跑 timing **之前**先 `nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader`。
+> - 有争用时的绝对数字不可用。**臂对照必须交错（round-robin）并报 MAD** ——
+>   实测顺序测量会把争用当成差异（同一个 config 两次差 29%、eager 假 1.51×）。
+>
+> ---
 
----
+## 0.0 （历史）当时唯一阻塞：服务器关机
 
-## 0.0 当前唯一阻塞（2026-10-01）
+> 以下内容写于 2026-10-01，**已不适用**，保留仅为记录当时的决策依据。
 
-**服务器关机，且暂时开不了机（AutoDL 显卡资源不足）。** 所以这一轮做的是
+**服务器关机，且暂时开不了机（AutoDL 显卡资源不足）。** 所以那一轮做的是
 **所有不需要 GPU 的准备工作**，让空闲时段一开机就能一次跑完：
 
 1. **预判了 `EXP-p0-03` 会失败**，并给出证据链（见 `docs/MOE_CUDAGRAPH.md`）。
@@ -21,13 +56,7 @@
    并用**真实的** HF 类在 CPU 上验证了数值等价（`tests/test_moe_static.py`，18 个测试）。
 3. **把 GPU 侧执行固化成一条命令**：`scripts/run_cudagraph_gate.sh`。
 
-开机后直接：
-
-```bash
-ssh 5090
-cd /root/LeanMoE-Quant && git fetch origin && git checkout codex/p0-03-cudagraph
-bash scripts/run_cudagraph_gate.sh
-```
+> 后续结果：预判成立（`EXP-p0-03` = `blocked`，机制确诊为 routing 的数据依赖形状）。
 
 ---
 
