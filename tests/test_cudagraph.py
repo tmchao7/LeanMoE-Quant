@@ -205,22 +205,29 @@ def test_graph_cli_on_mac_does_not_write_results(tmp_path):
 
 
 def test_runner_cli_rejects_graph_config_even_in_dry_run(tmp_path):
+    """cudagraph 臂必须拒绝 batch != 1 与 ctx < 1 —— 这是图的静态形状契约。
+
+    ★ 这里原来钉的是"ctx != 1024 就拒绝"（p0-03 的范围限制）。放开 ctx 是刻意的：
+    `EXP-p0-04` 要用 ctx=4096 做 H-A/H-B 的判别（attention 随 ctx 增长，
+    MoE 专家路径不随）。ctx 是**声明的实验轴**（configs/experiments.yaml），
+    batch 不是 —— 把范围限制钉成测试会把"我还没跑过"变成"结论的一部分"。
+    """
     from benchmarks.runner import main
 
-    assert (
-        main(
-            [
-                "--exp",
-                "EXP-p0-03-baseline-cudagraph",
-                "--ctx",
-                "4096",
-                "--results-dir",
-                str(tmp_path),
-                "--dry-run",
-            ]
+    def run(extra):
+        return main(
+            ["--exp", "EXP-p0-03-baseline-cudagraph", "--results-dir", str(tmp_path), "--dry-run"]
+            + extra
         )
-        != 0
-    )
+
+    assert run(["--batch", "2"]) != 0
+    assert run(["--ctx", "0"]) != 0
+    assert run(["--ctx", "-1"]) != 0
+    # 拒绝的路径不得留下任何结果文件
+    assert list(tmp_path.iterdir()) == []
+    # 而 ctx=4096 必须被接受 —— 否则 p0-04 的判别实验根本跑不了
+    assert run(["--ctx", "4096"]) == 0
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_graph_gate_rejects_nonfinite_logits_and_negative_kl():

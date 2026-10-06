@@ -382,8 +382,8 @@ def run_cudagraph(
 
     if dtype_name != "float16":
         raise ValueError("EXP-p0-03 supports dtype=float16 only")
-    if batch != 1 or ctx != 1024:
-        raise ValueError("EXP-p0-03 supports batch=1 and ctx=1024 only")
+    if batch != 1 or ctx < 1:
+        raise ValueError("the CUDA Graph arm supports batch=1 and ctx >= 1 only")
     CudaGraphConfig(ctx=ctx, max_new_tokens=max_new_tokens, batch=batch).validate_timing(timed)
 
     tr = VramTracker()
@@ -1138,7 +1138,7 @@ def build_cudagraph_payload(
     payload["applicability"] = {
         "applies_to": "fp16、单卡、batch=1、ctx=%s、%s"
         % (cfg.get("ctx"), payload["hardware"].get("compute_capability")),
-        "does_not_apply_to": "quantized execution、PagedAttention、ctx>1024、other GPUs",
+        "does_not_apply_to": "quantized execution、PagedAttention、ctx>4096、other GPUs",
         "why": "StaticCache and graph addresses/shapes are fixed to this feasibility gate.",
     }
     payload["_measurement"] = {
@@ -1227,8 +1227,13 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     if execution == "cudagraph":
-        if args.ctx != 1024 or args.batch != 1:
-            print("runner 失败: EXP-p0-03 supports only ctx=1024 and batch=1", file=sys.stderr)
+        # ★ 这里原来把 ctx 钉死成 1024（p0-03 的范围限制）。放开是刻意的：
+        #   ctx 是**声明的实验轴**（见 configs/experiments.yaml 的 p0-04），
+        #   而且 ctx=4096 不只是多一个数据点 —— 它是 H-A/H-B 的判别实验：
+        #   attention 扫的槽位随 ctx 线性增长，而 MoE 专家路径与 ctx 无关。
+        #   残差若随 ctx 长大，它是 attention；若持平，它是 kernel 数地板。
+        if args.batch != 1 or args.ctx < 1:
+            print("runner 失败: cudagraph 臂只支持 batch=1 且 ctx >= 1", file=sys.stderr)
             return 2
         try:
             CudaGraphConfig(

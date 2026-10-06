@@ -88,7 +88,13 @@ experiments:
       bit_width: "fp16"
       execution: "cudagraph"
       moe: "static"
-    ctx: [1024]
+    # ★ ctx 是**声明的轴**（与 p0-02 同一惯例），不是隐藏的变量变更。
+    #   加 4096 不是为了多一个点 —— 它是 H-A/H-B 的判别实验：attention 扫的
+    #   槽位数随 ctx 线性增长（1056 -> 4128），而 MoE 专家路径与 ctx 无关。
+    #   残差若随 ctx 长大，它是 attention；若持平，它是 kernel 数地板。
+    #   两条路线的 GPU 花法完全不同（见 benchmarks/attribution.py）。
+    #   4096 也是 OLMoE 的 max_position_embeddings。
+    ctx: [1024, 4096]
     metrics: ["capture", "kl", "top1_agreement", "per_token_p50", "per_token_p99", "vram_split", "host_share"]
 
   # ---------- Phase 1：量化功能链路（只谈精度，不谈性能） ----------

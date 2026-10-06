@@ -450,7 +450,9 @@ def test_exp_p0_04_declared_with_static_moe():
     exp = by_id["EXP-p0-04-cudagraph-static-moe"]
     assert exp["config"]["moe"] == "static"
     assert exp["config"]["execution"] == "cudagraph"
-    assert exp["ctx"] == [1024]
+    # ctx 是声明的轴：1024 是可行性门，4096 是 H-A/H-B 的判别点
+    # （attention 随 ctx 增长，MoE 专家路径不随）。两个 ctx 各自一个结果文件。
+    assert exp["ctx"] == [1024, 4096]
 
 
 def test_p0_03_stays_on_the_hf_path():
