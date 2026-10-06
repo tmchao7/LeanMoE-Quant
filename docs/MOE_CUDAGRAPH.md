@@ -227,6 +227,8 @@ M=/root/autodl-tmp/ms/models/allenai--OLMoE-1B-7B-0924/snapshots/master
 | §3.3 | gather 税 2.07 ms | 实际可省 1.19 ms（副本落在 L2） | `EXP-p2-02` |
 | §3.3 | "其它 1.59 ms = attention 扫 1056 槽位" | **方向对**，但当时用字节账反驳它是错的 —— attention 是延迟受限 | `EXP-p2-02` / `EXP-p2-03` |
 | — | （未涉及） | FMHA 的 64x128 tile 对 q_len=1 浪费 98.4%，换 `attn_implementation="eager"` 在 ctx=4096 值 2.440× | `EXP-p2-04` |
+| — | attention 核心 ≈ 0.212 ms/token（手稿 §2 那张按 0.0928+0.0393+0.0373+0.0145+0.0282 加的表） | 图内真实核心是 **0.1743**：那张表把 **o_proj 的 GEMV（0.0373）** 与 **routing softmax（0.0145）** 也算进去了，它们在两条臂里都出现 | `EXP-p2-05` |
+| — | （未涉及） | 自研 split-KV kernel 把 0.1743 换成 **0.1366**（净省 0.0377 ms/token），整 token 3.1051 → **3.0077**（ctx=1024，1.03×）；ctx=4096 是 3.4788 → **3.2356**（1.08×）。隔离测量的 7× 不外推 | `EXP-p2-05` |
 
 **结论的当前状态（per-token p50，同机同 driver）**：
 
@@ -235,6 +237,7 @@ eager 基线（SDPA，无图）      82.64 ms      1.0x    达成率  1.8%
 + CUDA Graph（p0-04）          5.2637 ms    15.73x          28.7%   ctx=1024
 + grouped GEMV（p2-02）        4.0715 ms    20.3x           37.1%
 + eager attention（p2-04）     3.1051 ms    26.6x           48.6%
++ split-KV attn kernel（p2-05）3.0077 ms    27.5x           50.2%
 
-ctx=4096（p0-04 -> p2-04）     8.4873 -> 3.4788 ms         1.0x -> 23.8x
+ctx=4096（p0-04 -> p2-04 -> p2-05）  8.4873 -> 3.4788 -> 3.2356 ms   -> 25.5x
 ```
