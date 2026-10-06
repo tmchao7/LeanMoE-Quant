@@ -101,40 +101,6 @@ def fuse_experts(experts: Any) -> FusedExperts:
     return FusedExperts(gate_up=gate_up.contiguous(), down=down.contiguous())
 
 
-# 每次 gather 的显存预算。★ 这个常量的存在是一个 OOM 事故的结果：
-#   本模块最初的实现直接 `gate_up[ids]`，其中 `ids` 有 T*K 个元素。
-#   decode 时 T=1（8 个专家，67 MiB）没问题，但 **prefill 时 T=1024**
-#   → (8192, 2048, 2048) fp16 = **64 GiB**，在 31 GiB 的卡上直接 OOM。
-#   小模型的 parity 测试（ctx=5）完全没暴露它 —— 只有真实 ctx 的算术才会。
-# ★ 512 MiB 太保守了：ctx=1024 时每块只有 5 个 token，要 205 块，
-#   TTFT 因此从 111 ms 恶化到 2303 ms。2 GiB 仍然是加载 13 GiB 模型后
-#   （余约 17.68 GiB）可以放心用的量，而块数降到 49。
-#   注意：这只影响 **prefill**；decode（T=1）永远只走一块，不进这个循环。
-MAX_GATHER_BYTES = 2 * 1024 * 1024 * 1024
-
-
-def gather_bytes_per_token(*, top_k: int, hidden: int, ffn: int, item_size: int = 2) -> int:
-    """每 token 因 gather 而额外分配的字节数（gate_up + down 两个张量）。
-
-    这是**纯算术**，所以可以在没有 GPU 的机器上断言"预填充路径不会爆显存"。
-    """
-    per_pair = (2 * ffn * hidden + hidden * ffn) * item_size
-    return top_k * per_pair
-
-
-def chunk_size_for(
-    *,
-    top_k: int,
-    hidden: int,
-    ffn: int,
-    item_size: int = 2,
-    budget_bytes: int = MAX_GATHER_BYTES,
-) -> int:
-    """在预算内一次能处理多少个 token。至少为 1。"""
-    per_token = gather_bytes_per_token(top_k=top_k, hidden=hidden, ffn=ffn, item_size=item_size)
-    return max(1, int(budget_bytes // max(per_token, 1)))
-
-
 def static_moe_forward(
     hidden_states: Any,
     router_weight: Any,
@@ -143,32 +109,35 @@ def static_moe_forward(
     top_k: int,
     norm_topk_prob: bool = False,
     act_fn: Callable[[Any], Any] | None = None,
-    max_gather_bytes: int = MAX_GATHER_BYTES,
 ) -> tuple[Any, Any]:
-    """固定形状的 MoE 前向。返回 (output, router_logits)。
+    """MoE 前向。返回 (output, router_logits)。
 
-    与 `OlmoeSparseMoeBlock.forward` 数值等价（见 tests/test_moe_static.py 的
-    CPU parity 测试），但**全程没有数据依赖的形状**：
+    ## 两条路径，按 token 数分派
 
-        - `torch.topk` 的输出是 (T, K)，K 固定；
-        - 没有任何 `torch.where` / `nonzero` / `.item()` / `.cpu()`；
-        - 没有 `for expert in range(num_experts)` 这种随模型规模变化的循环。
+        T == 1  -> `_decode_forward`：固定形状，可进 CUDA Graph
+        T >  1  -> `_prefill_forward`：逐专家循环，**只用于 eager**
 
-    因此 decode 时可以放进 CUDA Graph。
+    ## ★ 为什么必须分开（两次实测事故）
 
-    ## ★ 为什么必须分块（一次真实 OOM 的教训）
+    **事故 1：分块 gather 在 prefill 时 OOM。**
+    最直接的写法是 `gate_up[ids]`，`ids` 有 `T*K` 个元素，会物化
+    `(T*K, 2*ffn, hidden)`。decode 时 T=1（8 个专家，67 MiB）没事；prefill 时
+    T=1024 → (8192, 2048, 2048) fp16 = **64 GiB**，报错原文就是这个数字。
 
-    最直接的写法是 `gate_up[ids]`，`ids` 有 `T*K` 个元素，会**物化**一个
-    `(T*K, 2*ffn, hidden)` 的张量。decode 时 T=1，只有 67 MiB，没问题；
-    但 **prefill 时 T=ctx=1024**：
+    **事故 2：分块之后 prefill 慢 20 倍。**
+    按 token 分块确实压住了显存，但算法本身是错的 —— 它对**每个 (token, expert)
+    对**都读一遍专家权重：
 
-        (1024*8, 2048, 2048) x 2 B = 64 GiB     <- 在 31 GiB 的卡上直接 OOM
+        HF 逐专家循环 : 64 专家 x 8.4 MB          =   537 MB/层
+        分块 gather   : 8192 对 x 8.4 MB          = 68000 MB/层   (多读 128 倍)
 
-    所以按 token 分块，把一次性 gather 的规模压在 `max_gather_bytes` 以内。
-    decode（T=1）永远只有一块，等于没有循环，仍然可以进图；
-    prefill 才走多块，而 prefill 是 eager 的、不进图，多几轮无妨。
+    实测单层 prefill：HF 7.60 ms vs 分块 155.77 ms（加大预算只降到 152 ms，
+    说明瓶颈是重复读权重，不是块数）。
+
+    所以 prefill 必须回到"每个专家的权重只读一次、作用于所有路由到它的 token"。
+    那条路径需要数据依赖的索引（`nonzero`），**但它不进图**，因此安全。
+    真正的固定形状约束只作用于 decode。
     """
-    import torch
     import torch.nn.functional as F
 
     if act_fn is None:
@@ -181,19 +150,8 @@ def static_moe_forward(
         tokens *= s
     x = hidden_states.reshape(tokens, hidden)
 
-    ffn = int(fused.down.shape[2])
-    item_size = int(fused.gate_up.element_size())
-    chunk = chunk_size_for(
-        top_k=top_k,
-        hidden=hidden,
-        ffn=ffn,
-        item_size=item_size,
-        budget_bytes=max_gather_bytes,
-    )
-
-    if tokens <= chunk:
-        # 快路径：一块就够（decode 永远走这里，且不产生额外的 cat）
-        return _project_tokens(
+    if tokens == 1:
+        return _decode_forward(
             x,
             router_weight,
             fused,
@@ -203,30 +161,31 @@ def static_moe_forward(
             out_shape=shape,
             hidden=hidden,
         )
-
-    # 分块路径（prefill）：逐块算，最后拼接。块数由 T 决定，对固定的调用点仍是静态的。
-    outs = []
-    logits_parts = []
-    for begin in range(0, tokens, chunk):
-        piece = x[begin : begin + chunk]
-        out_piece, logits_piece = _project_tokens(
-            piece,
-            router_weight,
-            fused,
-            top_k=top_k,
-            norm_topk_prob=norm_topk_prob,
-            act_fn=act_fn,
-            out_shape=tuple(piece.shape),
-            hidden=hidden,
-        )
-        outs.append(out_piece)
-        logits_parts.append(logits_piece)
-    out = torch.cat(outs, dim=0).reshape(*shape)
-    logits = torch.cat(logits_parts, dim=0)
-    return out, logits
+    out, logits = _prefill_forward(
+        x,
+        router_weight,
+        fused,
+        top_k=top_k,
+        norm_topk_prob=norm_topk_prob,
+        act_fn=act_fn,
+    )
+    return out.reshape(*shape), logits
 
 
-def _project_tokens(
+def _route(x: Any, router_weight: Any, *, top_k: int, norm_topk_prob: bool):
+    """公共路由计算：返回 (logits, top_w, top_i)。两种形状约定下的输出都固定。"""
+    import torch
+    import torch.nn.functional as F
+
+    logits = F.linear(x, router_weight)  # (T, E)
+    weights = F.softmax(logits, dim=-1, dtype=torch.float)
+    top_w, top_i = torch.topk(weights, top_k, dim=-1)  # (T, K) —— K 固定
+    if norm_topk_prob:
+        top_w = top_w / top_w.sum(dim=-1, keepdim=True)
+    return logits, top_w.to(x.dtype), top_i
+
+
+def _decode_forward(
     x: Any,
     router_weight: Any,
     fused: FusedExperts,
@@ -237,18 +196,20 @@ def _project_tokens(
     out_shape: tuple,
     hidden: int,
 ) -> tuple[Any, Any]:
-    """对已经 reshape 成 (n, hidden) 的一批 token 做一次固定形状前向。"""
+    """**固定形状**路径 —— 唯一允许进 CUDA Graph 的一条。
+
+    全程没有数据依赖的形状：
+
+        - `torch.topk` 的输出是 (T, K)，K 固定；
+        - 没有任何 `torch.where` / `nonzero` / `.item()` / `.cpu()`；
+        - 没有随模型规模变化的 Python 循环。
+
+    T 恒为 1，所以 gather 的规模就是 K 个专家（OLMoE 下 67 MiB），与 ctx 无关。
+    """
     import torch
-    import torch.nn.functional as F
 
+    logits, top_w, top_i = _route(x, router_weight, top_k=top_k, norm_topk_prob=norm_topk_prob)
     tokens = int(x.shape[0])
-    logits = F.linear(x, router_weight)  # (T, E)
-    weights = F.softmax(logits, dim=-1, dtype=torch.float)
-    top_w, top_i = torch.topk(weights, top_k, dim=-1)  # (T, K) —— K 固定
-    if norm_topk_prob:
-        top_w = top_w / top_w.sum(dim=-1, keepdim=True)
-    top_w = top_w.to(x.dtype)
-
     ids = top_i.reshape(-1)  # (T*K,)
     # 每个 token 的 K 个专家共用同一份 hidden state。repeat_interleave 让
     # `xr[t*K + j]` 正好对应 `ids[t*K + j]`，配对关系不会错位。
@@ -265,6 +226,43 @@ def _project_tokens(
 
     out = y.reshape(tokens, top_k, hidden).sum(dim=1)  # (T, hidden)
     return out.reshape(*out_shape), logits
+
+
+def _prefill_forward(
+    x: Any,
+    router_weight: Any,
+    fused: FusedExperts,
+    *,
+    top_k: int,
+    norm_topk_prob: bool,
+    act_fn: Callable[[Any], Any],
+) -> tuple[Any, Any]:
+    """**prefill 专用**路径：逐专家循环，每个专家的权重只读一次。
+
+    ⚠️ 这条路径**含数据依赖的算子**（`nonzero`），因此**绝不能进 CUDA Graph**。
+    它只应在 T > 1（prefill）时被调用，而 prefill 是 eager 的。
+    下面静态源码测试会断言这些算子只出现在本函数里。
+    """
+    import torch
+
+    logits, top_w, top_i = _route(x, router_weight, top_k=top_k, norm_topk_prob=norm_topk_prob)
+    out = torch.zeros_like(x)
+
+    for e in range(fused.num_experts):  # trip count = num_experts，与数据无关
+        selected = top_i == e  # (T, K) bool
+        # 数据依赖：这个专家被哪些 token 选中。仅在 eager prefill 路径出现。
+        tok, slot = selected.nonzero(as_tuple=True)
+        if tok.numel() == 0:
+            continue
+        w = top_w[tok, slot].unsqueeze(-1)  # (n, 1)
+        xe = x[tok]  # (n, hidden)
+        gu = xe @ fused.gate_up[e].t()  # (n, 2*ffn)
+        gate, up = gu.chunk(2, dim=-1)
+        act = act_fn(gate) * up
+        y = act @ fused.down[e].t()  # (n, hidden)
+        out.index_add_(0, tok, y * w)
+
+    return out, logits
 
 
 class StaticShapedMoE:
