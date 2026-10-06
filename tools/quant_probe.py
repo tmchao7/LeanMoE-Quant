@@ -826,6 +826,10 @@ def main(argv: list[str] | None = None) -> int:
                 json.dump(result, fh, ensure_ascii=False, indent=2, default=str)
 
     for label, ids in prompts:
+        # ★ `_snapshot` 是**把原模块停在 CPU** 上省显存的，所以任何一次模型前向之前
+        #   都必须先恢复 —— 否则第一次前向就会 "mat2 is on cpu"。这同时保证每个窗口
+        #   都从 fp16 权重重新开始（上一个窗口最后一个臂留下的 QuantLinear 也被换回）。
+        _restore(model, snapshot)
         print(
             "=== 窗口 %s: 取轨迹（fp16 贪心 %d 步）===" % (label, args.max_new_tokens), flush=True
         )
