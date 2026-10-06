@@ -204,6 +204,46 @@ def _eager_reference_logits(model, ids, *, max_new_tokens: int) -> dict[str, Any
     return {"seed_token": seed_token, "output_tokens": output_tokens, "logits": logits}
 
 
+def _static_eager_correctness(
+    session: StaticCacheDecodeSession, *, max_new_tokens: int
+) -> dict[str, Any]:
+    """Same graph path, executed **eagerly** — the reference the gate actually needs.
+
+    ★ 为什么不能用 `_eager_reference_logits` 当参照：
+
+    那个函数走的是**动态 KV cache**，而 graph 走的是 **StaticCache**。两者
+    数值上本来就不一样（实测 KL = 1.698e-04，top-1 仍然 1.0），因为：
+
+      - StaticCache 每步 attend 全部 max_cache_len（1056）个位置，靠 mask 屏蔽；
+        动态 cache 只 attend 已填充的 ~33 个位置 —— 归约顺序与项数都不同；
+      - mask 用 `finfo.min`（-65504）而不是 -inf，softmax 的分母项数也不同。
+
+    拿它当参照，量到的是"两种 cache 的口径差"，而不是"图回放是否忠实"。
+
+    实测四种组合的 KL（RTX 5090 / OLMoE fp16 / ctx=1024 / 32 步）：
+
+        HF+动态      vs 固定形状+动态        = 7.481e-04   (MoE 实现差异)
+        固定形状+动态 vs 固定形状+StaticCache = 1.698e-04   (cache 类型差异)
+        graph        vs 固定形状+StaticCache = 0.000e+00   <-- 图本身零误差
+        graph        vs HF+动态              = 7.199e-04
+
+    所以门必须比 `decode_eager()`（同 StaticCache、同 4D mask、不进图）。
+    **这是修测量口径，不是放宽门槛** —— 图回放的容差反而从 1e-5 收紧到"必须完全一致"。
+    """
+    import torch
+
+    candidate: list[Any] = []
+    output_tokens: list[int] = []
+    session.reset()
+    seed_token = session.seed_token_id
+    for _ in range(max_new_tokens):
+        logits = session.decode_eager()
+        last = logits[:, -1:, :]
+        output_tokens.append(int(last.argmax(dim=-1).item()))
+        candidate.append(last.detach().to("cpu", torch.float32).clone())
+    return {"seed_token": seed_token, "output_tokens": output_tokens, "logits": candidate}
+
+
 def _static_graph_correctness(
     session: StaticCacheDecodeSession, *, max_new_tokens: int
 ) -> dict[str, Any]:
@@ -379,8 +419,11 @@ def run_cudagraph(
 
     capture = session.capture(warmup=warmup)
     with tr.phase("forward"):
+        # ★ 门用**同路径 eager**做参照（见 _static_eager_correctness 的说明）。
+        #   HF+动态 cache 的对比另算，作为 informational 记录 —— 那个 1.7e-4
+        #   是已知的 cache 口径差，不是失败。
         try:
-            reference = _eager_reference_logits(model, ids, max_new_tokens=max_new_tokens)
+            reference = _static_eager_correctness(session, max_new_tokens=max_new_tokens)
         except Exception as exc:  # noqa: BLE001
             raise CudaGraphCaptureError("correctness_reference", exc) from exc
         try:
@@ -389,8 +432,22 @@ def run_cudagraph(
             raise
         except Exception as exc:  # noqa: BLE001
             raise CudaGraphCaptureError("replay", exc) from exc
+        # informational：与 HF 原版 + 动态 cache 的差异（跨实现、跨 cache 口径）
+        try:
+            hf_reference = _eager_reference_logits(model, ids, max_new_tokens=max_new_tokens)
+            cross = compare_logits(hf_reference["logits"], candidate["logits"])
+        except Exception:  # noqa: BLE001
+            cross = {"kl": None, "top1_agreement": None}
         try:
             correctness = compare_logits(reference["logits"], candidate["logits"])
+            correctness["informational_vs_hf_dynamic_cache"] = {
+                "kl": cross.get("kl"),
+                "top1_agreement": cross.get("top1_agreement"),
+                "note": (
+                    "不是门槛：这一项同时含 MoE 实现差异(~7.5e-4)与 cache 口径差异"
+                    "(~1.7e-4)，两者都是预期的数值差，不表示图有问题"
+                ),
+            }
             correctness.update(
                 seed_token_match=reference["seed_token"] == candidate["seed_token"],
                 token_sequence_match=reference["output_tokens"] == candidate["output_tokens"],

@@ -518,6 +518,12 @@ class StaticCacheDecodeSession:
         if warmup < 1:
             raise ValueError("warmup must be positive")
         try:
+            # ★ 先复位。capture() 不能被假定为"刚构造完、position 还在起点"：
+            #   如果在这之前跑过任何 eager 步（例如为了拿同路径参照），
+            #   position 会推进到 max_cache_len，warmup 里的 `_set_step_inputs()`
+            #   就会抛 "decode position exceeded StaticCache capacity"。
+            #   复位之后 capture 与调用顺序无关，也更可复现。
+            self.prefill()
             self.stream = torch.cuda.Stream(device=self.device)
             current = torch.cuda.current_stream(self.device)
             self.stream.wait_stream(current)
