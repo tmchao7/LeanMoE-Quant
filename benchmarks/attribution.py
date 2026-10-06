@@ -85,6 +85,11 @@ HYPO_THRESHOLDS = {
 #   下面每个 needle 都对着**实测出现过的 kernel 名**，并有回归测试钉住
 #   （tests/test_attribution.py 用 ctx=4096 那一跑的原始名字）。
 KERNEL_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # ★ 自己写的 kernel 必须**单独成桶**。把它们丢进 unmatched 的后果实测到了：
+    #   EXP-p2-02 里 `_gate_up_act_kernel`(0.78) + `_down_sum_kernel`(0.34) = 1.13 ms
+    #   （占 busy 的 28%）全部落进 unmatched，于是"我的 kernel 花了多少时间"
+    #   这个最该看的东西在归因表里消失了。工具不能把自己加的东西藏起来。
+    ("custom_kernel", ("gate_up_act", "down_sum", "act_combine", "out_reduce", "triton_")),
     # 专家权重 gather —— 刻意**不**用裸 "gather"：at::native::sbtopk::gatherTopK
     # 是路由的 top-k，不是专家拷贝，用它会把 routing 算成 expert_gather。
     ("expert_gather", ("indexfunc", "vectorized_gather", "index_select", "index_copy")),
@@ -92,7 +97,7 @@ KERNEL_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("attention", ("fmha", "attention", "flash", "scaled_dot", "memefficient")),
     ("routing", ("topk", "sortkv", "bitonic", "softmax")),
     ("expert_gemm", ("gemm", "gemv", "cublas", "cutlass", "matmul", "bmm")),
-    ("elementwise", ("elementwise", "reduce", "cub::", "triton_")),
+    ("elementwise", ("elementwise", "reduce", "cub::")),
     ("copy_fill", ("copy", "fill", "cast", "cat", "contiguous", "memcpy")),
 )
 
@@ -307,11 +312,12 @@ def resolve_hypothesis(
     gemm_ms = bucket_ms("expert_gemm")
     attention_ms = bucket_ms("attention")
     routing_ms = bucket_ms("routing")
+    custom_ms = bucket_ms("custom_kernel")
     other_ms = round(
         sum(
             float(v.get("self_ms_per_token", 0.0))
             for k, v in pattern.items()
-            if k not in ("expert_gather", "expert_gemm", "attention")
+            if k not in ("expert_gather", "expert_gemm", "attention", "custom_kernel")
         ),
         5,
     )
@@ -347,7 +353,10 @@ def resolve_hypothesis(
         "expert_gather_ms_per_token": gather_ms,
         "expert_gemm_ms_per_token": gemm_ms,
         "routing_ms_per_token": routing_ms,
+        "custom_kernel_ms_per_token": custom_ms,
         "other_ms_per_token": other_ms,
+        "unmatched_ms_per_token": bucket_ms("unmatched"),
+        "unmatched_names": groups.get("unmatched_names", []),
         "dram_group_ms_per_token": dram_ms,
         "latency_bucket_ms_per_token": round(latency_ms, 5),
         "thresholds": th,

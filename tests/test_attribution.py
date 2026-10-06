@@ -308,6 +308,28 @@ def test_real_kernel_names_from_the_ctx_4096_run_are_classified_correctly():
     assert got["elementwise"] == pytest.approx(0.0675, abs=1e-4)
 
 
+def test_own_kernels_get_their_own_bucket_and_are_never_unmatched():
+    """★ 自己写的 kernel 必须单独成桶，不能落进 unmatched。
+
+    实测（EXP-p2-02）：`_gate_up_act_kernel` 0.78 ms + `_down_sum_kernel` 0.34 ms
+    = busy 的 28%。没有这个桶时它们全在 unmatched 里 —— 也就是"我的 kernel 花了
+    多少时间"这个最该看的东西在归因表里消失了。工具不能把自己加的东西藏起来。
+    """
+    from benchmarks.attribution import group_kernels
+
+    rows = [
+        _row("_gate_up_act_kernel", 0.7843, 16.0),
+        _row("_down_sum_kernel", 0.3438, 16.0),
+        _row("_out_reduce_kernel", 0.0100, 16.0),
+        _row("_act_combine_kernel", 0.0050, 16.0),
+    ]
+    groups = group_kernels(rows)
+    assert groups["by_pattern"]["custom_kernel"]["self_ms_per_token"] == pytest.approx(
+        1.1431, abs=1e-4
+    )
+    assert not any("kernel" in n for n in groups["unmatched_names"] if "act_kernel" in n)
+
+
 def test_thresholds_are_frozen_constants_not_arguments():
     """判据必须是模块级常量 —— 不允许在调用点临时给一个更好看的阈值。"""
     # ★ 这两个是**测量之前**就写下的，一个都没改过（H-C 是后来补的桶，见下）
