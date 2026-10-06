@@ -165,25 +165,47 @@ notes:
 
 ```text
 floor_T              1.5982 ms
-gather 额外流量 3.22 GB -> 2.07 ms    (读+写一遍专家权重)
+gather 额外流量 3.22 GB -> 2.07 ms    (读+写一遍专家权重)   <-- 见下方实测修正
 其它（attention 扫 1056 位置等）   1.59 ms
                      ─────────
 实测                 5.2547 ms
 ```
 
-所以下一步的两件事，按收益排序：
+> ### ⚠️ 实测修正（后续实验推翻了上面两条预测）
+>
+> **1) `2.07 ms` 偏大约 2 倍。** 那个数字是"3.22 GB ÷ 1559.2 GB/s"，
+> 隐含假设这些字节都来自 DRAM。实测 gather 两个 kernel 是 104.6 µs/层，
+> 而"读+写"的 DRAM 下界是 129.1 µs/层 —— **达成率 120.8%，跑得比它自己的下界还快**。
+> 副本的写与 bmm 的重读基本留在 L2（5090 约 96 MB，`gate_up` 副本 67 MB）。
+> 做完 `EXP-p2-02` 后的**实测净收益是 1.293x**（5.2637 → 4.0715 ms），不是预期的 ~1.65x。
+>
+> **2) "其它 1.59 ms = attention 扫 1056 槽位"方向对，但推理链是错的。**
+> 本条当时用"KV 读只有 138 MB = 0.089 ms"去反驳它 —— 那个反驳本身错了，
+> 因为它把 attention 的成本当成**字节**问题。实测 attention kernel 是**延迟受限**的：
+> `fmha_cutlassF_...` 每层 75.69 µs（ctx=1024）/ 280 µs（ctx=4096），
+> 而 grid 只有 `batch × heads = 16` 个 program 落在 170 个 SM 上。
+> `ctx=4096` 的差分给出了干净的判据：**槽位 4.000x，总增量 +3.21 ms，
+> attention 占 101.5%，MoE 专家路径 0.985x（与 ctx 无关）**。
+>
+> **3) 两步的先后顺序是对的，但第 2 步比第 1 步大。** 去掉 gather 之后
+> （[EXP-p2-02](EXP-p2-02-moe-grouped-gemm.md)），attention 变成最大项
+> （1.2110 ms = busy 的 30%），在 ctx=4096 下是 4.4794 ms = **53%**。
+> 所以 attention 才是下一件大事。
 
-1. **去掉 gather**：Phase 2 的 Triton grouped GEMM 在 kernel 内由专家 id 算指针，
-   省掉那 2.07 ms → 预期 ~3.2 ms（达成率 ~50%）。
-2. **缩短 attention 扫描**：StaticCache 每步 attend 全部 1056 个槽位。
-   可用滑动窗口或按实际长度裁剪 → 预期再省 ~1 ms。
+按**实测**重排的下一步：
+
+1. **attention kernel，循环上界改成从设备内存读出的已填充长度**（D-2b）。
+   launch 形状保持静态 → 图安全。ctx=1024 最多省 ~1.2 ms，**ctx=4096 最多省 ~4.4 ms**。
+2. **继续减 kernel 数**（D-2a）：`latency_floor` 仍有 1.0635 ms / 977 kernels。
+   router 的 `gemv + softmax + topk + bitonic sort` 可合成一个 kernel。
+3. **dequant 融进 grouped kernel**（`EXP-p2-01`，E2 立论）—— 结构已就位。
 
 其它：
 
-- `EXP-p0-04` 的 `ctx=4096` 一条（[T] 里 KV 占比从 5.4% 升到 18.5%）。
-- 现在才第一次具备做 `EXP-p1-01`（W8/W4 精度）与 `EXP-p4b-01`（截断）的条件 ——
-  在此之前端到端数字会被 launch 开销完全淹没。
-- `moe_static` 的 gather 方案**只是可行性参照**，不是交付形态；见上第 1 条。
+- `EXP-p0-04` 的 `ctx=4096` 一条已跑（见 `results/…__ctx=4096/result.json`）：
+  per-token 8.4873 ms。它是 attention 假设的判别点而非"多一个点"。
+- 现在才第一次具备做 `EXP-p1-01`（W8/W4 精度）与 `EXP-p4b-01`（截断）的条件。
+- `moe_static` 的 gather 方案**只是可行性参照**，已由 `EXP-p2-02` 取代。
 
 ## Applicability
 
