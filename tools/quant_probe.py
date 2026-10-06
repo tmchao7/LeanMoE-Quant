@@ -649,6 +649,19 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="EXP-p1-01 的 summary.json（用于核对轨迹是否一致）",
     )
+    ap.add_argument(
+        "--prompt-source",
+        default="ones",
+        choices=["ones", "wikitext"],
+        help=(
+            "teacher forcing 的 prompt。★ `ones` 是 EXP-p1-01/02 用的（1024 个 token id=1）——"
+            "那是一段**退化输入**，不是 METRICS.md 说的'固定 prompt 集'。"
+            "`wikitext` 用真实文本的前 ctx 个 token，用来检验 KL 是不是 prompt 的产物。"
+        ),
+    )
+    ap.add_argument(
+        "--prompt-cache", default=None, help="wikitext token id 缓存（与 tools/quant_ppl 共用）"
+    )
     args = ap.parse_args(argv)
 
     include = (
