@@ -687,7 +687,21 @@ def main(argv: list[str] | None = None) -> int:
     device = "cuda"
     model, _ = _load_model(args.model, "float16", device)
     n_layers = int(model.config.num_hidden_layers)
-    ids = torch.full((1, args.ctx), 1, dtype=torch.long, device=device)
+    if args.prompt_source == "wikitext":
+        if not args.prompt_cache or not os.path.exists(args.prompt_cache):
+            print(
+                "--prompt-source wikitext 需要 --prompt-cache 指向已缓存的 token id",
+                file=sys.stderr,
+            )
+            return 2
+        cached = torch.load(args.prompt_cache, weights_only=True)
+        if cached.numel() < args.ctx:
+            print("缓存的 token 数 %d < ctx %d" % (int(cached.numel()), args.ctx), file=sys.stderr)
+            return 2
+        ids = cached[: args.ctx].view(1, -1).to(device)
+    else:
+        # EXP-p1-01/02 的口径：1024 个 token id=1。保留它以便逐位复现历史数字。
+        ids = torch.full((1, args.ctx), 1, dtype=torch.long, device=device)
 
     print("=== 取轨迹（fp16 贪心 %d 步）===" % args.max_new_tokens, flush=True)
     tokens: list[int] = []
@@ -710,6 +724,8 @@ def main(argv: list[str] | None = None) -> int:
         "ctx": args.ctx,
         "max_new_tokens": args.max_new_tokens,
         "n_layers": n_layers,
+        "prompt_source": args.prompt_source,
+        "prompt_first_tokens": [int(x) for x in ids[0, :8].tolist()],
         "trajectory_tokens": tokens,
         "step_ratio_w4_over_w8": STEP_RATIO_W4_OVER_W8,
         # 自检：参考与自己的 KL 必须是 0 —— 这是"指标实现没写错"的最小断言
