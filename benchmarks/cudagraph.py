@@ -263,8 +263,20 @@ def compare_logits(reference: list[Any], candidate: list[Any]) -> dict[str, Any]
 
     if len(reference) != len(candidate) or not reference:
         raise ValueError("reference and candidate must have the same non-empty step count")
-    ref = torch.cat([x.reshape(1, -1).to(torch.float32) for x in reference], dim=0)
-    got = torch.cat([x.reshape(1, -1).to(torch.float32) for x in candidate], dim=0)
+
+    # ★ 必须显式搬到 CPU，不能用 `.to(torch.float32)` 只改 dtype。
+    #   两边的来源天然不同设备：eager 参照在 GPU 上，而 graph 侧走
+    #   `session.logits_cpu()` 回到 CPU。只改 dtype 会留下两个设备，
+    #   `torch.cat` 直接报
+    #   "Expected all tensors to be on the same device, but found at least two
+    #    devices, cuda:0 and cpu!"。
+    #   这个 bug 一直藏着，因为在这之前**没有任何一次 capture 成功过** ——
+    #   正确性门从来没有真正跑到过。
+    def _flatten(x: Any) -> Any:
+        return x.detach().reshape(1, -1).to(device="cpu", dtype=torch.float32)
+
+    ref = torch.cat([_flatten(x) for x in reference], dim=0)
+    got = torch.cat([_flatten(x) for x in candidate], dim=0)
     ref_logp = torch.log_softmax(ref, dim=-1)
     got_logp = torch.log_softmax(got, dim=-1)
     kl = (ref_logp.exp() * (ref_logp - got_logp)).sum(dim=-1).mean()

@@ -273,3 +273,73 @@ def test_timed_replay_advances_autoregressive_state():
     session = FakeSession()
     assert replay_timed_step(session) == "logits"
     assert session.calls == [True]
+
+
+# ---------------------------------------------------------------------------
+# ★ 跨设备比较 —— 一个直到 capture 成功才暴露出来的 bug
+# ---------------------------------------------------------------------------
+def test_compare_logits_accepts_tensors_on_different_devices():
+    """★ 回归测试：参照在 GPU、候选在 CPU，是**正常**情况，不是错误。
+
+    实际布局：eager 参照 logits 留在 GPU 上，而 graph 侧经
+    `session.logits_cpu()` 回到 CPU。原来的实现只做 `.to(torch.float32)`
+    （只改 dtype、不改设备），于是 `torch.cat` 报
+    "Expected all tensors to be on the same device, but found at least two
+     devices, cuda:0 and cpu!"。
+
+    这个 bug 之所以长期潜伏：在此之前**没有任何一次 CUDA Graph capture 成功过**，
+    所以正确性门从来没被执行到。它只在阻塞点被解掉之后才会出现。
+
+    在 Mac 上用 MPS 复现同样的"两个设备"条件（没有 MPS 就跳过）。
+    """
+    import pytest as _pytest
+
+    torch = _pytest.importorskip("torch")
+    if not torch.backends.mps.is_available():
+        _pytest.skip("需要第二个设备（MPS）才能复现跨设备场景")
+
+    from benchmarks.cudagraph import compare_logits
+
+    gen = torch.Generator(device="cpu").manual_seed(3)
+    ref_cpu = [torch.randn(1, 32, generator=gen) for _ in range(4)]
+    got_cpu = [t.clone() for t in ref_cpu]
+
+    reference = [t.to("mps") for t in ref_cpu]  # GPU 侧
+    candidate = [t.to("cpu") for t in got_cpu]  # CPU 侧
+
+    report = compare_logits(reference, candidate)
+    assert report["kl"] == 0.0 or report["kl"] < 1e-6
+    assert report["top1_agreement"] == 1.0
+
+
+def test_compare_logits_mixed_device_is_not_bitwise_sensitive():
+    """跨设备后 KL 仍应约为 0（搬设备不应改变数值到越过门槛）。"""
+    import pytest as _pytest
+
+    torch = _pytest.importorskip("torch")
+    if not torch.backends.mps.is_available():
+        _pytest.skip("需要第二个设备（MPS）")
+
+    from benchmarks.cudagraph import compare_logits
+
+    gen = torch.Generator(device="cpu").manual_seed(5)
+    base = [torch.randn(1, 64, generator=gen) for _ in range(3)]
+    # ★ 必须加**逐元素**噪声，不能加常数：给所有 logits 加同一个常数在 softmax
+    #   之后是完全等价的，KL 恒为 0 —— 那样这条测试就没有区分度了。
+    noise = [torch.randn(1, 64, generator=gen) * 0.05 for _ in range(3)]
+    perturbed = [b + n for b, n in zip(base, noise)]
+
+    report = compare_logits([t.to("mps") for t in base], [t.to("cpu") for t in perturbed])
+    assert report["kl"] > 0.0, "微扰后 KL 应大于 0，否则测试没有区分度"
+
+
+def test_compare_logits_rejects_length_mismatch():
+    import pytest as _pytest
+
+    torch = _pytest.importorskip("torch")
+    from benchmarks.cudagraph import compare_logits
+
+    a = [torch.randn(1, 8)]
+    b = [torch.randn(1, 8), torch.randn(1, 8)]
+    with _pytest.raises(ValueError):
+        compare_logits(a, b)
