@@ -156,7 +156,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     include = {a.strip() for a in args.arms.split(",") if a.strip()}
-    arms = [a for a in build_arms(include=include) if a["kind"] != "noop"]
+    # ★ noop 臂保留：它同样依赖 CPU 快照 + 恢复，而"恢复不干净"在配对指标上表现为
+    #   noop 的 ΔNLL ≠ 0。丢掉自检等于在最需要它的地方放弃验证。
+    arms = build_arms(include=include)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     ids = load_wikitext_tokens(tokenizer, args.tokens, cache=args.cache)
@@ -213,7 +215,9 @@ def main(argv: list[str] | None = None) -> int:
             arm_names = [n for n in arm_names if arm["filter"] in n]
         entry: dict[str, Any] = {"kind": arm["kind"], "group": arm["group"]}
         try:
-            if arm["kind"] == "rtn":
+            if arm["kind"] == "noop":
+                entry["note"] = "恢复但不扰动：ΔNLL 必须**恰好** 0.0"
+            elif arm["kind"] == "rtn":
                 spec = SchemeSpec.from_flags(
                     arm["scheme"], arm["group_size"], targets=tuple(arm["targets"])
                 )
@@ -268,6 +272,12 @@ def main(argv: list[str] | None = None) -> int:
         entry["seconds"] = round(time.perf_counter() - t0, 2)
         result["arms"][arm["id"]] = entry
         _write()
+        if arm["kind"] == "noop":
+            delta = (entry.get("paired_vs_fp16") or {}).get("delta_nll_per_token")
+            if delta is None or abs(delta) > 1e-9:
+                result["restore_check_failed"] = {"arm": arm["id"], "delta_nll": delta}
+                _write()
+                raise RuntimeError("恢复自检失败：noop 的 ΔNLL=%r（应为 0.0）" % (delta,))
         print(
             "  %-34s ppl=%-10.4f dNLL/token=%+.6f ±%.6f (t=%s)  bytes=%.3f GB (%.1fs)"
             % (
