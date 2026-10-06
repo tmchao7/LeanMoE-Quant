@@ -50,10 +50,17 @@ from typing import Any, Callable
 
 __all__ = [
     "FusedExperts",
+    "VALID_MOE_IMPLS",
     "fuse_experts",
     "static_moe_forward",
     "replace_moe_blocks",
 ]
+
+# decode 路径的两种实现（**同一个假设的不同实现，不是两个假设**）：
+#   "gather"  固定形状 gather + bmm —— 可行性参照；每 token 多 3.22 GB 流量
+#   "grouped" Triton grouped GEMV —— kernel 内算指针，无 gather 拷贝（moe_grouped）
+# prefill（T > 1）与 impl 无关，永远走 `_prefill_forward`。
+VALID_MOE_IMPLS = ("gather", "grouped")
 
 
 @dataclass
@@ -71,9 +78,23 @@ class FusedExperts:
     def num_experts(self) -> int:
         return int(self.gate_up.shape[0])
 
-    def to(self, device: Any, dtype: Any = None) -> "FusedExperts":
-        g = self.gate_up.to(device=device, dtype=dtype or self.gate_up.dtype)
-        d = self.down.to(device=device, dtype=dtype or self.down.dtype)
+    def to(self, device: Any = None, dtype: Any = None) -> "FusedExperts":
+        """与 `Tensor.to` 同样的调用习惯：`to(torch.float32)` 也是合法写法。
+
+        ★ 为什么要做这个兼容：`Tensor.to(x)` 在 x 是 dtype 时是**类型转换**，
+        而这里的第一参数是 device。于是 `fused.to(torch.float32)` 会抛出
+        "to() received an invalid combination of arguments" —— 一个与真实
+        原因毫无关系的报错（实测踩到）。宁可在这里识别 dtype。
+        """
+        import torch
+
+        if isinstance(device, torch.dtype):
+            device, dtype = None, device
+        dtype = dtype or self.gate_up.dtype
+        if device is None:
+            device = self.gate_up.device
+        g = self.gate_up.to(device=device, dtype=dtype)
+        d = self.down.to(device=device, dtype=dtype)
         return FusedExperts(gate_up=g.contiguous(), down=d.contiguous())
 
     def nbytes(self) -> int:
@@ -109,13 +130,21 @@ def static_moe_forward(
     top_k: int,
     norm_topk_prob: bool = False,
     act_fn: Callable[[Any], Any] | None = None,
+    impl: str = "gather",
+    moe_config: dict[str, Any] | None = None,
 ) -> tuple[Any, Any]:
     """MoE 前向。返回 (output, router_logits)。
 
     ## 两条路径，按 token 数分派
 
-        T == 1  -> `_decode_forward`：固定形状，可进 CUDA Graph
-        T >  1  -> `_prefill_forward`：逐专家循环，**只用于 eager**
+        T == 1  -> `_decode_forward`（impl="gather"）或 grouped kernel
+                   （impl="grouped"）：**固定形状，可进 CUDA Graph**
+        T >  1  -> `_prefill_forward`：逐专家循环，**只用于 eager**，与 impl 无关
+
+    ★ `impl` **只影响 decode**。prefill 永远走 `_prefill_forward`，因为 grouped
+    路径的 `for slot in range(top_k)` 是"每 token 只读 top-k 个专家"的写法 ——
+    在 T=1024 时它会对每个 token 重复读一遍专家权重，正是下面事故 2 的错误。
+    这一点有测试钉住（`test_prefill_never_uses_the_grouped_kernel`）。
 
     ## ★ 为什么必须分开（两次实测事故）
 
@@ -140,6 +169,9 @@ def static_moe_forward(
     """
     import torch.nn.functional as F
 
+    if impl not in VALID_MOE_IMPLS:
+        raise ValueError("unknown impl %r; expected one of %s" % (impl, VALID_MOE_IMPLS))
+
     if act_fn is None:
         act_fn = F.silu
 
@@ -151,6 +183,21 @@ def static_moe_forward(
     x = hidden_states.reshape(tokens, hidden)
 
     if tokens == 1:
+        if impl == "grouped":
+            # 惰性 import：grouped 需要 triton，而 Mac 上装不了。只在真正走到
+            # decode 时才 import，这样纯 CPU 的 prefill 路径与 gather 路径
+            # 在没有 triton 的机器上依然可用。
+            from lemoq.kernels.moe_grouped import static_moe_forward_grouped
+
+            return static_moe_forward_grouped(
+                hidden_states,
+                router_weight,
+                fused,
+                top_k=top_k,
+                norm_topk_prob=norm_topk_prob,
+                act_fn=act_fn,
+                config=moe_config,
+            )
         return _decode_forward(
             x,
             router_weight,
@@ -161,6 +208,8 @@ def static_moe_forward(
             out_shape=shape,
             hidden=hidden,
         )
+    # ★ T > 1 与 impl 无关：永远走逐专家循环。grouped kernel 是"每 token 读
+    #   top-k 个专家"的写法，在 T=1024 上会对每个 token 重读一遍权重（128 倍）。
     out, logits = _prefill_forward(
         x,
         router_weight,
@@ -272,7 +321,17 @@ class StaticShapedMoE:
     并把 experts 换成 fused 张量，这样显存不翻倍。
     """
 
-    def __init__(self, block: Any, *, device: Any = None, dtype: Any = None) -> None:
+    def __init__(
+        self,
+        block: Any,
+        *,
+        device: Any = None,
+        dtype: Any = None,
+        impl: str = "gather",
+    ) -> None:
+        if impl not in VALID_MOE_IMPLS:
+            raise ValueError("unknown impl %r; expected one of %s" % (impl, VALID_MOE_IMPLS))
+        self.impl = impl
         self.top_k = int(block.top_k)
         self.norm_topk_prob = bool(getattr(block, "norm_topk_prob", False))
         self.act_fn = getattr(block, "act_fn", None)
@@ -289,20 +348,27 @@ class StaticShapedMoE:
             top_k=self.top_k,
             norm_topk_prob=self.norm_topk_prob,
             act_fn=self.act_fn,
+            impl=self.impl,
         )
 
 
-def replace_moe_blocks(model: Any, *, verbose: bool = False) -> int:
+def replace_moe_blocks(model: Any, *, verbose: bool = False, impl: str = "gather") -> int:
     """把模型里每个 `OlmoeSparseMoeBlock` 就地换成固定形状版本。
 
     返回被替换的 block 数。替换后原来的 `experts` ModuleList 会被释放，
     所以**显存不会翻倍**（峰值短暂 +1 层的量）。
+
+    `impl="grouped"` 只在 decode（T=1）生效；prefill 仍然走逐专家循环，
+    原因见 `static_moe_forward` 的说明。
 
     ★ 必须在 CUDA Graph capture **之前**调用，且之后不要再改权重。
     """
     import gc
 
     import torch
+
+    if impl not in VALID_MOE_IMPLS:
+        raise ValueError("unknown impl %r; expected one of %s" % (impl, VALID_MOE_IMPLS))
 
     replaced = 0
     for layer in model.model.layers:
@@ -312,7 +378,7 @@ def replace_moe_blocks(model: Any, *, verbose: bool = False) -> int:
         if not hasattr(block, "gate") or not hasattr(block, "top_k"):
             continue  # 不是 sparse MoE（例如 dense 层）
 
-        static = StaticShapedMoE(block)
+        static = StaticShapedMoE(block, impl=impl)
 
         # 释放原始 experts，避免显存翻倍
         del block.experts
@@ -321,6 +387,7 @@ def replace_moe_blocks(model: Any, *, verbose: bool = False) -> int:
         block._static_top_k = static.top_k
         block._static_norm = static.norm_topk_prob
         block._static_act = static.act_fn
+        block._static_impl = static.impl
 
         def _forward(hidden_states, _b=block):
             return static_moe_forward(
@@ -330,6 +397,7 @@ def replace_moe_blocks(model: Any, *, verbose: bool = False) -> int:
                 top_k=_b._static_top_k,
                 norm_topk_prob=_b._static_norm,
                 act_fn=_b._static_act,
+                impl=_b._static_impl,
             )
 
         block.forward = _forward

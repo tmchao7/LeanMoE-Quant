@@ -12,6 +12,11 @@ htmlcov/
 .venv/
 .venv-mac/
 venv/
+# `uv run` 会生成锁文件，但**不是**本项目的 pinning 机制：pin 在
+# configs/constraints.txt，而且是**按机器**冻结的（AGENTS.md「Environment」）。
+# 一个由 Mac 解析出来的 lock 会谎报服务器环境（torch 2.8.0+cu128 / miniconda），
+# 所以不提交它。
+uv.lock
 
 # Experiment outputs: raw data stays local; stable records get excerpted into commits
 results/*

@@ -423,15 +423,60 @@ def test_runner_exposes_static_moe_flag():
     assert "--static-moe" in proc.stdout
 
 
-def test_run_cudagraph_accepts_static_moe_parameter():
-    """run_cudagraph 必须显式接受 static_moe，而不是偷偷从全局读。"""
+def test_run_cudagraph_accepts_an_explicit_moe_mode():
+    """run_cudagraph 必须显式接受 moe 模式，而不是偷偷从全局读。
+
+    ★ 这里原来断言的是 `static_moe: bool`。泛化成字符串是刻意的：现在有三条
+    不同的假设（hf / static / grouped），布尔表达不了第三条，而把 `moe` 塞进
+    EXP-ID 去猜是不安全的（三个 id 里都含 "cudagraph"）。
+    """
     import inspect
 
     from benchmarks.runner import run_cudagraph
 
     params = inspect.signature(run_cudagraph).parameters
-    assert "static_moe" in params
-    assert params["static_moe"].default is False, "默认必须是 False（p0-03 行为不变）"
+    assert "moe" in params
+    assert params["moe"].default == "hf", "默认必须是 hf（p0-03 行为不变）"
+
+
+def test_moe_mode_is_read_from_the_matrix_not_guessed_from_the_id():
+    """★ moe 必须从实验矩阵读 —— 从 EXP-ID 猜会得出错的结论。
+
+    p0-03 / p0-04 / p2-02 的 id 里都含 "cudagraph"，但 moe 分别是 hf / static /
+    grouped。猜错的后果不是崩溃，而是**结果文件写错口径**，让三条不同假设的
+    证据混在一起。
+    """
+    from benchmarks.runner import _moe_for_exp
+
+    assert _moe_for_exp("EXP-p0-03-baseline-cudagraph") == "hf"
+    assert _moe_for_exp("EXP-p0-04-cudagraph-static-moe") == "static"
+    assert _moe_for_exp("EXP-p2-02-moe-grouped-gemm") == "grouped"
+    # 矩阵里没有的实验 → 安全默认（不替换 MoE）
+    assert _moe_for_exp("EXP-does-not-exist") == "hf"
+
+
+def test_execution_arm_is_read_from_the_matrix_not_the_id():
+    """★ 回归：`EXP-p2-02-moe-grouped-gemm` 的 id 里**没有** "cudagraph"。
+
+    老的 `_execution_for_exp` 靠 id 里有没有 "cudagraph" 来选臂，于是这条新实验
+    **静默跑成了 eager 臂**（run_baseline），还在无外网的机器上去连 huggingface
+    —— 报错指向网络，真正的原因是臂选错了。有外网时更糟：它会写出一个
+    `execution=eager` 的结果文件，却被当成 grouped 的证据引用。
+    """
+    from benchmarks.runner import _execution_for_exp
+
+    # 这三条都是 cudagraph 臂，尽管只有前两条的 id 里含 "cudagraph"
+    for exp in (
+        "EXP-p0-03-baseline-cudagraph",
+        "EXP-p0-04-cudagraph-static-moe",
+        "EXP-p2-02-moe-grouped-gemm",
+    ):
+        assert _execution_for_exp(exp, None) == "cudagraph", exp
+    # 显式请求优先于矩阵声明
+    assert _execution_for_exp("EXP-p2-02-moe-grouped-gemm", "eager") == "eager"
+    # 矩阵里没有的 → 老的启发式作为最后手段
+    assert _execution_for_exp("EXP-weird-cudagraph-thing", None) == "cudagraph"
+    assert _execution_for_exp("EXP-plain-baseline", None) == "eager"
 
 
 def test_exp_p0_04_declared_with_static_moe():
@@ -450,7 +495,9 @@ def test_exp_p0_04_declared_with_static_moe():
     exp = by_id["EXP-p0-04-cudagraph-static-moe"]
     assert exp["config"]["moe"] == "static"
     assert exp["config"]["execution"] == "cudagraph"
-    assert exp["ctx"] == [1024]
+    # ctx 是声明的轴：1024 是可行性门，4096 是 H-A/H-B 的判别点
+    # （attention 随 ctx 增长，MoE 专家路径不随）。两个 ctx 各自一个结果文件。
+    assert exp["ctx"] == [1024, 4096]
 
 
 def test_p0_03_stays_on_the_hf_path():

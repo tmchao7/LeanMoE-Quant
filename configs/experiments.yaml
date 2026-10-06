@@ -88,7 +88,13 @@ experiments:
       bit_width: "fp16"
       execution: "cudagraph"
       moe: "static"
-    ctx: [1024]
+    # ★ ctx 是**声明的轴**（与 p0-02 同一惯例），不是隐藏的变量变更。
+    #   加 4096 不是为了多一个点 —— 它是 H-A/H-B 的判别实验：attention 扫的
+    #   槽位数随 ctx 线性增长（1056 -> 4128），而 MoE 专家路径与 ctx 无关。
+    #   残差若随 ctx 长大，它是 attention；若持平，它是 kernel 数地板。
+    #   两条路线的 GPU 花法完全不同（见 benchmarks/attribution.py）。
+    #   4096 也是 OLMoE 的 max_position_embeddings。
+    ctx: [1024, 4096]
     metrics: ["capture", "kl", "top1_agreement", "per_token_p50", "per_token_p99", "vram_split", "host_share"]
 
   # ---------- Phase 1：量化功能链路（只谈精度，不谈性能） ----------
@@ -105,6 +111,28 @@ experiments:
     metrics: ["kl", "top1_agreement", "ppl"]
 
   # ---------- Phase 2：融合 kernel（核心，超时 25 GPU 小时） ----------
+  # p2-02 必须在 p2-01 **之前**做：dequant 要融进的那层结构就是 grouped GEMM。
+  # 先做 dequant 会在 gather 出来的**副本**上反量化，等于对"正要缩减的那份字节"
+  # 再收一次物化税。而且 fp16 版的门是紧的（KL=0），dequant 版的门有真容差。
+  #
+  # ⚠️ 这一条的门是**两级**的，缺一不可：
+  #   1) kernel 级：tools/bench_grouped_gemm.py 在同形状上对照 gather+bmm
+  #   2) 模型级：cudagraph 臂的 per_token_p50 + 同路径 KL
+  #   第一版脚本只测了默认 kernel 配置就判 NULL —— 那是不合格的门（见记录）。
+  - id: EXP-p2-02-moe-grouped-gemm
+    stage: "p2"
+    kind: "perf"
+    requires: ["cp_async"]
+    desc: "grouped GEMM（无 gather 拷贝）替代固定形状 gather+bmm"
+    hypothesis: "kernel 内由 expert id 算指针能去掉 gather 拷贝，per-token 延迟下降"
+    refutation_signal: "同形状 kernel 级对照不快于 gather+bmm；或调参后仍不快；或同路径 KL 门失败"
+    config:
+      bit_width: "fp16"
+      execution: "cudagraph"
+      moe: "grouped"
+    ctx: [1024]
+    metrics: ["per_token_p50", "per_token_p99", "bw_attainment", "host_share", "ncu_metrics"]
+
   - id: EXP-p2-01-dequant-fusion
     stage: "p2"
     kind: "perf"

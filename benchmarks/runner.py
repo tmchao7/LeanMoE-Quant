@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -153,13 +154,54 @@ def _decode_step(model, tok, past, device, dtype):
     return nxt, out.past_key_values
 
 
+def _matrix_entry(exp_id: str) -> dict[str, Any]:
+    """The experiment's declaration from `configs/experiments.yaml`, or `{}`."""
+    try:
+        import yaml  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return {}
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "experiments.yaml"
+    )
+    try:
+        with open(path, encoding="utf-8") as fh:
+            matrix = yaml.safe_load(fh)
+    except Exception:  # noqa: BLE001
+        return {}
+    for exp in matrix.get("experiments") or []:
+        if exp.get("id") == exp_id:
+            return exp
+    return {}
+
+
 def _execution_for_exp(exp_id: str, requested: str | None) -> str:
-    """Resolve the execution arm without silently falling back."""
+    """Resolve the execution arm **from the matrix**, never from the name.
+
+    ★ 这条原来是从 EXP-ID 里找子串 "cudagraph"。新加的 `EXP-p2-02-moe-grouped-gemm`
+    里没有这个子串，于是它**静默跑成了 eager 臂**（`run_baseline`），并且在没有
+    外网的机器上去连 huggingface —— 报错说的是网络，真正的原因是臂选错了。
+    如果那台机器有外网，它还会写出一个 `execution=eager` 却被当成 grouped 证据的
+    结果文件。臂决定了结果是哪条假设的证据，只能读声明。
+    """
     if requested is not None:
         return normalize_execution(requested)
+    declared = (_matrix_entry(exp_id).get("config") or {}).get("execution")
+    if declared is not None:
+        return normalize_execution(str(declared))
+    # 矩阵里没有这个实验：保留老的启发式，但只作为最后手段
     if "cudagraph" in exp_id:
         return "cudagraph"
     return "eager"
+
+
+def _moe_for_exp(exp_id: str) -> str:
+    """`config.moe` from the matrix; default to the HF path (no replacement).
+
+    ★ 与 `_execution_for_exp` 同理：moe 决定了结果是哪一条假设的证据，
+    绝不能从 EXP-ID 猜。矩阵里没有这个实验时返回 "hf" —— "没有替换 MoE"
+    是唯一安全的默认。
+    """
+    return str((_matrix_entry(exp_id).get("config") or {}).get("moe", "hf"))
 
 
 def _load_model(model_id: str, dtype_name: str, device: str):
@@ -313,7 +355,10 @@ def _graph_res(
         "kernels_per_step": int(round(gap.get("kernels_per_call", 0))),
         "bucket_ms": {"cudagraph_replay": gap.get("gpu_busy_ms")},
         "bucket_share_pct": {"cudagraph_replay": 100.0},
-        "top_kernels": [],
+        # ★ 实测的 per-kernel 归因表。p0-04 的 1.59 ms 残差有两个互斥解释
+        #   （额外的 DRAM 流量 vs kernel 数 × 最短执行时间），这张表是唯一的判据。
+        #   之前这里是硬编码的空列表，等于把结论建立在散文上。
+        "top_kernels": gap.get("top_kernels", []),
     }
     return {
         "spec": spec,
@@ -365,22 +410,30 @@ def run_cudagraph(
     timed: int,
     dtype_name: str,
     device: str = "cuda",
-    static_moe: bool = False,
+    moe: str = "hf",
 ) -> dict[str, Any]:
-    """Run the fp16 StaticCache + one-token CUDA Graph feasibility path.
+    """Run the fp16 StaticCache + one-token CUDA Graph path.
 
-    `static_moe=True` 在 capture 之前把 HF 的逐专家 Python 循环换成固定形状前向
-    （见 `lemoq.kernels.moe_static`）。这是与 p0-03 **不同**的假设，所以用不同 EXP id：
-    p0-03 测"HF 原版能不能进图"，这个测"改成固定形状后能不能进图"。
+    `moe` 选 decode 的 MoE 实现（三种，对应三个不同的假设）：
+
+        "hf"      HF 的逐专家 Python 循环 —— EXP-p0-03，实测 blocked
+        "static"  固定形状 gather + bmm（moe_static）—— EXP-p0-04
+        "grouped" Triton grouped GEMV，无 gather 拷贝（moe_grouped）—— EXP-p2-02
+
+    prefill 与 `moe` 无关：永远走逐专家循环（理由见 `moe_static.static_moe_forward`）。
     """
     import torch
 
     from benchmarks.vram import VramTracker, split_report
+    from lemoq.kernels.moe_static import VALID_MOE_IMPLS
 
+    valid = ("hf",) + tuple(VALID_MOE_IMPLS)
+    if moe not in valid:
+        raise ValueError("unknown moe %r; expected one of %s" % (moe, valid))
     if dtype_name != "float16":
         raise ValueError("EXP-p0-03 supports dtype=float16 only")
-    if batch != 1 or ctx != 1024:
-        raise ValueError("EXP-p0-03 supports batch=1 and ctx=1024 only")
+    if batch != 1 or ctx < 1:
+        raise ValueError("the CUDA Graph arm supports batch=1 and ctx >= 1 only")
     CudaGraphConfig(ctx=ctx, max_new_tokens=max_new_tokens, batch=batch).validate_timing(timed)
 
     tr = VramTracker()
@@ -389,14 +442,28 @@ def run_cudagraph(
     tr.mark("after_weights")
 
     moe_replaced = 0
-    if static_moe:
+    kernel_warm: dict[str, Any] | None = None
+    if moe != "hf":
         # 必须在 capture 之前完成：替换会释放原 experts 并新建 fused 张量，
         # 若在图内发生就会破坏已捕获的指针。
         from lemoq.kernels.moe_static import replace_moe_blocks
 
-        moe_replaced = replace_moe_blocks(model)
+        moe_replaced = replace_moe_blocks(model, impl=moe)
         torch.cuda.synchronize()
         tr.mark("after_static_moe")
+        if moe == "grouped":
+            # ★ Triton 的首次调用会 JIT 编译。在 capture 期间做这件事会报错，
+            #   而且报错信息通常指向别处。所以这里显式 warm 一次。
+            from lemoq.kernels.moe_grouped import warm as warm_kernels
+
+            block = model.model.layers[0].mlp
+            kernel_warm = warm_kernels(
+                block._static_experts,
+                hidden=int(block._static_experts.gate_up.shape[2]),
+                top_k=int(block._static_top_k),
+            )
+            torch.cuda.synchronize()
+            tr.mark("after_grouped_warm")
 
     ids = torch.full((1, ctx), 1, dtype=torch.long, device=device)
     try:
@@ -486,7 +553,8 @@ def run_cudagraph(
     res["capture"] = capture
     res["correctness"] = correctness
     res["ttft"] = ttft
-    res["static_moe"] = bool(static_moe)
+    res["moe"] = str(moe)
+    res["kernel_warm"] = kernel_warm
     res["moe_blocks_replaced"] = int(moe_replaced)
     return res
 
@@ -1033,7 +1101,7 @@ def build_cudagraph_payload(
         "dequant": "none",
         "fusion": "none",
         "execution": "cudagraph",
-        "moe": "static" if res.get("static_moe") else "hf",
+        "moe": res.get("moe", "hf"),
         "moe_blocks_replaced": res.get("moe_blocks_replaced"),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
@@ -1135,7 +1203,7 @@ def build_cudagraph_payload(
     payload["applicability"] = {
         "applies_to": "fp16、单卡、batch=1、ctx=%s、%s"
         % (cfg.get("ctx"), payload["hardware"].get("compute_capability")),
-        "does_not_apply_to": "quantized execution、PagedAttention、ctx>1024、other GPUs",
+        "does_not_apply_to": "quantized execution、PagedAttention、ctx>4096、other GPUs",
         "why": "StaticCache and graph addresses/shapes are fixed to this feasibility gate.",
     }
     payload["_measurement"] = {
@@ -1175,9 +1243,15 @@ def main(argv: list[str] | None = None) -> int:
         help="execution arm: eager or cudagraph (default inferred from --exp)",
     )
     ap.add_argument(
+        "--moe",
+        default=None,
+        choices=["hf", "static", "grouped"],
+        help="decode 的 MoE 实现（默认从 --exp 的 config.moe 推；grouped 需要 triton）",
+    )
+    ap.add_argument(
         "--static-moe",
         action="store_true",
-        help="capture 前把 HF 逐专家循环换成固定形状 MoE（lemoq.kernels.moe_static）",
+        help="等价于 --moe static（保留这个别名，scripts/run_cudagraph_gate.sh 还在用）",
     )
     ap.add_argument("--results-dir", default="results")
     ap.add_argument("--dry-run", action="store_true")
@@ -1193,6 +1267,16 @@ def main(argv: list[str] | None = None) -> int:
     if execution == "cudagraph" and args.dtype != "float16":
         print("runner 失败: EXP-p0-03 只支持 --dtype float16", file=sys.stderr)
         return 2
+
+    # decode 的 MoE 实现。优先级：显式 --moe > 兼容别名 --static-moe > 实验矩阵里
+    # 声明的 config.moe > "hf"。从矩阵读是关键：结果文件里的 moe 字段必须与矩阵
+    # 声明一致，否则 p0-03 / p0-04 / p2-02 三条**不同假设**会混进同一个口径。
+    if args.moe:
+        moe_mode = args.moe
+    elif getattr(args, "static_moe", False):
+        moe_mode = "static"
+    else:
+        moe_mode = _moe_for_exp(args.exp)
 
     hypothesis = {
         "statement": (
@@ -1217,15 +1301,20 @@ def main(argv: list[str] | None = None) -> int:
         "warmup": args.warmup,
         "timed": args.timed,
         "execution": execution,
-        "moe": "static" if args.static_moe else "hf",
+        "moe": moe_mode,
         "dequant": "none",
         "fusion": "none",
         "group_size": None,
     }
 
     if execution == "cudagraph":
-        if args.ctx != 1024 or args.batch != 1:
-            print("runner 失败: EXP-p0-03 supports only ctx=1024 and batch=1", file=sys.stderr)
+        # ★ 这里原来把 ctx 钉死成 1024（p0-03 的范围限制）。放开是刻意的：
+        #   ctx 是**声明的实验轴**（见 configs/experiments.yaml 的 p0-04），
+        #   而且 ctx=4096 不只是多一个数据点 —— 它是 H-A/H-B 的判别实验：
+        #   attention 扫的槽位随 ctx 线性增长，而 MoE 专家路径与 ctx 无关。
+        #   残差若随 ctx 长大，它是 attention；若持平，它是 kernel 数地板。
+        if args.batch != 1 or args.ctx < 1:
+            print("runner 失败: cudagraph 臂只支持 batch=1 且 ctx >= 1", file=sys.stderr)
             return 2
         try:
             CudaGraphConfig(
@@ -1265,7 +1354,7 @@ def main(argv: list[str] | None = None) -> int:
                 warmup=args.warmup,
                 timed=args.timed,
                 dtype_name=args.dtype,
-                static_moe=args.static_moe,
+                moe=moe_mode,
             )
         else:
             res = run_baseline(

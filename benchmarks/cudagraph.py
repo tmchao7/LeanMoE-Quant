@@ -311,6 +311,74 @@ def replay_timed_step(session: Any) -> Any:
     return session.replay(synchronize=True)
 
 
+# Number of kernels kept in the attribution table. 25 covers the whole MoE
+# expert path plus attention; the tail is thousands of near-identical
+# elementwise launches and is summarised instead of listed.
+KERNEL_TABLE_LIMIT = 25
+
+
+def kernel_table(
+    rows: list[dict[str, Any]], *, timed: int, busy_ms: float, limit: int = KERNEL_TABLE_LIMIT
+) -> list[dict[str, Any]]:
+    """Turn profiler rows into the per-kernel attribution table.
+
+    ★ Why this is a pure function: it is the thing that decides *which*
+    hypothesis the next GPU hour is spent on (DRAM traffic vs kernel-count
+    floor).  Keeping it free of torch means it can be regression-tested on the
+    Mac against hand-computed values, so a units mistake (us vs ms, total vs
+    per-call) cannot silently pick the wrong optimisation target.
+
+    `rows` are `{name, count, self_us_total}` as reported by the profiler over
+    a window containing `timed` graph replays.  `count` is therefore total
+    occurrences in the window, not per token.
+
+    Returned fields:
+        self_ms_per_token   contribution to per-token time (sums to busy_ms)
+        occurrences_per_token
+        mean_us_per_occurrence
+        share_pct
+    """
+    table: list[dict[str, Any]] = []
+    for row in rows:
+        count = int(row.get("count") or 0)
+        self_ms = float(row.get("self_us_total") or 0.0) / 1000.0
+        if count <= 0 or self_ms <= 0.0:
+            continue
+        per_token = self_ms / max(timed, 1)
+        occ = count / float(max(timed, 1))
+        table.append(
+            {
+                "name": str(row.get("name") or "?"),
+                "self_ms_per_token": round(per_token, 5),
+                "occurrences_per_token": round(occ, 3),
+                "mean_us_per_occurrence": round(per_token / occ * 1000.0, 3) if occ else None,
+                "share_pct": round(100.0 * per_token / busy_ms, 2) if busy_ms else None,
+            }
+        )
+    table.sort(key=lambda r: r["self_ms_per_token"], reverse=True)
+    return table[:limit]
+
+
+def _profiler_rows(prof: Any) -> list[dict[str, Any]]:
+    """Extract `{name, count, self_us_total}` from a torch profiler, if present."""
+    try:
+        events = prof.key_averages()
+    except Exception:  # noqa: BLE001
+        return []
+    rows = []
+    for event in events:
+        self_us = getattr(event, "self_device_time_total", 0.0)
+        if self_us and self_us > 0:
+            rows.append(
+                {
+                    "name": getattr(event, "key", "?"),
+                    "count": getattr(event, "count", 0),
+                    "self_us_total": float(self_us),
+                }
+            )
+    return rows
+
+
 def measure_graph_gap(
     session: Any, *, warmup: int = 5, timed: int = 20, repeats: int = 3
 ) -> dict[str, Any]:
@@ -358,6 +426,13 @@ def measure_graph_gap(
     events = [event for event in prof.key_averages() if event.self_device_time_total > 0]
     busy_ms = sum(event.self_device_time_total for event in events) / timed / 1000.0
     kernels = sum(event.count for event in events) / float(timed)
+    # ★ 为什么这里必须记录 per-kernel 表：
+    #   p0-04 留下的 1.59 ms 残差有两个互斥解释 ——
+    #     H-A 额外的 DRAM 流量（gather 拷贝）
+    #     H-B kernel 数 × 单 kernel 最短执行时间（1,073 个 kernel，均值 4.88 µs）
+    #   两者的修法完全不同（grouped GEMM vs 融合/减 kernel）。
+    #   在此之前残差只是散文里的一个猜测；这张表把它变成测量。
+    table = kernel_table(_profiler_rows(prof), timed=timed, busy_ms=busy_ms)
     wall = summarize(wall_samples)
     event = summarize(event_samples)
     host = max(wall["p50"] - busy_ms, 0.0)
@@ -372,6 +447,7 @@ def measure_graph_gap(
         "host_p50_ms": host,
         "host_share_pct": round(100.0 * host / wall["p50"], 1) if wall["p50"] else None,
         "kernels_per_call": kernels,
+        "top_kernels": table,
         "stats": {"wall": wall, "gpu_event": event},
         "caveats": [
             "GPU busy time is profiler self_device_time_total; graph replay is measured as one captured launch.",
