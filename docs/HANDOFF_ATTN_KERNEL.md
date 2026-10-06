@@ -52,26 +52,35 @@ capture 进图 —— 进图后每算子的分配与启动开销消失，**多�
 `bottleneck.top_kernels` 里取**出现 16 次**（每层一次）的那些 rows：
 
 ```text
-ctx=1024（per-token 3.1051 ms，busy 3.0604）
-  gemvNSP_kernel       0.0928 ms  occ 16  mean  5.80 us   <- q·kᵀ
-  cunn_SoftMaxForward  0.0393 ms  occ 16  mean  2.45 us
-  gemvx::kernel        0.0373 ms  occ 16  mean  2.33 us   <- w·v
-  softmax_warp_forward 0.0145 ms  occ 16  mean  0.91 us
-  + elementwise(add)  ~0.0282 ms  occ 16
-                      ────────
-  attention 核心     ≈ 0.212 ms/token
+ctx=1024（per-token 3.1051 ms，busy 3.0604）      [来自 EXP-p2-05 的集合差，见下]
+  gemvNSP_kernel                            0.09289  occ 16   <- q·kᵀ 或 w·v
+  cunn_SoftMaxForwardSmem<8, …>             0.03943  occ 16   <- attention softmax
+  elementwise_kernel<128,4,…CUDAFunctor_add> 0.02831  occ 16   <- + mask
+  vectorized_elementwise_kernel<4,BUnary…>  0.01364  occ 16
+                                            ───────
+  attention 核心                             0.17427 ms/token
 
 ctx=4096（per-token 3.4788 ms，busy 3.4390）
-  gemvx::kernel        0.2780 ms  occ 16  mean 17.38 us   <- w·v（KV 变长）
-  gemvx::kernel        0.0382 ms  occ 16  mean  2.38 us   <- q·kᵀ
-  cunn_SoftMaxForward  0.0430 ms  occ 16
-  softmax_warp_forward 0.0145 ms  occ 16
-                      ────────
-  attention 核心     ≈ 0.40 ms/token
-```
+  gemvx::kernel<int,int,…>                  0.27743  occ 16   <- q·kᵀ 或 w·v
+  cutlass_80_wmma_tensorop_f16_s161616gemm  0.18948  occ 16   <- 另一个矩阵乘
+  cunn_SoftMaxForwardSmem<8, …>             0.04291  occ 16
+  elementwise_kernel<128,4,…CUDAFunctor_add> 0.02942  occ 16
+  vectorized_elementwise_kernel<4,BUnary…>  0.01313  occ 16
+                                            ───────
+  attention 核心                             0.55237 ms/token
 
-⚠️ **不要把上面那个 `0.06776 ms/层`（隔离）当靶子** —— 它比图内的
-`0.212/16 = 0.0133 ms/层` 慢 5 倍。以图内为准。
+自研 kernel 的代价（同一份 artifact）：`_attn_split_kernel` + `_attn_combine_kernel`
+
+    ctx=1024 : 0.12326 + 0.01335 = 0.13661 ms/token
+    ctx=4096 : 0.36474 + 0.01370 = 0.37844 ms/token
+    ctx=4096 的 split kernel 单独是 0.36474，KV 字节下限 0.3437 -> **94.2% 实测带宽**
+
+> ★ **上面两张表必须用「集合差」得到，不能按名字手挑。** 本文件的第一版就是手挑的，
+> 得到 0.212 / ~0.40 —— **两个都错**（ctx=1024 多算了 0.038：把 o_proj 的 GEMV
+> 与 routing 的 softmax 算进了 attention，同时漏了一个 elementwise）。
+> 正确做法：两条臂都 profile，取**只在 eager 臂出现、出现次数 = 层数**的行
+> （`tools/bench_attn_in_graph.py` 的 `attention_core.vanished_rows` 就是这个集合）。
+> 这个错误是 `EXP-p2-05` 在 A 步发现的 —— 靶子被高估，收益就会被低估。
 
 **验收判据**：新 kernel 让 per-token 低于 `3.1051 ms`（ctx=1024）/ `3.4788 ms`（ctx=4096），
 并且 attention 核心那几行消失、换成自己的 kernel 名且总时间更低。
@@ -315,14 +324,19 @@ eager(SDPA,无图) 82.64 ms  ->  p0-04 5.2637  ->  p2-02 4.0715  ->  p2-04 3.105
                                       15.73x          20.3x           26.6x
 ctx=4096: p0-04 8.4873 -> p2-04 3.4788 (23.8x)   达成率 17.8% -> 43.4%
 
-# 当前 ctx=1024 的归因（busy 3.0604 ms / 1053 kernels，unmatched=0）
+# 当前 ctx=1024 的归因（p2-04，busy 3.0604 ms / 1053 kernels，unmatched=0）
 custom kernel(_gate_up_act+_down_sum)  1.1373
 expert gemm(投影+lm_head)              0.7982
-latency floor(<4us 的 ~1050 个 kernel)  1.1491   <- 已超过 attention，下一个目标
+latency floor(<4us 的 ~1050 个 kernel)  1.1491   <- 下一个目标
 routing(gemv+softmax+topk+bitonic)     0.1516
 expert gather                          0.0600
-attention 核心                         0.2121   <- 本任务要消掉的
+attention 核心                         0.17427  <- ★ 集合差，不是手挑（见 §2 的警告）
 other                                  1.0375
+
+# p2-05 之后（attention kernel 已接进模型）
+ctx=1024 : 3.0077 ms  达成率 50.2%   累计 27.5x
+ctx=4096 : 3.2356 ms  达成率 46.7%   累计 25.5x
+           attention 核心 -> _attn_split_kernel 0.12326 + _attn_combine_kernel 0.01335
 
 # 字节账（fp16, 每 token）        [W] 2,357,723,136   [T]@1024 2,491,940,864
 # 实测带宽 1561.9 GB/s             floor_W 1.5095 ms   floor_T@1024 1.5955 ms
