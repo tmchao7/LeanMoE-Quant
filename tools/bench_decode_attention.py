@@ -1,38 +1,45 @@
-"""bench_decode_attention — 隔离测量：decode attention 到底慢在哪。
+"""bench_decode_attention — 隔离测量：decode attention 到底慢在哪、哪条路能用。
 
 ## 为什么要先做这个，而不是直接写 kernel
 
 `EXP-p2-02` 的归因表里单项最大的是
 
-    fmha_cutlassF_f16_aligned_64x128_rf_sm80(PyTorchMemEfficientAttention)
+    fmha_cutlassF_f16_aligned_64x128_rf_sm80(PyTorchMemEffAttention)
     1.2110 ms/token = busy 的 30%，每层 75.69 µs（ctx=1024）
 
-但是**它不该存在**：`transformers 4.57.6` 的 `OlmoeAttention.forward` 是 eager
-数学实现（`matmul` → 加 4D mask → `softmax` → `matmul`），源码里没有
-`scaled_dot_product_attention`，也没有 `attention_interface`。mem-efficient
-attention 的内核名却出现在 profile 里 —— 这个矛盾必须先解决。
-
-如果它是错的归因，我会去写一个不必要的 kernel；如果它是真的，那要知道
-它为什么被选中。两者都会改变方案，所以先测。
+实测确认它来自 **SDPA**：OLMoE 加载后 `config._attn_implementation == "sdpa"`，
+模块是 `OlmoeSdpaAttention` —— 同一个文件里**另一个类**，不是 eager 的
+`OlmoeAttention`（我第一版读错了类，所以一度以为"fmha 不该存在"）。
+归因是对的；但"必须用 SDPA"不是。
 
 ## 测什么
 
-同一个 decode 形状下对照**所有合理实现**，并各自报告：
+同一个 decode 形状下对照所有合理实现，每个都报**延迟 + 能否进图 + 换长度后是否还算对**。
 
-    A. eager_math        HF 现在实际走的代码（逐字复制它的四步）
-    B. sdpa_float4d      F.scaled_dot_product_attention + 4D **float** mask
-    C. sdpa_bool4d       F.scaled_dot_product_attention + 4D **bool** mask
-    D. sdpa_narrow       把 k/v 裁到已填充长度、**完全不要 mask**（"理想实现"的参照）
-    E. sdpa_flash        强制 FLASH_ATTENTION 后端（若可用）
+    A  eager_math       HF 的 eager 实现（= `attn_implementation="eager"` 的效果）
+    B  sdpa_float4d     当前实际走的路：SDPA + 4D float mask
+    C  sdpa_bool4d      SDPA + 4D bool mask
+    D  sdpa_narrow      SDPA，k/v 裁到已填充长度，**完全不要 mask**
+    F  eager_narrow     matmul→softmax→matmul，裁到已填充长度，不要 mask（理想实现的形态）
+    E  sdpa_flash       强制 FLASH_ATTENTION 后端（多数情况下不可用）
 
-每个臂都报：中位延迟、相对**KV 字节下界**的达成率、以及能否进 CUDA Graph。
+## ★ 为什么"能捕获"这个判据单独不够（第一版就是错的）
 
-## 为什么"能否进图"是必报项
+第一版只做 `with torch.cuda.graph(...): fn()`，于是 arm D 报了 `capturable: true`。
+**那个报告是危险的**：D 的 shape 由长度决定，捕获时是什么长度就永远是什么长度；
+换一个长度重放会拿到**上一个长度的答案** —— 不报错，静默算错。
 
-D（裁剪）是最快的候选，但它的 shape 随 `filled` 变化 —— 那正是 CUDA Graph
-不允许的东西。所以"快"和"能用"在这里是两件事，必须分开报。
-本脚本对每个臂都**实际尝试捕获一次**，并额外检查 D 的一个致命问题：
-用 filled=33 捕获、用 filled=64 重放会得到**静默错误**的结果。
+所以这里做的是**两段式**检查：
+
+    1. 在长度 N 捕获一张图；
+    2. 把真实长度改成 M > N，重放；
+    3. 把重放的结果与 M 的正确答案比。
+
+读"当前长度"的实现（B/C 靠原地改 mask；F/未来的自研 kernel 靠读 device scalar）
+重放时给出 M 的答案 → `correct_after_length_change: true`；
+把长度烘进 shape 的实现（D）给出 N 的答案 → **false**。
+
+这正是自研 kernel 必须保住的性质，所以它是必报项，不是附注。
 
     python -m tools.bench_decode_attention --kv-len 1056 --filled 33
     python -m tools.bench_decode_attention --kv-len 4128 --filled 1025
@@ -51,7 +58,6 @@ from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-# OLMoE-1B-7B-0924 的已核实形状
 OLMOE_ATTN = {"batch": 1, "heads": 16, "head_dim": 128}
 
 
@@ -67,17 +73,16 @@ def _median_time(fn, *, warmup: int, iters: int, repeats: int, torch) -> dict[st
         torch.cuda.synchronize()
         samples.append((time.perf_counter() - t0) * 1000.0 / iters)
     ordered = sorted(samples)
+    med = statistics.median(ordered)
     return {
-        "median_ms": round(statistics.median(ordered), 5),
+        "median_ms": round(med, 5),
         "min_ms": round(ordered[0], 5),
-        "mad_ms": round(
-            statistics.median([abs(s - statistics.median(ordered)) for s in ordered]), 6
-        ),
+        "mad_ms": round(statistics.median([abs(s - med) for s in ordered]), 6),
         "repeats": repeats,
     }
 
 
-def _profile_kernels(fn, *, iters: int, torch) -> list[dict[str, Any]]:
+def _profile_kernels(fn, *, iters: int, torch, top: int = 6) -> list[dict[str, Any]]:
     for _ in range(3):
         fn()
     torch.cuda.synchronize()
@@ -85,49 +90,67 @@ def _profile_kernels(fn, *, iters: int, torch) -> list[dict[str, Any]]:
         for _ in range(iters):
             fn()
         torch.cuda.synchronize()
-    rows = []
-    for event in prof.key_averages():
-        if event.self_device_time_total <= 0:
-            continue
-        rows.append(
-            {
-                "name": event.key,
-                "self_ms_per_call": round(event.self_device_time_total / iters / 1000.0, 5),
-                "count": round(event.count / iters, 2),
-            }
-        )
+    rows = [
+        {
+            "name": e.key[:110],
+            "self_ms_per_call": round(e.self_device_time_total / iters / 1000.0, 5),
+            "count": round(e.count / iters, 2),
+        }
+        for e in prof.key_averages()
+        if e.self_device_time_total > 0
+    ]
     rows.sort(key=lambda r: r["self_ms_per_call"], reverse=True)
-    return rows[:8]
+    return rows[:top]
 
 
-def _try_capture(fn, torch) -> dict[str, Any]:
-    """Can this arm be captured as a CUDA Graph at all?"""
+def replay_after_length_change(
+    fn, *, length_state: dict[str, int], capture_at: int, replay_at: int, torch
+) -> dict[str, Any]:
+    """Capture at one length, replay at another; the caller then checks the answer.
+
+    This is the check that separates a real decode kernel from a shape-baked one.
+    `fn` must stash its output tensor (the caller reads it back after replay), so
+    that what is compared is what the **graph** wrote, not a fresh eager call.
+    """
     try:
+        length_state["filled"] = capture_at
         for _ in range(3):
             fn()
         torch.cuda.synchronize()
-        graph = torch.cuda.CUDAGraph()
         stream = torch.cuda.Stream()
         with torch.cuda.stream(stream):
             fn()
         stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
             fn()
         stream.synchronize()
+
+        # 换长度：B/C 的 mask 是设备张量，原地改就能影响重放；
+        # D/F 读的是 host 变量，改了也影响不到已捕获的图 —— 这正是要暴露的差别。
+        length_state["filled"] = replay_at
+        with torch.cuda.stream(stream):
+            graph.replay()
+        stream.synchronize()
         return {"capturable": True}
     except Exception as exc:  # noqa: BLE001
-        return {"capturable": False, "error": "%s: %s" % (type(exc).__name__, str(exc)[:160])}
+        return {
+            "capturable": False,
+            "correct_after_length_change": False,
+            "note": "报错（响亮失败，至少不是静默错）：%s" % str(exc)[:130],
+        }
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--kv-len", type=int, default=1056, help="StaticCache max_cache_len")
-    ap.add_argument("--filled", type=int, default=33, help="实际已填充的槽位数")
+    ap.add_argument("--kv-len", type=int, default=1056)
+    ap.add_argument("--filled", type=int, default=33)
     ap.add_argument("--dtype", default="float16")
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--iters", type=int, default=50)
     ap.add_argument("--repeats", type=int, default=5)
-    ap.add_argument("--profile", action="store_true", help="列出每个臂的 kernel 组成")
+    ap.add_argument("--profile", action="store_true")
+    ap.add_argument("--no-length-check", action="store_true", help="跳过换长度检查（更快）")
     ap.add_argument("--json", default=None)
     args = ap.parse_args(argv)
 
@@ -139,33 +162,42 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     dev, dt = "cuda", {"float16": torch.float16, "bfloat16": torch.bfloat16}[args.dtype]
-    b, h, d, L, filled = (
+    b, h, d, L, filled0 = (
         OLMOE_ATTN["batch"],
         OLMOE_ATTN["heads"],
         OLMOE_ATTN["head_dim"],
         args.kv_len,
         args.filled,
     )
-    if not (0 < filled <= L):
+    if not (0 < filled0 <= L):
         print("--filled 必须在 (0, kv-len] 内", file=sys.stderr)
         return 2
+    filled1 = min(L, filled0 * 2 + 1)
 
     torch.manual_seed(0)
     q = torch.randn(b, h, 1, d, dtype=dt, device=dev) * 0.1
     k = torch.randn(b, h, L, d, dtype=dt, device=dev) * 0.1
     v = torch.randn(b, h, L, d, dtype=dt, device=dev) * 0.1
     scale = 1.0 / math.sqrt(d)
-
     min_dtype = torch.finfo(dt).min
+
+    # 原地可改的 mask（与 session 每步 fill_ 的做法一致）+ 可变的 host 长度
     mask_f = torch.full((b, 1, 1, L), min_dtype, dtype=dt, device=dev)
-    mask_f[..., :filled] = 0.0
     mask_b = torch.zeros((b, 1, 1, L), dtype=torch.bool, device=dev)
-    mask_b[..., :filled] = True
+    out_keep: dict[str, Any] = {}
+
+    def set_filled(n: int) -> None:
+        mask_f.fill_(min_dtype)
+        mask_f[..., :n] = 0.0
+        mask_b.zero_()
+        mask_b[..., :n] = True
+
+    length_state = {"filled": filled0}
+    set_filled(filled0)
 
     def eager_math():
-        """HF 现在实际走的四步，逐字复制。"""
         w = torch.matmul(q, k.transpose(2, 3)) * scale
-        w = w + mask_f[:, :, :, : k.shape[-2]]
+        w = w + mask_f
         w = F.softmax(w, dim=-1, dtype=torch.float32).to(dt)
         return torch.matmul(w, v)
 
@@ -176,63 +208,94 @@ def main(argv: list[str] | None = None) -> int:
         return F.scaled_dot_product_attention(q, k, v, attn_mask=mask_b, scale=scale)
 
     def sdpa_narrow():
-        """理想实现：只碰已填充的槽位，不要 mask。shape 随 filled 变化。"""
-        return F.scaled_dot_product_attention(q, k[:, :, :filled], v[:, :, :filled], scale=scale)
+        n = length_state["filled"]
+        return F.scaled_dot_product_attention(q, k[:, :, :n], v[:, :, :n], scale=scale)
+
+    def eager_narrow():
+        n = length_state["filled"]
+        w = torch.matmul(q, k[:, :, :n].transpose(2, 3)) * scale
+        w = F.softmax(w, dim=-1, dtype=torch.float32).to(dt)
+        return torch.matmul(w, v[:, :, :n])
 
     arms = {
         "A_eager_math": eager_math,
         "B_sdpa_float4d": sdpa_float4d,
         "C_sdpa_bool4d": sdpa_bool4d,
         "D_sdpa_narrow": sdpa_narrow,
+        "F_eager_narrow": eager_narrow,
     }
-    if hasattr(torch.nn.attention, "sdpa_kernel"):
-        from torch.nn.attention import SDPBackend, sdpa_kernel
 
-        def sdpa_flash():
-            with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-                return F.scaled_dot_product_attention(q, k, v, attn_mask=mask_b, scale=scale)
+    def correct_for(n: int):
+        return F.scaled_dot_product_attention(
+            q[:, :, :1].double(), k[:, :, :n].double(), v[:, :, :n].double(), scale=scale
+        )
 
-        arms["E_sdpa_flash"] = sdpa_flash
-
-    # 字节下界：只有已填充槽位是**必要**读量
-    kv_needed = 2 * h * filled * d * 2
-    kv_full = 2 * h * L * d * 2
     result: dict[str, Any] = {
-        "shape": dict(OLMOE_ATTN, kv_len=L, filled=filled, dtype=args.dtype),
-        "kv_bytes_needed": kv_needed,
-        "kv_bytes_full_scan": kv_full,
-        "scan_waste_x": round(L / filled, 2),
+        "shape": dict(OLMOE_ATTN, kv_len=L, filled=filled0, dtype=args.dtype),
+        "length_check": {
+            "capture_at": filled0,
+            "replay_at": filled1,
+            "enabled": not args.no_length_check,
+        },
+        "kv_bytes_needed": 2 * h * filled0 * d * 2,
+        "kv_bytes_full_scan": 2 * h * L * d * 2,
+        "scan_waste_x": round(L / filled0, 2),
+        "reference": "fp64 SDPA over the filled prefix",
         "arms": {},
     }
 
-    # 用 fp64 参考校验每个臂都算的是同一件事 —— 快的错实现不是结果
+    # 先确认每个臂算的是同一件事 —— 快的错实现不是结果
     with torch.no_grad():
-        ref = F.scaled_dot_product_attention(
-            q[:, :, :1].double(), k[:, :, :filled].double(), v[:, :, :filled].double(), scale=scale
-        )
-        result["reference"] = "fp64 SDPA over the filled prefix"
+        ref0 = correct_for(filled0)
         for name, fn in arms.items():
             try:
-                out = fn()
-                err = float((out[:, :, :1].double() - ref).abs().max())
-                result["arms"][name] = {"max_abs_err_vs_fp64": err}
+                result["arms"][name] = {
+                    "max_abs_err_vs_fp64": float((fn().double() - ref0).abs().max())
+                }
             except Exception as exc:  # noqa: BLE001
                 result["arms"][name] = {"error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
 
     for name, fn in arms.items():
-        if "error" in result["arms"][name]:
+        entry = result["arms"][name]
+        if "error" in entry:
             continue
-        if args.profile:
-            result["arms"][name]["kernels"] = _profile_kernels(fn, iters=20, torch=torch)
-        result["arms"][name]["speed"] = _median_time(
+        entry["speed"] = _median_time(
             fn, warmup=args.warmup, iters=args.iters, repeats=args.repeats, torch=torch
         )
-        result["arms"][name]["capture"] = _try_capture(fn, torch)
+        if not args.no_length_check:
+            with torch.no_grad():
+                want = correct_for(filled1)
+
+            # 为了让"图写进哪块缓冲区"这件事显式，这里用 fn 自己的返回张量：
+            # 捕获时 fn 把结果写进 out_keep[name]，重放后同一个张量里是新结果。
+            def captured_fn(_fn=fn, _name=name):
+                out = _fn()
+                out_keep[_name] = out
+                return out
+
+            entry["length_change"] = replay_after_length_change(
+                captured_fn,
+                length_state=length_state,
+                capture_at=filled0,
+                replay_at=filled1,
+                torch=torch,
+            )
+            # 重放之后 out_keep[name] 里是**图算出来的**东西
+            if name in out_keep:
+                entry["length_change"]["err_of_graph_output"] = float(
+                    (out_keep[name].double() - want).abs().max()
+                )
+                entry["length_change"]["correct_after_length_change"] = bool(
+                    entry["length_change"]["err_of_graph_output"] < 1e-2
+                )
+            length_state["filled"] = filled0
+            set_filled(filled0)
+        if args.profile:
+            entry["kernels"] = _profile_kernels(fn, iters=20, torch=torch)
 
     if not args.profile:
-        # 一次 profile 就能回答"那个 fmha 内核从哪来"
-        for name in ("A_eager_math", "B_sdpa_float4d"):
-            if name in arms and "error" not in result["arms"][name]:
+        for name in ("B_sdpa_float4d", "A_eager_math", "F_eager_narrow"):
+            if name in arms and "error" not in result["arms"].get(name, {}):
                 result["arms"][name]["kernels"] = _profile_kernels(
                     arms[name], iters=20, torch=torch
                 )
