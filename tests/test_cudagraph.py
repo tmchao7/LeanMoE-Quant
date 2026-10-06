@@ -246,18 +246,61 @@ def test_graph_gate_rejects_nonfinite_logits_and_negative_kl():
 
 @pytest.mark.gpu
 @requires_cuda
-def test_tiny_olmoe_static_cache_graph_capture_and_replay(tiny_olmoe):
-    """Exercise the real session with a tiny model before loading the 13 GB checkpoint."""
+def test_tiny_olmoe_hf_moe_cannot_be_captured(tiny_olmoe):
+    """**冻结的前提**：HF 的 `OlmoeSparseMoeBlock` 无法进 CUDA Graph。
+
+    ★ 这条测试原来断言的是相反的事（capture 应当成功），所以在 `EXP-p0-03`
+    判定为 `blocked` 之后，gate 脚本的 smoke 步骤**永远失败**，p0-04 根本跑不到。
+    错的是测试，不是结果 —— 实测（RTX 5090，tiny OLMoE，1 层 4 专家）：
+
+        hf-moe      capture FAILED: operation failed due to a previous error during capture
+        static-moe  capture_success=True
+
+    机制：`torch.where(expert_mask[e])` → `nonzero`，输出长度取决于数据，
+    capture 期间 host 同步被禁止。transformers 自己在 modeling_olmoe.py 里写了
+    `_can_compile_fullgraph = False  # ... (torch.where(condition) not supported)`。
+
+    **这条测试的价值在于它会先断**：上游若把 routing 改成固定形状，
+    它会失败并提醒我们"p0-03 的结论已过期"，而不是让一个过期的结论继续被引用。
+    """
     torch = pytest.importorskip("torch")
-    from benchmarks.cudagraph import StaticCacheDecodeSession, compare_logits
-    from benchmarks.runner import _eager_reference_logits, _static_graph_correctness
+    from benchmarks.cudagraph import CudaGraphCaptureError, StaticCacheDecodeSession
 
     model = tiny_olmoe.to("cuda")
     ids = torch.tensor([[1, 2, 3, 4]], device="cuda")
     session = StaticCacheDecodeSession(model, ids, ctx=4, max_new_tokens=4, device="cuda")
-    capture = session.capture(warmup=2)
-    assert capture["capture_success"] is True
-    reference = _eager_reference_logits(model, ids, max_new_tokens=4)
+    with pytest.raises(CudaGraphCaptureError) as excinfo:
+        session.capture(warmup=2)
+    # 必须在 capture 阶段就**硬失败**。静默成功才是危险的（见 MOE_CUDAGRAPH §2.4）。
+    assert (excinfo.value.stage or "").startswith("capture")
+
+
+@pytest.mark.gpu
+@requires_cuda
+def test_tiny_olmoe_static_moe_captures_and_replays(tiny_olmoe):
+    """smoke：换成固定形状 MoE 之后，同一张小图应当 capture + replay 且忠实。
+
+    ★ 参照必须是**同路径 eager**（`_static_eager_correctness`），不是
+    `_eager_reference_logits`。后者走动态 KV cache，量到的是 cache 口径差
+    （实测 1.698e-04），而不是"图回放是否忠实"。这是本会话修掉的测量 bug，
+    这条测试是它的 GPU 侧守卫。
+    """
+    torch = pytest.importorskip("torch")
+    from benchmarks.cudagraph import StaticCacheDecodeSession
+    from benchmarks.runner import (
+        _static_eager_correctness,
+        _static_graph_correctness,
+        compare_logits,
+    )
+    from lemoq.kernels.moe_static import replace_moe_blocks
+
+    model = tiny_olmoe.to("cuda")
+    assert replace_moe_blocks(model) >= 1
+    ids = torch.tensor([[1, 2, 3, 4]], device="cuda")
+    session = StaticCacheDecodeSession(model, ids, ctx=4, max_new_tokens=4, device="cuda")
+    assert session.capture(warmup=2)["capture_success"] is True
+
+    reference = _static_eager_correctness(session, max_new_tokens=4)
     candidate = _static_graph_correctness(session, max_new_tokens=4)
     report = compare_logits(reference["logits"], candidate["logits"])
     assert reference["seed_token"] == candidate["seed_token"]
