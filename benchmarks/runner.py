@@ -455,11 +455,18 @@ def run_cudagraph(
 
     tr = VramTracker()
     tr.mark("after_torch_import")
-    model, _dtype = _load_model(model_id, dtype_name, device, attn=attn)
+    # ★ `attn="kernel"` 不是 HF 的一个实现名，是我们自己的替换：绝不能把它传给
+    #   `from_pretrained(attn_implementation=...)`（那会直接报错）。模型按默认实现
+    #   （sdpa）加载，然后在图**外**把 attention core 换成 kernel —— prefill 仍然走
+    #   HF 的原路（q_len > 1 自动退回），所以 TTFT 不受这个替换影响。
+    load_attn = None if attn == "kernel" else attn
+    model, _dtype = _load_model(model_id, dtype_name, device, attn=load_attn)
     tr.mark("after_weights")
 
     moe_replaced = 0
     kernel_warm: dict[str, Any] | None = None
+    attn_warm: dict[str, Any] | None = None
+    attn_replaced = 0
     if moe != "hf":
         # 必须在 capture 之前完成：替换会释放原 experts 并新建 fused 张量，
         # 若在图内发生就会破坏已捕获的指针。
@@ -481,6 +488,32 @@ def run_cudagraph(
             )
             torch.cuda.synchronize()
             tr.mark("after_grouped_warm")
+
+    if attn == "kernel":
+        # 同样的两步，同样的理由：先替换（图外），再 warm（图外），然后才 capture。
+        from lemoq.kernels.attn_decode import (
+            replace_attention_cores,
+        )
+        from lemoq.kernels.attn_decode import (
+            warm as warm_attn,
+        )
+
+        attn_replaced = replace_attention_cores(model, backend="triton")
+        torch.cuda.synchronize()
+        tr.mark("after_attn_replace")
+        attn_warm = warm_attn(
+            heads=int(model.config.num_attention_heads),
+            head_dim=int(
+                getattr(model.config, "head_dim", 0)
+                or (model.config.hidden_size // model.config.num_attention_heads)
+            ),
+            kv_len=ctx + max_new_tokens,
+            filled=ctx + max_new_tokens,
+            dtype=torch.float16,
+            device=device,
+        )
+        torch.cuda.synchronize()
+        tr.mark("after_attn_warm")
 
     ids = torch.full((1, ctx), 1, dtype=torch.long, device=device)
     try:
@@ -574,6 +607,14 @@ def run_cudagraph(
     res["attn"] = attn or str(getattr(model.config, "_attn_implementation", "unknown"))
     res["kernel_warm"] = kernel_warm
     res["moe_blocks_replaced"] = int(moe_replaced)
+    res["attn_kernel"] = {
+        "warm": attn_warm,
+        "cores_replaced": int(attn_replaced),
+        "note": (
+            "实例级替换：只作用于 q_len=1 的 decode core；prefill（q_len>1）退回 HF 原路。"
+            "长度来自 StaticCache 上挂的 `_lemoq_filled_len` 设备张量。"
+        ),
+    }
     return res
 
 
@@ -1240,6 +1281,20 @@ def build_cudagraph_payload(
             "layout": "continuous",
         },
     }
+    if res.get("attn_kernel"):
+        # ★ 这条替换是**本仓库自己的** attention core，其中"长度来自设备内存"这件事
+        #   是全部正确性的来源。warm 的配置与替换的层数必须进结果文件，否则事后
+        #   无法判断这个数字是在哪个实现、哪个容量下测的。
+        payload["_cudagraph"]["attn_kernel"] = res["attn_kernel"]
+        payload["_cudagraph"]["length_source"] = {
+            "buffer": "GraphBuffers.filled_len (int32, shape (1,), device)",
+            "updated_in": "_set_step_inputs()，在图外、每步 fill_",
+            "reached_kernel_via": "StaticCacheDecodeSession → cache._lemoq_filled_len → kernel 的循环上界",
+        }
+        payload["_measurement"]["attention_mask_note"] = (
+            "4D mask 仍然每步更新（eager 臂需要它），但 kernel 不读它："
+            "kernel 只读 [0, filled_len)，未填充槽位根本不参与计算。"
+        )
     return payload
 
 
@@ -1275,8 +1330,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--attn",
         default=None,
-        choices=["sdpa", "eager", "flash_attention_2"],
-        help="attention 实现覆盖（默认从实验矩阵的 config.attn 读，再退回模型默认）",
+        choices=["sdpa", "eager", "flash_attention_2", "kernel"],
+        help=(
+            "attention 实现覆盖（默认从实验矩阵的 config.attn 读，再退回模型默认）。"
+            "kernel = 本仓库的 split-KV decode attention（实例级替换 attention core，"
+            "只作用于 q_len=1；prefill 仍走 HF 原路）"
+        ),
     )
     ap.add_argument("--results-dir", default="results")
     ap.add_argument("--dry-run", action="store_true")

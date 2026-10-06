@@ -96,7 +96,10 @@ def test_sm120_expands_to_expected_total(matrix):
     # p2 从 4 变成 5：新增 EXP-p2-02（grouped GEMM 去 gather）。它排在 p2-01
     # **之前**，因为 dequant 要融进的结构就是它。
     # p2 从 5 变成 7：EXP-p2-02（grouped，1）+ EXP-p2-04（eager attention，ctx 轴 2 个）
-    assert len(real) == 43
+    # p2 从 7 变成 9：EXP-p2-05（自研 split-KV attention kernel，ctx 轴 2 个）。
+    # 它与 p2-04 是**不同实现**、不同假设（一个换 HF 实现、一个换自研 kernel），
+    # 所以不是同一次实验的另一个臂。ctx 轴与 p2-04 相同，便于逐点对照。
+    assert len(real) == 45
 
 
 def test_exp_ids_are_unique(matrix):

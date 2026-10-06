@@ -407,7 +407,8 @@ def test_replaced_attention_respects_the_length_tensor():
 def test_kernel_matches_fp64_oracle_and_length_change():
     """K1：kernel vs fp64 oracle（误差不差于 eager 基线 × 1.5）；K4：换长度重放。
 
-    上机时把 kernel 落地后启用；`-m "not gpu"` 下跳过。
+    ★ K4 用的是**同一个** `filled` 张量、原地 `fill_` 改值 —— 也就是图内每步
+    `_set_step_inputs` 干的那件事。换一块新张量测不出"kernel 真的从设备内存读"。
     """
     if not torch.cuda.is_available() or not attn_decode_available():
         pytest.skip("需要 CUDA + triton")
@@ -419,11 +420,12 @@ def test_kernel_matches_fp64_oracle_and_length_change():
     v = (torch.randn(1, HEADS, seq, HEAD_DIM, device=device) * 0.1).half()
     v[:, :, filled0:, :] = 20.0  # 判别力保障（见 test_length_change_...）
 
-    got = attn_decode_forward(q, k, v, torch.tensor([filled0], dtype=torch.int32, device=device))
+    filled = torch.full((1,), filled0, dtype=torch.int32, device=device)
+    got = attn_decode_forward(q, k, v, filled)
     want = dense_attention_oracle(q, k, v, filled0).to(torch.float32).reshape(HEADS, HEAD_DIM)
     kernel_err = float((got.float().reshape(HEADS, HEAD_DIM) - want.float()).abs().max())
 
-    baseline = attn_decode_forward(q, k, v, filled0, backend="oracle")
+    baseline = attn_decode_forward(q, k, v, filled, backend="oracle")
     baseline_err = float((baseline.float().reshape(HEADS, HEAD_DIM) - want.float()).abs().max())
     assert (
         kernel_err <= baseline_err * PARITY_GATE["tol_slack"]
@@ -440,9 +442,8 @@ def test_kernel_matches_fp64_oracle_and_length_change():
     )
 
     filled1 = 67
-    correct = attn_decode_forward(
-        q, k, v, torch.tensor([filled1], dtype=torch.int32, device=device)
-    )
+    filled.fill_(filled1)  # ← 原地改设备内存，与图内每步 fill_ 完全同一机制
+    correct = attn_decode_forward(q, k, v, filled)
     true1 = dense_attention_oracle(q, k, v, filled1).to(torch.float32).reshape(HEADS, HEAD_DIM)
     stale = want  # 旧长度的答案
     verdict = judge_length_change(
@@ -450,3 +451,29 @@ def test_kernel_matches_fp64_oracle_and_length_change():
         stale_err=float((stale - true1).abs().max()),
     )
     assert verdict["verdict"] == "PASS", verdict
+
+
+@pytest.mark.gpu
+def test_kernel_never_reads_the_unfilled_tail():
+    """★ "不需要 4D mask"的**真机**证明：把 [filled, seq) 的 k/v 全填 NaN。
+
+    若 kernel 读到任何一个未填充槽位，输出必然是 NaN（NaN 会污染整条 softmax）。
+    这是 kernel 与 mask 类实现的根本分界：mask 是"算完再遮"，kernel 是"根本不读"。
+    """
+    if not torch.cuda.is_available() or not attn_decode_available():
+        pytest.skip("需要 CUDA + triton")
+    device = "cuda"
+    torch.manual_seed(0)
+    seq, filled0 = 1056, 320
+    q = (torch.randn(1, HEADS, 1, HEAD_DIM, device=device) * 0.1).half()
+    k = (torch.randn(1, HEADS, seq, HEAD_DIM, device=device) * 0.1).half()
+    v = (torch.randn(1, HEADS, seq, HEAD_DIM, device=device) * 0.1).half()
+    ft = torch.full((1,), filled0, dtype=torch.int32, device=device)
+    clean = attn_decode_forward(q, k, v, ft).clone()
+
+    k2, v2 = k.clone(), v.clone()
+    k2[:, :, filled0:, :] = float("nan")
+    v2[:, :, filled0:, :] = float("nan")
+    got = attn_decode_forward(q, k2, v2, ft)
+    assert not torch.isnan(got.float()).any(), "kernel 读到了未填充槽位（NaN 出现了）"
+    assert torch.equal(got, clean), "尾部 NaN 改变了结果 —— mask 不能去掉"

@@ -157,6 +157,35 @@ experiments:
     ctx: [1024, 4096]
     metrics: ["per_token_p50", "per_token_p99", "bw_attainment", "host_share", "ncu_metrics"]
 
+  # p2-05 与 p2-03 / p2-04 也都是**不同层次**的证据，第三次分开记 id：
+  #   p2-03 隔离测量（每个臂 eager 地跑在紧循环里）
+  #   p2-04 模型级、attention 换成 HF eager
+  #   p2-05 模型级、attention 换成**自研 kernel**（图内交错对照 + 换长度判据）
+  #
+  # 假设：把 q·kᵀ / softmax / w·v / mask-add 这一串小 kernel 换成一次 split-KV
+  # flash-decoding 调用，图内 per-token 会低于 p2-04 的 3.1051 ms（ctx=1024）与
+  # 3.4788 ms（ctx=4096），且 attention 那几行消失、换成自己的 kernel 名。
+  # 前半句已经由图内交错对照证否一半：**隔离测量的 3.8x 不会外推**，
+  # 图内只值 1.038x（ctx=1024）——因为 attention core 在图内本来就只有 0.174 ms，
+  # 而 §2 那张 0.212 ms 的表把 o_proj 的 GEMV 与 routing softmax 也算进去了。
+  #
+  # 反证信号：图内 per-token 不低于 p2-04，或换长度重放后给出旧长度的答案
+  # （err >= 1e-2 而不仅是"能不能捕获"），或同路径 KL 不为 0。
+  - id: EXP-p2-05-attn-kernel
+    stage: "p2"
+    kind: "perf"
+    requires: ["cp_async"]
+    desc: "split-KV flash-decoding decode attention，长度从设备 scalar 读"
+    hypothesis: "attention 核心的多 kernel 堆积可以换成一次 split-KV 调用；长度从设备内存读，所以换长度重放仍给出新长度的答案（不靠 mask、不靠 shape）"
+    refutation_signal: "图内 per-token 不低于 p2-04；或换长度重放给出旧长度的答案；或同路径 KL 不为 0"
+    config:
+      bit_width: "fp16"
+      execution: "cudagraph"
+      moe: "grouped"
+      attn: "kernel"
+    ctx: [1024, 4096]
+    metrics: ["per_token_p50", "per_token_p99", "bw_attainment", "host_share", "ncu_metrics"]
+
   - id: EXP-p2-01-dequant-fusion
     stage: "p2"
     kind: "perf"
