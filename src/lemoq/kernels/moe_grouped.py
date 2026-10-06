@@ -462,7 +462,11 @@ def static_moe_forward_grouped(
     act_fn: Any,
     config: dict[str, Any] | None = None,
 ) -> tuple[Any, Any]:
-    """`OlmoeSparseMoeBlock.forward` 的 grouped 版本，契约与 `static_moe_forward` 相同。"""
+    """`OlmoeSparseMoeBlock.forward` 的 grouped 版本，契约与 `static_moe_forward` 相同。
+
+    `config` 是 kernel 参数覆盖（见 `GROUPED_CONFIGS`）—— 只有参数扫描会传它，
+    模型路径用默认值。
+    """
     _check_act_fn(act_fn)
     from lemoq.kernels.moe_static import _route  # noqa: PLC0415
 

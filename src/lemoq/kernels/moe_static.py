@@ -131,6 +131,7 @@ def static_moe_forward(
     norm_topk_prob: bool = False,
     act_fn: Callable[[Any], Any] | None = None,
     impl: str = "gather",
+    moe_config: dict[str, Any] | None = None,
 ) -> tuple[Any, Any]:
     """MoE 前向。返回 (output, router_logits)。
 
@@ -195,6 +196,7 @@ def static_moe_forward(
                 top_k=top_k,
                 norm_topk_prob=norm_topk_prob,
                 act_fn=act_fn,
+                config=moe_config,
             )
         return _decode_forward(
             x,
