@@ -182,6 +182,187 @@ def build_arms(
                 "filter": proj,
             },
         )
+
+    # ---- 混合位宽（REMEDIATION_LADDER 第 4 档）----
+    # 每格只改**一个**子计划，且都在同一道门（EXP-p1-01 的 KL 门槛）下比。
+    # 输入来自 EXP-p1-02 的逐投影结果：q/k 在 W4 只有 0.0017–0.0019，v/o 各 4.05。
+    def _plan(entries):
+        return [dict(e) for e in entries]
+
+    add(
+        "mixed",
+        {
+            "id": "mixed_baseline_w8",
+            "kind": "mixed",
+            "plan": _plan(
+                [
+                    {
+                        "filter": "self_attn",
+                        "scheme": "w8a16",
+                        "group_size": 128,
+                        "targets": ["attention"],
+                    },
+                    {
+                        "filter": "mlp.experts",
+                        "scheme": "w8a16",
+                        "group_size": 128,
+                        "targets": ["experts"],
+                    },
+                ]
+            ),
+        },
+    )
+    add(
+        "mixed",
+        {
+            "id": "mixed_qk_w4_vo_w8_exp_w8",
+            "kind": "mixed",
+            "plan": _plan(
+                [
+                    {
+                        "filter": "q_proj",
+                        "scheme": "w4a16",
+                        "group_size": 128,
+                        "targets": ["attention"],
+                    },
+                    {
+                        "filter": "k_proj",
+                        "scheme": "w4a16",
+                        "group_size": 128,
+                        "targets": ["attention"],
+                    },
+                    {
+                        "filter": "v_proj",
+                        "scheme": "w8a16",
+                        "group_size": 128,
+                        "targets": ["attention"],
+                    },
+                    {
+                        "filter": "o_proj",
+                        "scheme": "w8a16",
+                        "group_size": 128,
+                        "targets": ["attention"],
+                    },
+                    {
+                        "filter": "mlp.experts",
+                        "scheme": "w8a16",
+                        "group_size": 128,
+                        "targets": ["experts"],
+                    },
+                ]
+            ),
+        },
+    )
+    add(
+        "mixed",
+        {
+            "id": "mixed_qk_w8_vo_w4_exp_w8",
+            "kind": "mixed",
+            "plan": _plan(
+                [
+                    {
+                        "filter": "q_proj",
+                        "scheme": "w8a16",
+                        "group_size": 128,
+                        "targets": ["attention"],
+                    },
+                    {
+                        "filter": "k_proj",
+                        "scheme": "w8a16",
+                        "group_size": 128,
+                        "targets": ["attention"],
+                    },
+                    {
+                        "filter": "v_proj",
+                        "scheme": "w4a16",
+                        "group_size": 128,
+                        "targets": ["attention"],
+                    },
+                    {
+                        "filter": "o_proj",
+                        "scheme": "w4a16",
+                        "group_size": 128,
+                        "targets": ["attention"],
+                    },
+                    {
+                        "filter": "mlp.experts",
+                        "scheme": "w8a16",
+                        "group_size": 128,
+                        "targets": ["experts"],
+                    },
+                ]
+            ),
+        },
+    )
+    add(
+        "mixed",
+        {
+            "id": "mixed_qk_w4_vo_w8_exp_w4",
+            "kind": "mixed",
+            "plan": _plan(
+                [
+                    {
+                        "filter": "q_proj",
+                        "scheme": "w4a16",
+                        "group_size": 128,
+                        "targets": ["attention"],
+                    },
+                    {
+                        "filter": "k_proj",
+                        "scheme": "w4a16",
+                        "group_size": 128,
+                        "targets": ["attention"],
+                    },
+                    {
+                        "filter": "v_proj",
+                        "scheme": "w8a16",
+                        "group_size": 128,
+                        "targets": ["attention"],
+                    },
+                    {
+                        "filter": "o_proj",
+                        "scheme": "w8a16",
+                        "group_size": 128,
+                        "targets": ["attention"],
+                    },
+                    {
+                        "filter": "mlp.experts",
+                        "scheme": "w4a16",
+                        "group_size": 128,
+                        "targets": ["experts"],
+                    },
+                ]
+            ),
+        },
+    )
+    # 专家的 96% 字节在哪一类投影上最敏感？（attention 的答案是 v/o）
+    for proj_name, proj_filter in (("gate_up", ("gate_proj", "up_proj")), ("down", ("down_proj",))):
+        other = ("down_proj",) if proj_name == "gate_up" else ("gate_proj", "up_proj")
+        add(
+            "mixed",
+            {
+                "id": "mixed_exp_%s_w4" % proj_name,
+                "kind": "mixed",
+                "plan": _plan(
+                    [
+                        {"filter": f, "scheme": "w4a16", "group_size": 128, "targets": ["experts"]}
+                        for f in proj_filter
+                    ]
+                    + [
+                        {"filter": f, "scheme": "w8a16", "group_size": 128, "targets": ["experts"]}
+                        for f in other
+                    ]
+                    + [
+                        {
+                            "filter": "self_attn",
+                            "scheme": "w8a16",
+                            "group_size": 128,
+                            "targets": ["attention"],
+                        }
+                    ]
+                ),
+            },
+        )
     add("noop", {"id": "noop_a", "kind": "noop", "targets": [], "layers": None})
     add("noop", {"id": "noop_b", "kind": "noop", "targets": [], "layers": None})
     add("noop", {"id": "noop_final", "kind": "noop", "targets": [], "layers": None})
@@ -548,9 +729,12 @@ def main(argv: list[str] | None = None) -> int:
     # 所有臂可能用到的 Linear：快照一次，供全部 arm 恢复
     all_names: list[str] = []
     for arm in arms:
-        for name in _candidate_names(
-            model, targets=arm.get("targets") or ["attention"], layers=arm.get("layers")
-        ):
+        targets = arm.get("targets") or ["attention"]
+        if arm["kind"] == "mixed":
+            # ★ 混合臂的子计划可能覆盖 experts：不把它们纳入快照，恢复就是空操作，
+            #   后面所有臂都会被污染（noop 自检会抓到，但那是浪费一整轮 GPU）。
+            targets = sorted({t for entry in arm["plan"] for t in entry["targets"]})
+        for name in _candidate_names(model, targets=targets, layers=arm.get("layers")):
             if name not in all_names:
                 all_names.append(name)
     print("snapshot %d Linear -> CPU" % len(all_names), flush=True)
@@ -592,9 +776,10 @@ def main(argv: list[str] | None = None) -> int:
         # ★ 必须在扰动**之前**收集名字：`quantize_model` 会把 nn.Linear 换成
         #   QuantLinear（**不是** nn.Linear 的子类），之后再按类型找就一个也找不到 ——
         #   那样 weight_domain 会静默变成 0，而 0 看起来像"没有误差"。
-        arm_names = _candidate_names(
-            model, targets=arm.get("targets") or ["attention"], layers=arm.get("layers")
-        )
+        arm_targets = arm.get("targets") or ["attention"]
+        if arm["kind"] == "mixed":
+            arm_targets = sorted({t for entry in arm["plan"] for t in entry["targets"]})
+        arm_names = _candidate_names(model, targets=arm_targets, layers=arm.get("layers"))
         if arm.get("filter"):
             arm_names = [n for n in arm_names if arm["filter"] in n]
             entry["filter"] = arm["filter"]
@@ -612,11 +797,40 @@ def main(argv: list[str] | None = None) -> int:
                 entry["spec"] = qreport.spec
                 entry["replaced"] = qreport.replaced
                 entry["realized_bytes_total"] = qreport.to_dict()["realized_bytes_total"]
+                entry["realized_bytes_by_target"] = qreport.to_dict()["realized_bytes_by_target"]
                 entry["weight_domain"] = _weight_domain_stats(
                     snapshot,
                     arm_names,
                     bits=int(spec.weight_bits),
                     group_size=int(arm["group_size"]),
+                )
+            elif arm["kind"] == "mixed":
+                sub_reports = []
+                for entry in arm["plan"]:
+                    spec = SchemeSpec.from_flags(
+                        entry["scheme"], entry["group_size"], targets=tuple(entry["targets"])
+                    )
+                    names = [n for n in arm_names if entry["filter"] in n]
+                    if not names:
+                        raise ValueError("mixed 子计划 %s 没匹配到张量" % entry)
+                    _, sub = quantize_model(model, spec, names=names)
+                    sub_reports.append(
+                        {
+                            "filter": entry["filter"],
+                            "scheme": entry["scheme"],
+                            "group_size": entry["group_size"],
+                            "replaced": sub.replaced,
+                            "bytes": sub.to_dict()["realized_bytes_by_target"],
+                            "n_names": len(names),
+                        }
+                    )
+                entry["plan"] = sub_reports
+                entry["realized_bytes_total"] = int(
+                    sum(
+                        bucket["total_bytes"]
+                        for report in sub_reports
+                        for bucket in report["bytes"].values()
+                    )
                 )
             elif arm["kind"] == "noise":
                 entry["weight_domain"] = _inject_noise(
