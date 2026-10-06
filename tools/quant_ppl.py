@@ -93,9 +93,11 @@ def ppl_and_nll(model: Any, ids: Any, *, ctx: int) -> dict[str, Any]:
 
     per_token: list[float] = []
     total = 0.0
+    device = next(model.parameters()).device
     with torch.no_grad():
         for start in range(0, int(ids.numel()) - 1, ctx):
-            chunk = ids[start : start + ctx]
+            # ids 缓存在 CPU（省显存、缓存可复用），进模型前再搬
+            chunk = ids[start : start + ctx].to(device)
             if chunk.numel() < 2:
                 break
             logits = model(chunk.view(1, -1)).logits[0, :-1, :].float()
