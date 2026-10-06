@@ -133,15 +133,24 @@ def error_stats(
 
 
 def _top_share(grouped_w: Any, grouped_e: Any, frac: float) -> float:
-    """误差平方和中，|w| 最大的 `frac` 份额元素贡献的占比。"""
+    """误差平方和中，|w| 最大的 `frac` 份额元素贡献的占比。
+
+    ★ 用 `kthvalue` + 掩码而不是 `topk`：两者都精确，但 topk 在这个形状上
+    （每张量 200 万元素）实测占掉 `error_stats` 总时间的 **43%**（0.025 s/call，
+    cProfile）。审计要跑 (bits × group × 张量) 上千次 —— 那是十几分钟与两分钟的区别。
+    """
     import torch
 
     a = grouped_w.abs().reshape(-1)
     e2 = (grouped_e**2).reshape(-1)
-    k = max(1, int(a.numel() * frac))
-    idx = torch.topk(a, k, largest=True).indices
     total = float(e2.sum())
-    return float(e2[idx].sum() / total) if total > 0 else 0.0
+    if total <= 0:
+        return 0.0
+    k = min(a.numel(), max(1, int(a.numel() * frac)))
+    if k >= a.numel():
+        return 1.0
+    threshold = torch.kthvalue(a, a.numel() - k + 1).values
+    return float(e2[a >= threshold].sum() / total)
 
 
 def _dominated_frac(grouped_w: Any) -> float:
@@ -251,10 +260,19 @@ def layer_tensor_names(
 
 
 def audit_tensors(
-    tensors: dict[str, Any], *, bits_list=(8, 4), groups=(32, 64, 128)
+    tensors: dict[str, Any],
+    *,
+    bits_list=(8, 4),
+    groups=(32, 64, 128),
+    scale_variants=("fp16",),
 ) -> dict[str, Any]:
     """对一组 (name -> weight) 做全量审计。返回可直接落盘的 dict。"""
-    out: dict[str, Any] = {"tensors": {}, "bits_list": list(bits_list), "groups": list(groups)}
+    out: dict[str, Any] = {
+        "tensors": {},
+        "bits_list": list(bits_list),
+        "groups": list(groups),
+        "scale_variants": list(scale_variants),
+    }
     for name, w in tensors.items():
         entry: dict[str, Any] = {"shape": [int(x) for x in w.shape], "dtype": str(w.dtype)}
         for bits in bits_list:
@@ -264,13 +282,27 @@ def audit_tensors(
                     per_g[str(g)] = {"skipped": "in_features < group_size"}
                     continue
                 # 生产路径用 fp16 scale；fp32 scale 作为"量化器本身的误差"参照
-                per_g[str(g)] = {
-                    "fp16_scale": error_stats(w, bits=bits, group_size=g, scale_in_fp16=True),
-                    "fp32_scale": error_stats(w, bits=bits, group_size=g, scale_in_fp16=False),
-                }
+                variants: dict[str, Any] = {}
+                for variant in scale_variants:
+                    variants["%s_scale" % variant] = error_stats(
+                        w, bits=bits, group_size=g, scale_in_fp16=(variant == "fp16")
+                    )
+                per_g[str(g)] = variants
+            # 单调性用**已经算出来的** mse，不再重复跑 error_stats
+            mses = {
+                int(g): per_g[str(g)]["fp16_scale"]["mse"]
+                for g in groups
+                if "fp16_scale" in per_g.get(str(g), {})
+            }
+            ordered = sorted(mses)
             entry["w%d" % bits] = per_g
             entry["nested_w%d" % bits] = nested_scale_check(w, bits, tuple(groups))
-            entry["mse_monotone_w%d" % bits] = mse_monotonicity(w, bits, tuple(groups))
+            entry["mse_monotone_w%d" % bits] = {
+                "bits": int(bits),
+                "mse_by_group": mses,
+                "monotone": all(mses[a] <= mses[b] for a, b in zip(ordered, ordered[1:])),
+                "step_ratios": [round(mses[b] / mses[a], 4) for a, b in zip(ordered, ordered[1:])],
+            }
         out["tensors"][name] = entry
     return out
 
@@ -288,10 +320,12 @@ def _summarize(result: dict[str, Any]) -> list[dict[str, Any]]:
             row["w%d_rel_fro" % bits] = {
                 g: round(float(stats[g]["fp16_scale"]["rel_fro"]), 6)
                 for g in stats
-                if "fp16_scale" in stats[g]
+                if isinstance(stats[g], dict) and "fp16_scale" in stats[g]
             }
             row["w%d_mse" % bits] = {
-                g: float(stats[g]["fp16_scale"]["mse"]) for g in stats if "fp16_scale" in stats[g]
+                g: float(stats[g]["fp16_scale"]["mse"])
+                for g in stats
+                if isinstance(stats[g], dict) and "fp16_scale" in stats[g]
             }
             row["w%d_monotone" % bits] = entry["mse_monotone_w%d" % bits]["monotone"]
             row["w%d_nested" % bits] = entry["nested_w%d" % bits]["all_nested"]
@@ -314,6 +348,20 @@ def main(argv: list[str] | None = None) -> int:
         "--synthetic", action="store_true", help="不读 checkpoint，用合成权重（Mac 冒烟用）"
     )
     ap.add_argument("--json", default=None)
+    ap.add_argument(
+        "--dtype",
+        default="float16",
+        help=(
+            "checkpoint 权重转成什么 dtype 再量化。**必须与 runner 一致**：OLMoE 的 "
+            "checkpoint 存的是 bf16，而 `_load_model(..., 'float16', ...)` 会先转 fp16 —— "
+            "审计不跟着转，量的就是另一个张量。"
+        ),
+    )
+    ap.add_argument(
+        "--scale-variants",
+        default="fp16",
+        help="fp16 / fp32 / fp16,fp32（默认只算生产路径的 fp16 scale）",
+    )
     args = ap.parse_args(argv)
 
     import torch
@@ -347,11 +395,19 @@ def main(argv: list[str] | None = None) -> int:
                     idx = int(name.split(".experts.")[1].split(".")[0])
                     if idx >= args.max_experts:
                         continue
-                tensors[name] = checkpoint_weight(args.model, name)
+                tensor = checkpoint_weight(args.model, name)
+                if str(tensor.dtype) != "torch." + args.dtype:
+                    tensor = tensor.to(getattr(torch, args.dtype))  # bf16 -> fp16，与 runner 同口径
+                tensors[name] = tensor
                 kept += 1
             print("layer %d: read %d tensors" % (layer, kept), file=sys.stderr)
 
-    result = audit_tensors(tensors, bits_list=bits_list, groups=groups)
+    result = audit_tensors(
+        tensors,
+        bits_list=bits_list,
+        groups=groups,
+        scale_variants=tuple(s.strip() for s in str(args.scale_variants).split(",") if s.strip()),
+    )
     result["summary"] = _summarize(result)
     result["meta"] = {
         "model": args.model,

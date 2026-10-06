@@ -273,8 +273,22 @@ def _inject_noise(
         )
         eps = torch.randn(w.shape, generator=gen, dtype=torch.float32)
         sig = float(table[name]["rmse"])
-        delta = (lam * sig * eps).to(w.device)
-        w.data.copy_((w.float() + delta).half())
+        # ★ 不许 `w.data.copy_()` 原地改：快照里存的是**同一个模块对象**，原地改会
+        #   把快照一起改掉 → 恢复变成空操作 → 噪声臂**累积**。实测就是这样丢掉一版的：
+        #   noop_b 的 KL 恰好等于前一个噪声臂的 KL（0.0648），而 noop 自检本就是为抓它。
+        #   做法与 quantize_model 一致：新建模块挂上去，原模块保持不动。
+        perturbed = (w.detach().float() + (lam * sig * eps).to(w.device)).half()
+        clone = torch.nn.Linear(
+            module.in_features, module.out_features, bias=module.bias is not None
+        )
+        clone = clone.to(device=w.device, dtype=w.dtype)
+        with torch.no_grad():
+            clone.weight.copy_(perturbed)
+            if module.bias is not None:
+                clone.bias.copy_(module.bias)
+        parent_name, _, leaf = name.rpartition(".")
+        parent = model.get_submodule(parent_name) if parent_name else model
+        setattr(parent, leaf, clone)
         sq += float((lam * sig) ** 2) * int(table[name]["numel"])
         fro2 += float(table[name]["fro"]) ** 2
     return {"rel_fro_perturbation": float((sq**0.5) / (fro2**0.5)) if fro2 else 0.0}
