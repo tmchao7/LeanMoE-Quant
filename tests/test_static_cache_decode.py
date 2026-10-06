@@ -359,3 +359,54 @@ def test_cached_decode_matches_full_recompute():
             i,
             (got - want).abs().max().item(),
         )
+
+
+def test_static_cache_update_is_in_place_and_returns_full_length():
+    """★ 两个被 session 依赖、但很容易在升级 transformers 时静默改变的假设。
+
+    1. `StaticLayer.update` 用 `index_copy_` **原地**写，不分配新张量。
+       如果它改成 `torch.cat`，CUDA Graph 捕获的地址就会失效。
+    2. 它返回的是**整段** cache（长度 = max_cache_len），不是已填充的部分。
+       这解释了为什么 `attention_mask` 必须是 4D 静态缓冲并且逐位置更新 ——
+       mask 是唯一阻止模型注意到未填充区域的机制。如果返回的是切片，
+       session 的 mask 逻辑就变得多余（甚至错误）。
+    """
+    from transformers import StaticCache
+
+    model, cfg = _tiny_model(seed=29)
+    ctx = 4
+    max_cache_len = ctx + 3
+    cache = StaticCache(config=model.config, max_cache_len=max_cache_len)
+    pos = torch.arange(ctx, dtype=torch.long)
+    with torch.no_grad():
+        model(
+            torch.full((1, ctx), 1, dtype=torch.long),
+            attention_mask=torch.ones((1, ctx), dtype=torch.long),
+            past_key_values=cache,
+            use_cache=True,
+            cache_position=pos,
+            position_ids=pos.unsqueeze(0),
+        )
+
+    # 再走一步，检查返回的张量与 cache 内部对象是同一个（原地）
+    layer = cache.layers[0]
+    before_keys = layer.keys
+    dtype = next(model.parameters()).dtype
+    mask = _static_mask(1, max_cache_len, ctx, dtype)
+    with torch.no_grad():
+        model(
+            torch.tensor([[1]], dtype=torch.long),
+            attention_mask=mask,
+            past_key_values=cache,
+            use_cache=True,
+            cache_position=torch.tensor([ctx], dtype=torch.long),
+            position_ids=torch.tensor([[ctx]], dtype=torch.long),
+        )
+    assert layer.keys is before_keys, "cache 张量被替换了 —— 地址不再固定，图捕获会失效"
+    assert (
+        layer.keys.shape[-2] == max_cache_len
+    ), "cache 长度不是 max_cache_len（而是 %s）—— 长度假设变了，mask 逻辑需要重审" % (
+        layer.keys.shape[-2],
+    )
+    # 未填充区域仍然是未初始化/零，必须靠 mask 屏蔽
+    assert layer.keys.shape[-2] == max_cache_len

@@ -72,6 +72,35 @@ _can_compile_fullgraph = False  # MoE models don't work with torch.compile (`tor
 
 ---
 
+## 2.5 已排除的嫌疑犯（离线核实）
+
+预判的价值取决于"是不是只有这一处有问题"。把静态缓存/attention 路径逐个查过之后：
+
+| 位置 | 结论 | 依据 |
+|---|---|---|
+| `_prepare_4d_causal_attention_mask_with_cache_position` | ✅ 安全 | 传 4D mask 时**原样返回**（`causal_mask = attention_mask`），每步不新建 mask |
+| `StaticLayer.update` | ✅ 安全 | 用 `index_copy_` **原地**写，不分配；返回整段 cache，地址固定 |
+| `_update_causal_mask` 里的 `0.0 in attention_mask` | ✅ 不走这条路 | 只在 `_attn_implementation == "flash_attention_2"` 时触发，默认是 `sdpa` |
+| `StaticCache.lazy_initialization` | ✅ 安全 | 只在首次 update 时分配；session 的 `prefill()` 在 capture **之前**就把它初始化完了 |
+| **`OlmoeSparseMoeBlock` 的 `torch.where`** | ❌ **唯一的阻塞点** | 单步 1,024 次 DtoH = 64 experts × 16 layers |
+
+**结论：如果只改 MoE 的 routing 就能 capture 成功，那 `EXP-p0-04` 应当通过。**
+若 p0-04 也 blocked，说明上述某个"安全"判断错了 —— 那时 `failure_record` 的
+`stage` 字段会指向具体环节。
+
+⚠️ 上表里两条（4D mask 恒等、原地写 + 整段返回）已经写成
+`tests/test_static_cache_decode.py` 里的**冻结前提测试**。
+升级 transformers 时它们会先断，而不是等到 GPU 上才发现。
+
+```
+静态缓存的另一个后果：update 返回的是**整段** max_cache_len 的 cache，
+所以每步 attention 实际attend 1056 个位置（ctx=1024 + 32），而不是已填充的 ~33 个。
+mask 是唯一阻止模型看到未填充区域的机制 —— 这就是 session 必须逐位置更新
+4D mask 的原因，不是可选的优化。
+```
+
+---
+
 ## 3. 修法：把数据依赖的形状整体消掉
 
 ### 3.1 关键观察
