@@ -662,6 +662,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--prompt-cache", default=None, help="wikitext token id 缓存（与 tools/quant_ppl 共用）"
     )
+    ap.add_argument(
+        "--prompt-offset",
+        type=int,
+        default=0,
+        help="从缓存 token 流的哪个位置取 prompt（换一个窗口 = 换一个 prompt，用于检查结论不是单个窗口的巧合）",
+    )
     args = ap.parse_args(argv)
 
     include = (
@@ -711,7 +717,14 @@ def main(argv: list[str] | None = None) -> int:
         if cached.numel() < args.ctx:
             print("缓存的 token 数 %d < ctx %d" % (int(cached.numel()), args.ctx), file=sys.stderr)
             return 2
-        ids = cached[: args.ctx].view(1, -1).to(device)
+        start = int(args.prompt_offset)
+        if cached.numel() < start + args.ctx:
+            print(
+                "缓存 token 不够：%d < offset %d + ctx %d" % (int(cached.numel()), start, args.ctx),
+                file=sys.stderr,
+            )
+            return 2
+        ids = cached[start : start + args.ctx].view(1, -1).to(device)
     else:
         # EXP-p1-01/02 的口径：1024 个 token id=1。保留它以便逐位复现历史数字。
         ids = torch.full((1, args.ctx), 1, dtype=torch.long, device=device)
