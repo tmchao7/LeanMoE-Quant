@@ -104,7 +104,7 @@ def _profile_kernels(fn, *, iters: int, torch, top: int = 6) -> list[dict[str, A
 
 
 def replay_after_length_change(
-    fn, *, length_state: dict[str, int], capture_at: int, replay_at: int, torch
+    fn, *, set_length, capture_at: int, replay_at: int, torch
 ) -> dict[str, Any]:
     """Capture at one length, replay at another; the caller then checks the answer.
 
@@ -113,7 +113,7 @@ def replay_after_length_change(
     that what is compared is what the **graph** wrote, not a fresh eager call.
     """
     try:
-        length_state["filled"] = capture_at
+        set_length(capture_at)
         for _ in range(3):
             fn()
         torch.cuda.synchronize()
@@ -126,9 +126,10 @@ def replay_after_length_change(
             fn()
         stream.synchronize()
 
-        # 换长度：B/C 的 mask 是设备张量，原地改就能影响重放；
-        # D/F 读的是 host 变量，改了也影响不到已捕获的图 —— 这正是要暴露的差别。
-        length_state["filled"] = replay_at
+        # ★ 换长度必须**真的把设备端状态改掉**（原地改 mask），
+        #   否则测的是"重放用过期 mask"，那当然会错 —— 第一版就漏了这一步。
+        #   而 D/F 读的是 host 变量，改了也影响不到已捕获的图，这正是要暴露的差别。
+        set_length(replay_at)
         with torch.cuda.stream(stream):
             graph.replay()
         stream.synchronize()
@@ -246,8 +247,17 @@ def main(argv: list[str] | None = None) -> int:
         mask_b.zero_()
         mask_b[..., :n] = True
 
+    # ★ 判别力保障：filled0 之后的 value 置为显著不同的常量。
+    #   忽略新长度的实现会漏掉这一大块贡献 → 答案差 O(10) → 不可能被噪声掩盖。
+    v[:, :, filled0:, :] = 20.0
+
     length_state = {"filled": filled0}
-    set_filled(filled0)
+
+    def set_length(n: int) -> None:
+        length_state["filled"] = n
+        set_filled(n)
+
+    set_length(filled0)
 
     def eager_math():
         w = torch.matmul(q, k.transpose(2, 3)) * scale
@@ -334,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
 
             entry["length_change"] = replay_after_length_change(
                 captured_fn,
-                length_state=length_state,
+                set_length=set_length,
                 capture_at=filled0,
                 replay_at=filled1,
                 torch=torch,
@@ -347,8 +357,7 @@ def main(argv: list[str] | None = None) -> int:
                 entry["length_change"]["correct_after_length_change"] = bool(
                     entry["length_change"]["err_of_graph_output"] < 1e-2
                 )
-            length_state["filled"] = filled0
-            set_filled(filled0)
+            set_length(filled0)
         if args.profile:
             entry["kernels"] = _profile_kernels(fn, iters=20, torch=torch)
 
