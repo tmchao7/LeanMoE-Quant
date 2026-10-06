@@ -325,8 +325,14 @@ def run_cudagraph(
     timed: int,
     dtype_name: str,
     device: str = "cuda",
+    static_moe: bool = False,
 ) -> dict[str, Any]:
-    """Run the fp16 StaticCache + one-token CUDA Graph feasibility path."""
+    """Run the fp16 StaticCache + one-token CUDA Graph feasibility path.
+
+    `static_moe=True` 在 capture 之前把 HF 的逐专家 Python 循环换成固定形状前向
+    （见 `lemoq.kernels.moe_static`）。这是与 p0-03 **不同**的假设，所以用不同 EXP id：
+    p0-03 测"HF 原版能不能进图"，这个测"改成固定形状后能不能进图"。
+    """
     import torch
 
     from benchmarks.vram import VramTracker, split_report
@@ -341,6 +347,17 @@ def run_cudagraph(
     tr.mark("after_torch_import")
     model, _dtype = _load_model(model_id, dtype_name, device)
     tr.mark("after_weights")
+
+    moe_replaced = 0
+    if static_moe:
+        # 必须在 capture 之前完成：替换会释放原 experts 并新建 fused 张量，
+        # 若在图内发生就会破坏已捕获的指针。
+        from lemoq.kernels.moe_static import replace_moe_blocks
+
+        moe_replaced = replace_moe_blocks(model)
+        torch.cuda.synchronize()
+        tr.mark("after_static_moe")
+
     ids = torch.full((1, ctx), 1, dtype=torch.long, device=device)
     try:
         session = StaticCacheDecodeSession(
@@ -412,6 +429,8 @@ def run_cudagraph(
     res["capture"] = capture
     res["correctness"] = correctness
     res["ttft"] = ttft
+    res["static_moe"] = bool(static_moe)
+    res["moe_blocks_replaced"] = int(moe_replaced)
     return res
 
 
@@ -957,6 +976,8 @@ def build_cudagraph_payload(
         "dequant": "none",
         "fusion": "none",
         "execution": "cudagraph",
+        "moe": "static" if res.get("static_moe") else "hf",
+        "moe_blocks_replaced": res.get("moe_blocks_replaced"),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
         "batch": cfg.get("batch"),
@@ -1084,6 +1105,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="execution arm: eager or cudagraph (default inferred from --exp)",
     )
+    ap.add_argument(
+        "--static-moe",
+        action="store_true",
+        help="capture 前把 HF 逐专家循环换成固定形状 MoE（lemoq.kernels.moe_static）",
+    )
     ap.add_argument("--results-dir", default="results")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true")
@@ -1122,6 +1148,7 @@ def main(argv: list[str] | None = None) -> int:
         "warmup": args.warmup,
         "timed": args.timed,
         "execution": execution,
+        "moe": "static" if args.static_moe else "hf",
         "dequant": "none",
         "fusion": "none",
         "group_size": None,
@@ -1169,6 +1196,7 @@ def main(argv: list[str] | None = None) -> int:
                 warmup=args.warmup,
                 timed=args.timed,
                 dtype_name=args.dtype,
+                static_moe=args.static_moe,
             )
         else:
             res = run_baseline(

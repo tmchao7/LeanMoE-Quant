@@ -87,8 +87,10 @@ def test_arch_gating_skips_cpasync_work_on_v100(matrix):
 def test_sm120_expands_to_expected_total(matrix):
     runs = expand(matrix, arch="sm_120")
     real = [r for r in runs if not r.exp_id.endswith("__SKIPPED-arch")]
-    # 12 (E7) + 9 (p1) + 4 (p2) + 1 (fp8) + 2 (mxfp4) + 3 (p0) + 1+1+3 (p4/p5) + 1 (p8)
-    assert len(real) == 38
+    # 12 (E7) + 9 (p1) + 4 (p2) + 1 (fp8) + 2 (mxfp4) + 4 (p0) + 1+1+3 (p4/p5) + 1 (p8)
+    # p0 从 3 变成 4：新增 EXP-p0-04（固定形状 MoE 的 CUDA Graph 门）——
+    # 它与 p0-03 是**不同假设**，不是同一次实验的另一个臂，所以各占一个 run。
+    assert len(real) == 39
 
 
 def test_exp_ids_are_unique(matrix):

@@ -73,6 +73,24 @@ experiments:
     ctx: [1024]
     metrics: ["capture", "kl", "top1_agreement", "per_token_p50", "per_token_p99", "vram_split", "host_share"]
 
+  # p0-03 证明的是"HF 原版能不能进图"。如果它 blocked，原因会是
+  # `torch.where` -> nonzero 的数据依赖形状（profile 证据：单步 1024 次 DtoH
+  # = 64 experts x 16 layers）。这一条测的是**不同的假设**：
+  # 把逐专家循环换成固定形状前向后，capture 能不能成立。所以必须是独立的 EXP id，
+  # 不能把 p0-03 的 execution 改一改就复用同一个结果文件。
+  - id: EXP-p0-04-cudagraph-static-moe
+    stage: "p0"
+    kind: "feasibility"
+    desc: "固定形状 MoE（gather+bmm）替代 HF 逐专家循环后的 CUDA Graph 可行性门"
+    hypothesis: "消掉 torch.where/数据依赖形状后，OLMoE 单 token decode 能完整 capture/replay 且通过正确性门"
+    refutation_signal: "capture 仍失败（说明阻塞点不止 routing），或 graph/eager 的 KL/top-1 门失败（说明固定形状前向与 HF 不等价）"
+    config:
+      bit_width: "fp16"
+      execution: "cudagraph"
+      moe: "static"
+    ctx: [1024]
+    metrics: ["capture", "kl", "top1_agreement", "per_token_p50", "per_token_p99", "vram_split", "host_share"]
+
   # ---------- Phase 1：量化功能链路（只谈精度，不谈性能） ----------
   - id: EXP-p1-01-w8-w4-accuracy
     stage: "p1"
