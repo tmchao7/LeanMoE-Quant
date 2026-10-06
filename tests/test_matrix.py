@@ -87,8 +87,10 @@ def test_arch_gating_skips_cpasync_work_on_v100(matrix):
 def test_sm120_expands_to_expected_total(matrix):
     runs = expand(matrix, arch="sm_120")
     real = [r for r in runs if not r.exp_id.endswith("__SKIPPED-arch")]
-    # 12 (E7) + 9 (p1) + 4 (p2) + 1 (fp8) + 2 (mxfp4) + 2 (p0) + 1+1+3 (p4/p5) + 1 (p8)
-    assert len(real) == 37
+    # 12 (E7) + 9 (p1) + 4 (p2) + 1 (fp8) + 2 (mxfp4) + 4 (p0) + 1+1+3 (p4/p5) + 1 (p8)
+    # p0 从 3 变成 4：新增 EXP-p0-04（固定形状 MoE 的 CUDA Graph 门）——
+    # 它与 p0-03 是**不同假设**，不是同一次实验的另一个臂，所以各占一个 run。
+    assert len(real) == 39
 
 
 def test_exp_ids_are_unique(matrix):
@@ -130,3 +132,10 @@ def test_model_ids_have_required_0924_suffix():
     raw = open(MATRIX, encoding="utf-8").read()
     assert "allenai/OLMoE-1B-7B-0924" in raw
     assert 'allenai/OLMoE-1B-7B"' not in raw
+
+
+def test_p0_cudagraph_gate_is_an_independent_ctx_1024_run(matrix):
+    runs = [r for r in expand(matrix, arch="sm_120") if r.base_id == "EXP-p0-03-baseline-cudagraph"]
+    assert len(runs) == 1
+    assert runs[0].exp_id == "EXP-p0-03-baseline-cudagraph__ctx=1024"
+    assert runs[0].config == {"execution": "cudagraph", "bit_width": "fp16", "ctx": 1024}

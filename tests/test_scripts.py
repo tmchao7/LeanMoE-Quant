@@ -207,3 +207,119 @@ def test_scripts_do_not_contain_credentials():
             text = fh.read()
         for m in suspicious.finditer(text):
             raise AssertionError("%s 里疑似硬编码凭据: %s" % (path, m.group(0)[:40]))
+
+
+def test_server_gate0_accepts_existing_interpreter_without_a_repo_venv():
+    """The rented image uses /root/miniconda3; Gate-0 must not require a new venv."""
+    with open(os.path.join(SCRIPTS, "run_server_gate0.sh"), encoding="utf-8") as fh:
+        text = fh.read()
+    assert "LEMOQ_PYTHON" in text
+    assert "/root/miniconda3/bin/python" in text
+    assert "找不到可用 Python" in text
+
+
+# ---------------------------------------------------------------------------
+# run_cudagraph_gate.sh —— GPU 机器上的一键门
+# ---------------------------------------------------------------------------
+GATE = os.path.join(SCRIPTS, "run_cudagraph_gate.sh")
+
+
+def test_cudagraph_gate_refuses_without_cuda():
+    """★ 在没有 CUDA 的机器上必须**干净地拒绝**，而不是跑出半截结果。
+
+    这条比看起来重要：非 GPU 机器上产生的数字绝不能进 results/。如果脚本在无 GPU
+    的机器上"能跑"，就迟早会有人用它写出假结果。
+
+    ★ 必须用 `sys.executable` 而不是硬编码 Mac 的 `.venv-mac/bin/python`：
+    那个路径在服务器上不存在，于是脚本会在"解释器找不到"这一步就退出，
+    测试便永远断言不到 CUDA 分支 —— 而它在 Mac 上却是绿的。
+    这种"只在本机成立"的测试等于没测（真的在服务器上炸过一次）。
+    """
+    import sys as _sys
+
+    try:
+        import torch
+
+        cuda_available = bool(torch.cuda.is_available())
+    except Exception:  # noqa: BLE001
+        cuda_available = False
+
+    proc = subprocess.run(
+        ["bash", GATE, "--check"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=dict(os.environ, LEMOQ_PYTHON=_sys.executable),
+    )
+    combined = proc.stdout + proc.stderr
+    if cuda_available:
+        # 有 GPU 的机器上，脚本应当一路通过自检（这也是在验证它确实能跑）
+        assert proc.returncode == 0, "有 CUDA 但自检失败：\n" + combined
+    else:
+        assert proc.returncode != 0, "无 CUDA 时竟然返回 0"
+        assert "CUDA" in combined, "没走到 CUDA 检查分支：\n" + combined
+
+
+def test_cudagraph_gate_runs_p0_03_before_p0_04():
+    """★ 顺序是刻意的：先证明 HF 原版能不能进图，再试固定形状版本。
+
+    反过来的话，p0-04 通过会掩盖"原版到底能不能"这个问题，
+    而那个问题决定了我们要不要维护第二套 MoE 实现。
+    """
+    with open(GATE, encoding="utf-8") as fh:
+        text = fh.read()
+    i03 = text.find("EXP-p0-03-baseline-cudagraph")
+    i04 = text.find("EXP-p0-04-cudagraph-static-moe")
+    assert i03 != -1 and i04 != -1, "缺实验 id"
+    assert i03 < i04, "p0-03 必须先于 p0-04 执行"
+
+
+def test_cudagraph_gate_passes_static_moe_only_to_p0_04():
+    """`--static-moe` 只能给 p0-04。给了 p0-03 就是换了它的假设。"""
+    with open(GATE, encoding="utf-8") as fh:
+        text = fh.read()
+    assert 'EXP-p0-04-cudagraph-static-moe" "--static-moe"' in text
+
+
+def test_cudagraph_gate_verifies_model_bytes():
+    """加载 13 GB 之前先校验字节数 —— 不完整的模型会让失败看起来像 capture 问题。"""
+    with open(GATE, encoding="utf-8") as fh:
+        text = fh.read()
+    assert "13838721960" in text
+    assert ".incomplete" in text
+
+
+def test_cudagraph_gate_sets_cuda_path_and_hf_home():
+    """两个环境变量的坑：HF_HOME 不设会塞满 30 GB 系统盘；
+    PATH 不设会让 nvcc/ncu 找不到（它们不在默认 PATH 上）。"""
+    with open(GATE, encoding="utf-8") as fh:
+        text = fh.read()
+    assert "/root/autodl-tmp/hf" in text
+    assert "/usr/local/cuda/bin" in text
+
+
+def test_embedded_python_in_scripts_compiles():
+    """★ 脚本里的 heredoc Python 必须语法正确。
+
+    `bash -n` 不会检查 heredoc 里的 Python —— 那是运行时才炸的，
+    而"运行时"意味着已经在计费机器上了。
+    """
+    import re as _re
+
+    pattern = _re.compile(r"<<'PY(?:EOF)?'\n(.*?)\nPY(?:EOF)?\n", _re.S)
+    checked = 0
+    for name in os.listdir(SCRIPTS):
+        if not name.endswith(".sh"):
+            continue
+        path = os.path.join(SCRIPTS, name)
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        for m in pattern.finditer(text):
+            body = m.group(1)
+            try:
+                compile(body, "%s:heredoc" % name, "exec")
+            except SyntaxError as exc:
+                raise AssertionError("%s 的嵌入 Python 语法错误: %s" % (name, exc)) from exc
+            checked += 1
+    assert checked > 0, "没找到任何嵌入的 Python（正则是不是失效了？）"

@@ -1,11 +1,33 @@
 # HANDOFF — LeanMoE-Quant 交接文档
 
-> 写给**下一个 agent**（Codex）或接手的人。读完这一份就能直接干活，不需要重跑探索。
+> 写给**下一个 agent** 或接手的人。读完这一份就能直接干活，不需要重跑探索。
 >
-> - **写于**: 2026-09-30
-> - **仓库 HEAD**: `4b6fe0a`（`main`，已推 GitHub，本地/服务器均干净）
-> - **阶段**: Phase 0 已完成。**基线与瓶颈归因已出结果，量化尚未开始。**
-> - **计费**: 服务器按量 ¥2.88/h，**现在仍在计费中**。
+> - **写于**: 2026-09-30（2026-10-01 更新）
+> - **仓库 HEAD**: `4ae5c5b`（分支 `codex/p0-03-cudagraph`，**已推 GitHub**）
+>   - `main` 停在 `e9563ee`；CUDA Graph 相关工作都在特性分支上
+> - **阶段**: Phase 0 基线与瓶颈归因已完成。**CUDA Graph 可行性门已就绪但尚未在 GPU 上跑过。**
+> - **服务器状态**: **当前是关机状态**（`connect.westd.seetacloud.com:23960` 连接被拒）。
+>   显卡资源紧张时开不了机；数据盘应保留。开机后先跑 `bash scripts/run_cudagraph_gate.sh --check`。
+
+---
+
+## 0.0 当前唯一阻塞（2026-10-01）
+
+**服务器关机，且暂时开不了机（AutoDL 显卡资源不足）。** 所以这一轮做的是
+**所有不需要 GPU 的准备工作**，让空闲时段一开机就能一次跑完：
+
+1. **预判了 `EXP-p0-03` 会失败**，并给出证据链（见 `docs/MOE_CUDAGRAPH.md`）。
+2. **提前写好了替代实现** `src/lemoq/kernels/moe_static.py`（固定形状 MoE），
+   并用**真实的** HF 类在 CPU 上验证了数值等价（`tests/test_moe_static.py`，18 个测试）。
+3. **把 GPU 侧执行固化成一条命令**：`scripts/run_cudagraph_gate.sh`。
+
+开机后直接：
+
+```bash
+ssh 5090
+cd /root/LeanMoE-Quant && git fetch origin && git checkout codex/p0-03-cudagraph
+bash scripts/run_cudagraph_gate.sh
+```
 
 ---
 
@@ -131,7 +153,7 @@ bash scripts/bootstrap.sh --no-torch --python=/root/miniconda3/bin/python
 ## 3. 代码与模型位置
 
 ```bash
-# 仓库（git 干净，HEAD = 4b6fe0a）
+# 仓库（Mac 当前开发分支 HEAD = 124e0c4；服务器需同步该提交或更新版本）
 /root/LeanMoE-Quant
 
 # 模型（ModelScope 下载，字节数已校验 = 13,838,721,960）
@@ -217,7 +239,7 @@ python3 -m benchmarks.runner --exp EXP-p0-02-baseline-fp16 --ctx 1024 \
 
 ```bash
 cd /root/LeanMoE-Quant
-/root/miniconda3/bin/python -m pytest -m "not gpu" -q      # 140 passed
+/root/miniconda3/bin/python -m pytest -m "not gpu" -q      # 当前应与 Mac 同步，约 155 passed
 ```
 
 ### 下模型（换源后）
@@ -444,19 +466,62 @@ tests/                # 140 个测试，-m "not gpu" 全绿（Mac 与服务器�
 
 ### 🔴 第一步（必做，且是后面一切的前提）
 
-**给 runner 加 CUDA Graph 执行臂。**
+**CUDA Graph 执行臂已实现，两条 gate 已就绪；服务器上只剩真实验证。**
 
 理由：不做这一步，量化实验的端到端数字**无法解释** —— 89.5% 的时间在 host，
 量化的影响会被完全淹没（上面算过：只做量化 = 1.011x）。等于烧钱测噪音。
 
-预期：100 ms → 10 ms 量级（消除 8,277 个 kernel 的逐个 launch）。
+预期：100 ms → 10 ms 量级（消除 8,277 个 kernel 的逐个 launch），但这仍是待服务器实测，
+**不能写成已达成结果**。
 
-`configs/experiments.yaml` 里已经有 `execution: eager / cudagraph` 这个因子，
-runner 的 `config` 段也已经写入 `execution` 字段，但没有实现。
+#### 开机后的执行（一条命令）
 
-配套要做的：
-- 按 `EXP-p0-02` 的同一配置再跑一遍 cudagraph 臂，做对照；
-- 注意 CUDA Graph 要求静态 shape → 需要固定 KV 长度（或用静态 buffer + 拷贝）。
+```bash
+cd /root/LeanMoE-Quant
+git fetch origin && git checkout codex/p0-03-cudagraph
+bash scripts/run_cudagraph_gate.sh
+```
+
+它按顺序做：自检 → 离线回归 → GPU smoke → `EXP-p0-03` → `EXP-p0-04` → 对照表。
+
+#### ★ 已经预判了结果，并且准备好了替代路径
+
+**预判：`EXP-p0-03`（HF 原版）会 `blocked`。** 证据链在 `docs/MOE_CUDAGRAPH.md`：
+
+- profile 显示单步恰好 **1,024 次 `Memcpy DtoH`**，而 `64 experts × 16 layers = 1,024`；
+- 来源是 `torch.where(expert_mask[e])` —— nonzero 的输出长度依赖数据，
+  必须先回读 count 才能在 host 上分配输出；
+- HF 自己在 `modeling_olmoe.py` 写了
+  `_can_compile_fullgraph = False  # torch.where(condition) not supported`。
+
+**替代实现已经写好并离线验证**：`src/lemoq/kernels/moe_static.py`
+把逐专家循环换成固定形状的 `topk → repeat_interleave → gather + bmm`，
+没有任何 `torch.where` / `.item()` / 数据依赖形状。与 HF 原版的**数值等价性**
+已用真实的 `OlmoeSparseMoeBlock` / `OlmoeForCausalLM` 在 CPU 上验证
+（`tests/test_moe_static.py`，18 个测试）。
+
+`EXP-p0-04` 是它的 gate，**独立的 EXP id**（不同假设不能共用结果文件），
+用 `--static-moe` 触发。
+
+#### 读结果时的四种情况
+
+| 现象 | 含义 | 下一步 |
+|---|---|---|
+| p0-03 blocked，p0-04 通过 | 预判成立 | 用 p0-04 的 latency 量化 launch 消除的真实收益 |
+| p0-03 **也**通过 | 预判错了（更好） | 务必确认它的 KL/top-1 真的过了，防静默错 |
+| p0-04 也 blocked | 阻塞点不止 routing | 看 `failure_record` 的 `stage` 字段 |
+| capture 成功但 KL 失败 | **静默错** | 最有价值的结果之一，说明正确性门不可省 |
+
+#### 其它注意
+
+- 当前实现使用 Transformers `StaticCache`，不是 PagedAttention；
+- CUDA Graph 要求静态 shape → KV 长度固定，见 `benchmarks/cudagraph.py`；
+- `moe_static` 的 gather 会多花约 3 GiB/token 的显存流量（+2 ms），
+  换掉 89.6 ms 的 launch 开销是划算的，但**它不是终局** ——
+  终局是 Phase 2 的 Triton grouped GEMM（kernel 内算指针，无 gather 拷贝）。
+
+当前分支提交：`codex/p0-03-cudagraph`（已推 GitHub）。
+Mac 已通过 `181 passed, 4 deselected`；**CUDA capture/replay 尚未在服务器验证。**
 
 ### 🟠 第二步
 
@@ -491,7 +556,7 @@ ssh 5090
 nvidia-smi --query-gpu=name,driver_version,memory.total,compute_cap --format=csv
 
 # 2. 代码是最新的
-cd /root/LeanMoE-Quant && git log --oneline -1     # 应为 4b6fe0a 或更新
+cd /root/LeanMoE-Quant && git log --oneline -1     # 应为 124e0c4 或更新
 git status --short                                  # 应为空
 
 # 3. 依赖齐全
