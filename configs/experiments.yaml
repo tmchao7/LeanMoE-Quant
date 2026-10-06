@@ -133,6 +133,30 @@ experiments:
     ctx: [1024]
     metrics: ["per_token_p50", "per_token_p99", "bw_attainment", "host_share", "ncu_metrics"]
 
+  # p2-04 与 p2-03 是**不同层次**的证据，所以不同 EXP id：
+  #   p2-03 是隔离测量（tools/bench_decode_attention.py，不加载 13 GB 模型）
+  #   p2-04 是模型级结果（runner + cudagraph 臂 + 正确性门）
+  #
+  # 假设：OLMoE 默认 `_attn_implementation == "sdpa"`，其 FMHA 内核 tile 是
+  # 64x128 —— 对 q_len=1 浪费 98.4%。换成 "eager" 应当更快，且随 ctx 增大
+  # 收益放大（p2-03 实测 1.04x @ctx=1024 / 5.80x @ctx=4096，是 attention 块的倍数）。
+  # 反证信号：模型级没有对应收益（说明 p2-03 的隔离测量不能外推），
+  # 或同路径 KL / top-1 门失败（换实现改变了数值）。
+  - id: EXP-p2-04-eager-attention
+    stage: "p2"
+    kind: "perf"
+    requires: ["cp_async"]
+    desc: "attention 实现换成 eager（去掉 q_len=1 下的 tile 浪费）"
+    hypothesis: "q_len=1 时 FMHA 的 64 行 tile 浪费 98.4%；eager 的 GEMV 形态更快，且收益随 ctx 放大"
+    refutation_signal: "模型级无收益（隔离测量不能外推），或同路径 KL/top-1 门失败"
+    config:
+      bit_width: "fp16"
+      execution: "cudagraph"
+      moe: "grouped"
+      attn: "eager"
+    ctx: [1024, 4096]
+    metrics: ["per_token_p50", "per_token_p99", "bw_attainment", "host_share", "ncu_metrics"]
+
   - id: EXP-p2-01-dequant-fusion
     stage: "p2"
     kind: "perf"

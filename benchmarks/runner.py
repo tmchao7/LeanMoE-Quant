@@ -194,6 +194,11 @@ def _execution_for_exp(exp_id: str, requested: str | None) -> str:
     return "eager"
 
 
+def _config_for_exp(exp_id: str, key: str) -> Any:
+    """Read one key from the experiment's declared `config`, or None."""
+    return (_matrix_entry(exp_id).get("config") or {}).get(key)
+
+
 def _moe_for_exp(exp_id: str) -> str:
     """`config.moe` from the matrix; default to the HF path (no replacement).
 
@@ -204,15 +209,26 @@ def _moe_for_exp(exp_id: str) -> str:
     return str((_matrix_entry(exp_id).get("config") or {}).get("moe", "hf"))
 
 
-def _load_model(model_id: str, dtype_name: str, device: str):
+def _load_model(model_id: str, dtype_name: str, device: str, attn: str | None = None):
+    """Load the model, optionally overriding the attention implementation.
+
+    ★ `attn` 是必须显式记录的实验变量，不是环境细节：OLMoE 加载后默认
+    `_attn_implementation == "sdpa"`（`OlmoeSdpaAttention`），而 `EXP-p2-03`
+    实测它的 FMHA 内核用 64x128 的 tile，在 q_len=1 时浪费 98.4% ——
+    换成 `"eager"` 在 ctx=4096 下值 5.80x。换实现会改变数值（多项式求和顺序），
+    所以它必须进 `config` 并出现在结果文件里。
+    """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[
         dtype_name
     ]
+    kwargs = {"dtype": dtype}
+    if attn:
+        kwargs["attn_implementation"] = attn
     AutoTokenizer.from_pretrained(model_id)
-    model = AutoModelForCausalLM.from_pretrained(model_id, dtype=dtype)
+    model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
     return model.to(device).eval(), dtype
 
 
@@ -411,6 +427,7 @@ def run_cudagraph(
     dtype_name: str,
     device: str = "cuda",
     moe: str = "hf",
+    attn: str | None = None,
 ) -> dict[str, Any]:
     """Run the fp16 StaticCache + one-token CUDA Graph path.
 
@@ -438,7 +455,7 @@ def run_cudagraph(
 
     tr = VramTracker()
     tr.mark("after_torch_import")
-    model, _dtype = _load_model(model_id, dtype_name, device)
+    model, _dtype = _load_model(model_id, dtype_name, device, attn=attn)
     tr.mark("after_weights")
 
     moe_replaced = 0
@@ -554,6 +571,7 @@ def run_cudagraph(
     res["correctness"] = correctness
     res["ttft"] = ttft
     res["moe"] = str(moe)
+    res["attn"] = attn or str(getattr(model.config, "_attn_implementation", "unknown"))
     res["kernel_warm"] = kernel_warm
     res["moe_blocks_replaced"] = int(moe_replaced)
     return res
@@ -1102,6 +1120,7 @@ def build_cudagraph_payload(
         "fusion": "none",
         "execution": "cudagraph",
         "moe": res.get("moe", "hf"),
+        "attn": res.get("attn"),
         "moe_blocks_replaced": res.get("moe_blocks_replaced"),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
@@ -1253,6 +1272,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="等价于 --moe static（保留这个别名，scripts/run_cudagraph_gate.sh 还在用）",
     )
+    ap.add_argument(
+        "--attn",
+        default=None,
+        choices=["sdpa", "eager", "flash_attention_2"],
+        help="attention 实现覆盖（默认从实验矩阵的 config.attn 读，再退回模型默认）",
+    )
     ap.add_argument("--results-dir", default="results")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true")
@@ -1278,6 +1303,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         moe_mode = _moe_for_exp(args.exp)
 
+    attn_mode = args.attn if getattr(args, "attn", None) else _config_for_exp(args.exp, "attn")
+
     hypothesis = {
         "statement": (
             "fp16 StaticCache 能让固定 batch=1/q_len=1 的 OLMoE decode capture/replay；"
@@ -1302,6 +1329,7 @@ def main(argv: list[str] | None = None) -> int:
         "timed": args.timed,
         "execution": execution,
         "moe": moe_mode,
+        "attn": attn_mode or "model-default",
         "dequant": "none",
         "fusion": "none",
         "group_size": None,
@@ -1355,6 +1383,7 @@ def main(argv: list[str] | None = None) -> int:
                 timed=args.timed,
                 dtype_name=args.dtype,
                 moe=moe_mode,
+                attn=attn_mode,
             )
         else:
             res = run_baseline(

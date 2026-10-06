@@ -95,7 +95,8 @@ def test_sm120_expands_to_expected_total(matrix):
     # 而且 4096 是 attention 与 kernel 数地板的判别点。
     # p2 从 4 变成 5：新增 EXP-p2-02（grouped GEMM 去 gather）。它排在 p2-01
     # **之前**，因为 dequant 要融进的结构就是它。
-    assert len(real) == 41
+    # p2 从 5 变成 7：EXP-p2-02（grouped，1）+ EXP-p2-04（eager attention，ctx 轴 2 个）
+    assert len(real) == 43
 
 
 def test_exp_ids_are_unique(matrix):
