@@ -38,7 +38,7 @@ from lemoq.quant import rtn as qrtn  # noqa: E402
 from tools.quant_error_audit import (  # noqa: E402
     error_stats,
     mse_monotonicity,
-    nested_scale_check,
+    nested_absmax_check,
     qmax_for,
 )
 
@@ -76,12 +76,35 @@ def test_hand_computed_group_step_and_error_bound():
 # ---------------------------------------------------------------------------
 # 2) 三条核心不变量
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("bits", [8, 4])
-def test_group_partitions_are_nested(bits):
-    """s32 ≤ s64 ≤ s128 逐元素成立 —— 分组是**细化**关系，不是三个无关的划分。"""
+def test_group_partitions_are_nested():
+    """细组的 absmax ≤ 粗组的 absmax 逐组成立 —— 分组是**细化**关系。
+
+    与位宽无关（absmax 只看划分），所以这里不再参数化 bits。
+    """
     for seed in (0, 1, 2):
-        check = nested_scale_check(_w(seed=seed), bits, GROUPS)
-        assert check["all_nested"], (bits, seed, check)
+        check = nested_absmax_check(_w(seed=seed), GROUPS)
+        assert check["all_nested"], (seed, check)
+
+
+def test_nested_check_survives_a_degenerate_all_zero_group():
+    """★ 真实数据上踩到的边界：某些细组**整体为 0**（bf16→fp16 把 9.5e-12 下溢成 0）。
+
+    `rtn` 对 absmax=0 的组兜底 `scale=1.0`，比它的粗组（absmax≈6e-8）还大。
+    那是**兜底约定**的产物：那些组的反量化结果依然是精确的 0。
+    所以不变量必须写成关于 **absmax** 的，而不是关于 scale 的 ——
+    第一版写成 scale，于是在 192 个真实专家张量里误报了 2 个"违反"。
+    """
+    w = _w(shape=(4, 256))
+    w[0, 64:128] = 0.0  # 一个整体为 0 的细组（g=64），它的 128 窗内另一个细组非零
+    check = nested_absmax_check(w, GROUPS)
+    assert check["all_nested"], check
+    # 对照：如果拿 scale 去比，兜底的 1.0 会被误判成违反
+    from lemoq.quant import rtn as _rtn
+
+    s64 = _rtn.quantize_rtn(w.float(), bits=8, group_size=64, symmetric=True)["scale"].float()
+    s128 = _rtn.quantize_rtn(w.float(), bits=8, group_size=128, symmetric=True)["scale"].float()
+    fine = s64.reshape(4, -1, 2).amax(dim=2)
+    assert bool((fine > s128 + 1e-12).any()), "scale 口径应当**会**误报（否则这条对照没有判别力）"
 
 
 @pytest.mark.parametrize("bits,group_size", [(8, 32), (8, 128), (4, 32), (4, 128)])
@@ -216,6 +239,8 @@ def test_audit_detects_a_non_nested_partition():
     coarse = _rtn.quantize_rtn(w.float(), bits=8, group_size=64, symmetric=True)["scale"].float()
     fine_max = scrambled.reshape(128, 8, 2).amax(dim=2)
     assert bool((fine_max > coarse + 1e-12).any()), "错位分组没有被检出来"
+    # 而 absmax 口径下，真实数据是嵌套的（roll 只是人造对照）
+    assert nested_absmax_check(w, (32, 64, 128))["all_nested"]
 
 
 def test_bound_violation_is_positive_when_scale_is_wrong():

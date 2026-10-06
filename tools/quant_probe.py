@@ -149,6 +149,24 @@ def build_arms(
                 "layers": None,
             },
         )
+    # 逐投影类型：方向散布（在同量级下 KL 差 19×）到底集中在哪个张量类型上？
+    # 这直接决定"混合位宽该保护谁"（REMEDIATION_LADDER 第 4 档）。
+    for proj in ("q_proj", "k_proj", "v_proj", "o_proj"):
+        for direction in (0, 2):
+            add(
+                "sensitivity",
+                {
+                    "id": "noise_%s_lam1_dir%d" % (proj, direction),
+                    "kind": "noise",
+                    "lam": 1.0,
+                    "direction": direction,
+                    "targets": ["attention"],
+                    "layers": None,
+                    # ★ 只扰动这一类张量：σ 仍取该张量自己实测的 W8 RMS，
+                    #   所以这里的变量是"扰动落在哪个张量类型上"
+                    "filter": proj,
+                },
+            )
     add("noop", {"id": "noop_a", "kind": "noop", "targets": [], "layers": None})
     add("noop", {"id": "noop_b", "kind": "noop", "targets": [], "layers": None})
     add("noop", {"id": "noop_final", "kind": "noop", "targets": [], "layers": None})
@@ -448,13 +466,14 @@ def main(argv: list[str] | None = None) -> int:
         print("%d arms:" % len(arms))
         for arm in arms:
             print(
-                "  %-34s %-6s %-10s targets=%-22s layers=%s"
+                "  %-34s %-6s %-10s targets=%-22s layers=%-6s filter=%s"
                 % (
                     arm["id"],
                     arm["kind"],
                     arm.get("scheme", arm.get("lam", "")),
                     ",".join(arm.get("targets") or []) or "-",
                     arm.get("layers"),
+                    arm.get("filter", "-"),
                 )
             )
         return 0
@@ -561,6 +580,9 @@ def main(argv: list[str] | None = None) -> int:
         arm_names = _candidate_names(
             model, targets=arm.get("targets") or ["attention"], layers=arm.get("layers")
         )
+        if arm.get("filter"):
+            arm_names = [n for n in arm_names if arm["filter"] in n]
+            entry["filter"] = arm["filter"]
         entry["n_target_tensors"] = len(arm_names)
         try:
             if arm["kind"] == "rtn":

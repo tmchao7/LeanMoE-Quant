@@ -185,29 +185,37 @@ def _channel_rel_err(w: Any, err: Any) -> tuple[float, float]:
     return float(rel.max()), float(torch.quantile(rel, 0.5))
 
 
-def nested_scale_check(
-    w: Any, bits: int, groups: tuple[int, ...] = (32, 64, 128)
-) -> dict[str, Any]:
-    """分组必须是**嵌套**的：s32 ≤ s64 ≤ s128（逐元素）。
+def nested_absmax_check(w: Any, groups: tuple[int, ...] = (32, 64, 128)) -> dict[str, Any]:
+    """分组必须是**嵌套**的：细组的 absmax ≤ 包含它的粗组的 absmax。
 
-    这条是"group↓ ⇒ 误差界↓"的**唯一**理由。它不成立时，非单调性就是实现问题。
+    这条是"group↓ ⇒ 误差界↓"的**唯一**理由，而且与位宽无关（absmax 只看划分）。
+
+    ★ 直接算 absmax，不经过 `quantize_rtn` 的 scale。理由是实测踩到的：
+    `rtn` 对 absmax=0 的组用 `scale=1.0` 兜底，而 bf16 checkpoint 转 fp16 会让
+    极小的权重（实测最小值 9.5e-12）**下溢成精确的 0** —— 于是某些细组 absmax=0
+    但兜底 scale=1.0，比它所在粗组的 absmax（实测 5.96e-8）还大，检查就误报"违反"。
+    那是**兜底约定**的产物，不是划分问题：那些组的反量化结果仍然是精确的 0。
     """
-    from lemoq.quant import rtn as _rtn
-
-    scales = {}
-    for g in groups:
-        q = _rtn.quantize_rtn(w.float(), bits=bits, group_size=g, symmetric=True)
-        scales[g] = q["scale"].float()
-    checks = {}
+    wf = w.float()
+    out_features, in_features = wf.shape
     ordered = list(groups)
+    checks: dict[str, bool] = {}
     for fine, coarse in zip(ordered, ordered[1:]):
         if coarse % fine != 0:
             continue
         ratio = coarse // fine
-        n_coarse = int(scales[coarse].shape[1])
-        # 细组在同一个粗组内的最大值 ≤ 粗组的 absmax（等价于 s_fine ≤ s_coarse）
-        fine_max = scales[fine].reshape(int(w.shape[0]), n_coarse, ratio).amax(dim=2)
-        checks["%d<=%d" % (fine, coarse)] = bool((fine_max <= scales[coarse] + 1e-12).all())
+        # 用**粗组**的补齐长度作为共同网格：细组能整除地铺满它，包含关系才逐格成立
+        padded_len = -(-in_features // coarse) * coarse
+        wp = wf
+        if padded_len != in_features:
+            import torch  # noqa: PLC0415
+
+            wp = torch.zeros((out_features, padded_len), dtype=wf.dtype)
+            wp[:, :in_features] = wf
+        a_fine = wp.reshape(out_features, padded_len // fine, fine).abs().amax(dim=2)
+        a_coarse = wp.reshape(out_features, padded_len // coarse, coarse).abs().amax(dim=2)
+        fine_max = a_fine.reshape(out_features, -1, ratio).amax(dim=2)
+        checks["%d<=%d" % (fine, coarse)] = bool((fine_max <= a_coarse + 1e-12).all())
     return {"groups": list(groups), "nested": checks, "all_nested": all(checks.values())}
 
 
@@ -296,13 +304,14 @@ def audit_tensors(
             }
             ordered = sorted(mses)
             entry["w%d" % bits] = per_g
-            entry["nested_w%d" % bits] = nested_scale_check(w, bits, tuple(groups))
             entry["mse_monotone_w%d" % bits] = {
                 "bits": int(bits),
                 "mse_by_group": mses,
                 "monotone": all(mses[a] <= mses[b] for a, b in zip(ordered, ordered[1:])),
                 "step_ratios": [round(mses[b] / mses[a], 4) for a, b in zip(ordered, ordered[1:])],
             }
+        # 嵌套性与位宽无关：每张量算一次
+        entry["nested"] = nested_absmax_check(w, tuple(groups))
         out["tensors"][name] = entry
     return out
 
@@ -328,7 +337,7 @@ def _summarize(result: dict[str, Any]) -> list[dict[str, Any]]:
                 if isinstance(stats[g], dict) and "fp16_scale" in stats[g]
             }
             row["w%d_monotone" % bits] = entry["mse_monotone_w%d" % bits]["monotone"]
-            row["w%d_nested" % bits] = entry["nested_w%d" % bits]["all_nested"]
+        row["nested"] = entry["nested"]["all_nested"]
         rows.append(row)
     return rows
 
