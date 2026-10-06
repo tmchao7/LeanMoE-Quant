@@ -453,6 +453,7 @@ def main(argv: list[str] | None = None) -> int:
             "heads": heads,
             "head_dim": head_dim,
             "ctx": args.ctx,
+            "max_cache_len": args.ctx + capacity,
             "dtype": args.dtype,
             "sm_count": sm_count,
         },
