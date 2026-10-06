@@ -111,6 +111,28 @@ experiments:
     metrics: ["kl", "top1_agreement", "ppl"]
 
   # ---------- Phase 2：融合 kernel（核心，超时 25 GPU 小时） ----------
+  # p2-02 必须在 p2-01 **之前**做：dequant 要融进的那层结构就是 grouped GEMM。
+  # 先做 dequant 会在 gather 出来的**副本**上反量化，等于对"正要缩减的那份字节"
+  # 再收一次物化税。而且 fp16 版的门是紧的（KL=0），dequant 版的门有真容差。
+  #
+  # ⚠️ 这一条的门是**两级**的，缺一不可：
+  #   1) kernel 级：tools/bench_grouped_gemm.py 在同形状上对照 gather+bmm
+  #   2) 模型级：cudagraph 臂的 per_token_p50 + 同路径 KL
+  #   第一版脚本只测了默认 kernel 配置就判 NULL —— 那是不合格的门（见记录）。
+  - id: EXP-p2-02-moe-grouped-gemm
+    stage: "p2"
+    kind: "perf"
+    requires: ["cp_async"]
+    desc: "grouped GEMM（无 gather 拷贝）替代固定形状 gather+bmm"
+    hypothesis: "kernel 内由 expert id 算指针能去掉 gather 拷贝，per-token 延迟下降"
+    refutation_signal: "同形状 kernel 级对照不快于 gather+bmm；或调参后仍不快；或同路径 KL 门失败"
+    config:
+      bit_width: "fp16"
+      execution: "cudagraph"
+      moe: "grouped"
+    ctx: [1024]
+    metrics: ["per_token_p50", "per_token_p99", "bw_attainment", "host_share", "ncu_metrics"]
+
   - id: EXP-p2-01-dequant-fusion
     stage: "p2"
     kind: "perf"

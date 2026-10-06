@@ -423,15 +423,36 @@ def test_runner_exposes_static_moe_flag():
     assert "--static-moe" in proc.stdout
 
 
-def test_run_cudagraph_accepts_static_moe_parameter():
-    """run_cudagraph 必须显式接受 static_moe，而不是偷偷从全局读。"""
+def test_run_cudagraph_accepts_an_explicit_moe_mode():
+    """run_cudagraph 必须显式接受 moe 模式，而不是偷偷从全局读。
+
+    ★ 这里原来断言的是 `static_moe: bool`。泛化成字符串是刻意的：现在有三条
+    不同的假设（hf / static / grouped），布尔表达不了第三条，而把 `moe` 塞进
+    EXP-ID 去猜是不安全的（三个 id 里都含 "cudagraph"）。
+    """
     import inspect
 
     from benchmarks.runner import run_cudagraph
 
     params = inspect.signature(run_cudagraph).parameters
-    assert "static_moe" in params
-    assert params["static_moe"].default is False, "默认必须是 False（p0-03 行为不变）"
+    assert "moe" in params
+    assert params["moe"].default == "hf", "默认必须是 hf（p0-03 行为不变）"
+
+
+def test_moe_mode_is_read_from_the_matrix_not_guessed_from_the_id():
+    """★ moe 必须从实验矩阵读 —— 从 EXP-ID 猜会得出错的结论。
+
+    p0-03 / p0-04 / p2-02 的 id 里都含 "cudagraph"，但 moe 分别是 hf / static /
+    grouped。猜错的后果不是崩溃，而是**结果文件写错口径**，让三条不同假设的
+    证据混在一起。
+    """
+    from benchmarks.runner import _moe_for_exp
+
+    assert _moe_for_exp("EXP-p0-03-baseline-cudagraph") == "hf"
+    assert _moe_for_exp("EXP-p0-04-cudagraph-static-moe") == "static"
+    assert _moe_for_exp("EXP-p2-02-moe-grouped-gemm") == "grouped"
+    # 矩阵里没有的实验 → 安全默认（不替换 MoE）
+    assert _moe_for_exp("EXP-does-not-exist") == "hf"
 
 
 def test_exp_p0_04_declared_with_static_moe():

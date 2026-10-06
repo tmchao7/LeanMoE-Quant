@@ -87,13 +87,15 @@ def test_arch_gating_skips_cpasync_work_on_v100(matrix):
 def test_sm120_expands_to_expected_total(matrix):
     runs = expand(matrix, arch="sm_120")
     real = [r for r in runs if not r.exp_id.endswith("__SKIPPED-arch")]
-    # 12 (E7) + 9 (p1) + 4 (p2) + 1 (fp8) + 2 (mxfp4) + 5 (p0) + 1+1+3 (p4/p5) + 1 (p8)
+    # 12 (E7) + 9 (p1) + 5 (p2) + 1 (fp8) + 2 (mxfp4) + 5 (p0) + 1+1+3 (p4/p5) + 1 (p8)
     # p0 从 3 变成 4：新增 EXP-p0-04（固定形状 MoE 的 CUDA Graph 门）——
     # 它与 p0-03 是**不同假设**，不是同一次实验的另一个臂，所以各占一个 run。
     # p0 再从 4 变成 5：p0-04 的 ctx 轴从 [1024] 扩到 [1024, 4096]。
     # 这不是隐藏的变量变更 —— ctx 是声明的轴（同 p0-02 的 [1024, 4096]），
-    # 而且 4096 是 H-A/H-B 的判别点，不是"多跑一个点"。
-    assert len(real) == 40
+    # 而且 4096 是 attention 与 kernel 数地板的判别点。
+    # p2 从 4 变成 5：新增 EXP-p2-02（grouped GEMM 去 gather）。它排在 p2-01
+    # **之前**，因为 dequant 要融进的结构就是它。
+    assert len(real) == 41
 
 
 def test_exp_ids_are_unique(matrix):

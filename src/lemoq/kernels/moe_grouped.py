@@ -76,8 +76,19 @@ PARITY_GATE = {
 # 参数敏感性本身是要报告的结果（见 `lemoq.kernels.autotune`），
 # 但扫描在隔离微基准里做（`tools/bench_grouped_gemm.py`），不在模型里做。
 GROUPED_CONFIGS: dict[str, dict[str, int]] = {
-    "gate_up_act": {"BLOCK_N": 64, "BLOCK_K": 64, "SPLIT_K": 1, "num_warps": 4},
-    "down_sum": {"BLOCK_N": 128, "BLOCK_K": 64, "SPLIT_K": 1, "num_warps": 4},
+    # ★ 这两个不是猜的，是 `tools/bench_grouped_gemm.py --compare` 在 5090 上
+    #   交错对照测出来的赢家（7 轮，逐轮排名 6/7，MAD 0.0004 ms）。
+    #
+    #   原来的默认（BLOCK_N=64/BLOCK_K=64/SPLIT_K=1 + down BLOCK_N=128/SK=1）
+    #   是整张 36 点网格里**最慢的一角**：0.3868 vs 0.1204 ms/层 —— 差 3.2x。
+    #   原因可以直接算出来：down_sum 的 grid 是 (cdiv(hidden, BLOCK_N), SPLIT_K)，
+    #   BLOCK_N=128、SK=1 时只有 16 个 program 落在 170 个 SM 上（9% occupancy）。
+    #   同一个 kernel 在默认配置下比 gather 基线慢 2.17x，调好之后快 1.48x。
+    #
+    #   ⚠️ 这条教训值得留着：**单配置的正确性+性能门不是合格的门**。
+    #   第一版脚本只测默认配置，闸门判定 NULL、按计划就该放弃整条路线了。
+    "gate_up_act": {"BLOCK_N": 32, "BLOCK_K": 128, "SPLIT_K": 1, "num_warps": 4},
+    "down_sum": {"BLOCK_N": 64, "BLOCK_K": 128, "SPLIT_K": 4, "num_warps": 8},
     # SPLIT_K > 1 时这两个 kernel 各自需要一次归约，配置单独给
     "act_combine": {"BLOCK": 1024, "num_warps": 4},
     "out_reduce": {"BLOCK": 1024, "num_warps": 4},

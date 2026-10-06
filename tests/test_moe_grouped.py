@@ -232,26 +232,65 @@ def test_launch_plan_grids_for_olmoe_decode():
     plan = launch_plan(fused, top_k=OLMOE_TOP_K)
     assert plan["hidden"] == OLMOE_HIDDEN
     assert plan["ffn"] == OLMOE_FFN
-    # gate_up: (top_k, cdiv(ffn, BLOCK_N)=1024/64=16, SPLIT_K=1)
-    assert plan["gate_up_act"]["grid"] == (8, 16, 1)
-    # down: (cdiv(hidden, BLOCK_N)=2048/128=16, SPLIT_K=1)
-    assert plan["down_sum"]["grid"] == (16, 1)
+    # gate_up: (top_k, cdiv(ffn, BLOCK_N)=1024/32=32, SPLIT_K=1)
+    assert plan["gate_up_act"]["grid"] == (8, 32, 1)
+    # down: (cdiv(hidden, BLOCK_N)=2048/64=32, SPLIT_K=4) = 128 program
+    assert plan["down_sum"]["grid"] == (32, 4)
     assert plan["gate_up_act"]["act_shape"] == (8, OLMOE_FFN)
     assert plan["down_sum"]["out_shape"] == (OLMOE_HIDDEN,)
 
 
-def test_default_config_gives_two_kernels_versus_ten_on_the_gather_path():
-    """默认配置是 **2 个 kernel**；对照 gather 路径每层约 10 个。
+def test_default_config_is_the_measured_winner_not_a_guess():
+    """★ 默认配置必须保持是实测赢家 —— 参数敏感性在这里是 3.2x。
 
-    这不是装饰性数字：`_decode_forward` 的 kernel 数是
-    topk + softmax + router linear + gather + bmm + chunk + silu + mul + gather
-    + bmm + mul + reshape/sum，而其中两个 gather 是纯浪费的拷贝。
+    这个断言的存在理由是第一版脚本的教训：默认配置落在整张网格**最慢的一角**
+    （0.3868 vs 0.1204 ms/层），于是单配置的正确性+性能门判定 NULL，
+    按计划就该放弃整条路线 —— 而实际上调好参数它比基线快 1.48x。
+
+    所以宁可让这条测试在有人"顺手改个默认值"时断掉。
     """
+    from lemoq.kernels.moe_grouped import GROUPED_CONFIGS
+
+    assert GROUPED_CONFIGS["gate_up_act"] == {
+        "BLOCK_N": 32,
+        "BLOCK_K": 128,
+        "SPLIT_K": 1,
+        "num_warps": 4,
+    }
+    assert GROUPED_CONFIGS["down_sum"] == {
+        "BLOCK_N": 64,
+        "BLOCK_K": 128,
+        "SPLIT_K": 4,
+        "num_warps": 8,
+    }
+
+
+def test_grid_size_must_be_enough_to_fill_the_gpu():
+    """★ 机制回归：`down_sum` 的 program 数必须够铺满 170 个 SM。
+
+    第一版默认是 BLOCK_N=128 / SPLIT_K=1 → grid (16, 1) = **16 个 program**，
+    9% occupancy，比基线慢 2.17x。这个量级的问题不需要 GPU 就能算出来：
+    grid 的第 0 维 < SM 数时，SM 大部分是空的。
+    """
+    import math
+
+    sms = 170  # RTX 5090
+    for block_n, split in ((32, 1), (64, 1), (128, 1), (64, 4), (64, 8)):
+        plan = launch_plan(
+            _olmoe_fused(),
+            top_k=OLMOE_TOP_K,
+            config={"down_sum": {"BLOCK_N": block_n, "SPLIT_K": split}},
+        )
+        programs = math.prod(plan["down_sum"]["grid"])
+        if split == 1 and block_n >= 128:
+            assert programs < sms, "这条正是慢配置的形状"
+        if block_n == 64 and split == 4:
+            assert programs == 128  # 默认：接近 170，够用
+    # 默认配置下两个 kernel 的 program 总数
     plan = launch_plan(_olmoe_fused(), top_k=OLMOE_TOP_K)
-    assert plan["kernel_count"] == 2
-    assert plan["act_combine"] is None
-    assert plan["out_reduce"] is None
-    assert plan["gate_up_act"]["partial_shape"] is None
+    import math as _m
+
+    assert _m.prod(plan["down_sum"]["grid"]) == 128
 
 
 def test_split_k_adds_the_reduction_kernels_and_sizes_the_partials():
@@ -265,9 +304,10 @@ def test_split_k_adds_the_reduction_kernels_and_sizes_the_partials():
         config={"gate_up_act": {"SPLIT_K": 2}, "down_sum": {"SPLIT_K": 4}},
     )
     assert plan["kernel_count"] == 4
-    assert plan["gate_up_act"]["grid"] == (8, 16, 2)
+    # 默认 BLOCK_N=32 → cdiv(1024, 32) = 32；SPLIT_K 覆盖成 2 → 第 2 维是 2
+    assert plan["gate_up_act"]["grid"] == (8, 32, 2)
     assert plan["gate_up_act"]["partial_shape"] == (2, 8, OLMOE_FFN)
-    assert plan["down_sum"]["grid"] == (16, 4)
+    assert plan["down_sum"]["grid"] == (32, 4)
     assert plan["down_sum"]["partial_shape"] == (4, OLMOE_HIDDEN)
     assert plan["act_combine"]["grid"] == ((8 * OLMOE_FFN + 1023) // 1024,)
     assert plan["out_reduce"]["grid"] == ((OLMOE_HIDDEN + 1023) // 1024,)

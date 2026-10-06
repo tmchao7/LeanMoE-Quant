@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -160,6 +161,32 @@ def _execution_for_exp(exp_id: str, requested: str | None) -> str:
     if "cudagraph" in exp_id:
         return "cudagraph"
     return "eager"
+
+
+def _moe_for_exp(exp_id: str) -> str:
+    """Read `config.moe` from the experiment matrix; default to the HF path.
+
+    ★ 为什么不从 EXP-ID 里猜（`_execution_for_exp` 那种做法在这里不安全）：
+    p0-03 / p0-04 / p2-02 的 id 里都含 "cudagraph"，但 moe 分别是 hf / static /
+    grouped —— 猜不出来。而 moe 决定了结果是哪一条假设的证据，所以只能从矩阵读。
+    矩阵里没有这个实验时返回 "hf"（= "没有替换 MoE"，这是唯一安全的默认）。
+    """
+    try:
+        import yaml  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return "hf"
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "experiments.yaml"
+    )
+    try:
+        with open(path, encoding="utf-8") as fh:
+            matrix = yaml.safe_load(fh)
+        for exp in matrix.get("experiments") or []:
+            if exp.get("id") == exp_id:
+                return str((exp.get("config") or {}).get("moe", "hf"))
+    except Exception:  # noqa: BLE001
+        return "hf"
+    return "hf"
 
 
 def _load_model(model_id: str, dtype_name: str, device: str):
@@ -368,18 +395,26 @@ def run_cudagraph(
     timed: int,
     dtype_name: str,
     device: str = "cuda",
-    static_moe: bool = False,
+    moe: str = "hf",
 ) -> dict[str, Any]:
-    """Run the fp16 StaticCache + one-token CUDA Graph feasibility path.
+    """Run the fp16 StaticCache + one-token CUDA Graph path.
 
-    `static_moe=True` 在 capture 之前把 HF 的逐专家 Python 循环换成固定形状前向
-    （见 `lemoq.kernels.moe_static`）。这是与 p0-03 **不同**的假设，所以用不同 EXP id：
-    p0-03 测"HF 原版能不能进图"，这个测"改成固定形状后能不能进图"。
+    `moe` 选 decode 的 MoE 实现（三种，对应三个不同的假设）：
+
+        "hf"      HF 的逐专家 Python 循环 —— EXP-p0-03，实测 blocked
+        "static"  固定形状 gather + bmm（moe_static）—— EXP-p0-04
+        "grouped" Triton grouped GEMV，无 gather 拷贝（moe_grouped）—— EXP-p2-02
+
+    prefill 与 `moe` 无关：永远走逐专家循环（理由见 `moe_static.static_moe_forward`）。
     """
     import torch
 
     from benchmarks.vram import VramTracker, split_report
+    from lemoq.kernels.moe_static import VALID_MOE_IMPLS
 
+    valid = ("hf",) + tuple(VALID_MOE_IMPLS)
+    if moe not in valid:
+        raise ValueError("unknown moe %r; expected one of %s" % (moe, valid))
     if dtype_name != "float16":
         raise ValueError("EXP-p0-03 supports dtype=float16 only")
     if batch != 1 or ctx < 1:
@@ -392,14 +427,28 @@ def run_cudagraph(
     tr.mark("after_weights")
 
     moe_replaced = 0
-    if static_moe:
+    kernel_warm: dict[str, Any] | None = None
+    if moe != "hf":
         # 必须在 capture 之前完成：替换会释放原 experts 并新建 fused 张量，
         # 若在图内发生就会破坏已捕获的指针。
         from lemoq.kernels.moe_static import replace_moe_blocks
 
-        moe_replaced = replace_moe_blocks(model)
+        moe_replaced = replace_moe_blocks(model, impl=moe)
         torch.cuda.synchronize()
         tr.mark("after_static_moe")
+        if moe == "grouped":
+            # ★ Triton 的首次调用会 JIT 编译。在 capture 期间做这件事会报错，
+            #   而且报错信息通常指向别处。所以这里显式 warm 一次。
+            from lemoq.kernels.moe_grouped import warm as warm_kernels
+
+            block = model.model.layers[0].mlp
+            kernel_warm = warm_kernels(
+                block._static_experts,
+                hidden=int(block._static_experts.gate_up.shape[2]),
+                top_k=int(block._static_top_k),
+            )
+            torch.cuda.synchronize()
+            tr.mark("after_grouped_warm")
 
     ids = torch.full((1, ctx), 1, dtype=torch.long, device=device)
     try:
@@ -489,7 +538,8 @@ def run_cudagraph(
     res["capture"] = capture
     res["correctness"] = correctness
     res["ttft"] = ttft
-    res["static_moe"] = bool(static_moe)
+    res["moe"] = str(moe)
+    res["kernel_warm"] = kernel_warm
     res["moe_blocks_replaced"] = int(moe_replaced)
     return res
 
@@ -1036,7 +1086,7 @@ def build_cudagraph_payload(
         "dequant": "none",
         "fusion": "none",
         "execution": "cudagraph",
-        "moe": "static" if res.get("static_moe") else "hf",
+        "moe": res.get("moe", "hf"),
         "moe_blocks_replaced": res.get("moe_blocks_replaced"),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
@@ -1178,9 +1228,15 @@ def main(argv: list[str] | None = None) -> int:
         help="execution arm: eager or cudagraph (default inferred from --exp)",
     )
     ap.add_argument(
+        "--moe",
+        default=None,
+        choices=["hf", "static", "grouped"],
+        help="decode 的 MoE 实现（默认从 --exp 的 config.moe 推；grouped 需要 triton）",
+    )
+    ap.add_argument(
         "--static-moe",
         action="store_true",
-        help="capture 前把 HF 逐专家循环换成固定形状 MoE（lemoq.kernels.moe_static）",
+        help="等价于 --moe static（保留这个别名，scripts/run_cudagraph_gate.sh 还在用）",
     )
     ap.add_argument("--results-dir", default="results")
     ap.add_argument("--dry-run", action="store_true")
@@ -1196,6 +1252,16 @@ def main(argv: list[str] | None = None) -> int:
     if execution == "cudagraph" and args.dtype != "float16":
         print("runner 失败: EXP-p0-03 只支持 --dtype float16", file=sys.stderr)
         return 2
+
+    # decode 的 MoE 实现。优先级：显式 --moe > 兼容别名 --static-moe > 实验矩阵里
+    # 声明的 config.moe > "hf"。从矩阵读是关键：结果文件里的 moe 字段必须与矩阵
+    # 声明一致，否则 p0-03 / p0-04 / p2-02 三条**不同假设**会混进同一个口径。
+    if args.moe:
+        moe_mode = args.moe
+    elif getattr(args, "static_moe", False):
+        moe_mode = "static"
+    else:
+        moe_mode = _moe_for_exp(args.exp)
 
     hypothesis = {
         "statement": (
@@ -1220,7 +1286,7 @@ def main(argv: list[str] | None = None) -> int:
         "warmup": args.warmup,
         "timed": args.timed,
         "execution": execution,
-        "moe": "static" if args.static_moe else "hf",
+        "moe": moe_mode,
         "dequant": "none",
         "fusion": "none",
         "group_size": None,
@@ -1273,7 +1339,7 @@ def main(argv: list[str] | None = None) -> int:
                 warmup=args.warmup,
                 timed=args.timed,
                 dtype_name=args.dtype,
-                static_moe=args.static_moe,
+                moe=moe_mode,
             )
         else:
             res = run_baseline(
