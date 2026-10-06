@@ -361,3 +361,78 @@ def test_report_carries_everything_needed_to_check_the_byte_account():
     for target, bucket in d["realized_bytes_by_target"].items():
         fp16_bytes = bucket["n_params"] * 2
         assert bucket["total_bytes"] < fp16_bytes, target
+
+
+# ---------------------------------------------------------------------------
+# 6) EXP-p1-01 的判据与 teacher forcing（CPU 可测）
+# ---------------------------------------------------------------------------
+def test_kl_thresholds_come_from_the_documented_values():
+    """★ 门槛照抄 `docs/METRICS.md` §1，一个都不许在这里放宽。
+
+    这是"agent 不得放宽正确性门"的直接体现：把文档里的数**钉在测试里**，
+    改它们就必须同时改文档并让这条测试红。
+    """
+    from benchmarks.quant_gate import QUANT_THRESHOLDS, kl_threshold_for
+
+    assert QUANT_THRESHOLDS["kl_w8_max"] == 0.01
+    assert QUANT_THRESHOLDS["kl_w4_max"] == 0.05
+    assert QUANT_THRESHOLDS["top1_min"] == 0.95
+    assert kl_threshold_for("w8a16") == 0.01
+    assert kl_threshold_for("w8a8") == 0.01
+    assert kl_threshold_for("w4a16") == 0.05
+    with pytest.raises(ValueError):
+        kl_threshold_for("w3a16")
+
+
+def test_teacher_forcing_feeds_the_same_tokens_to_both_arms():
+    """★ 逐位置 KL 的前提是两条臂在**同一串 token**上比。
+
+    free-running 贪心会让轨迹分叉，那时算出来的不是逐位置 KL。这条测试用 tiny
+    模型证明 `teacher_forced_logits` 确实吃外部给的 token，而不是自己的 argmax：
+    喂一串**和模型偏好不同**的 token，返回的 logits 必须随之改变。
+    """
+    from benchmarks.quant_gate import teacher_forced_logits
+
+    model = _tiny_model()
+    ids = torch.tensor([[1, 2, 3]])
+    a = teacher_forced_logits(model, ids, [5, 6, 7, 8], device="cpu")
+    b = teacher_forced_logits(model, ids, [8, 7, 6, 5], device="cpu")
+    assert len(a) == len(b) == 5  # prompt 末尾 1 + 4 个强制 token
+    assert not torch.allclose(
+        a[1], b[1]
+    ), "喂了不同 token 却得到同样的 logits -> 没有 teacher forcing"
+
+
+def test_quant_accuracy_report_flags_fail_when_kl_exceeds_the_documented_max():
+    """门必须真的会 FAIL —— 一个不可能失败的判据比没有判据更糟。"""
+    from benchmarks.quant_gate import quant_accuracy_report
+
+    ref = [torch.randn(1, 1, 16) for _ in range(4)]
+    same = quant_accuracy_report(ref, ref, scheme="w4a16", group_size=128)
+    assert same["gate"] == "PASS" and same["kl"] == 0.0
+
+    # 平移不变性：给 logits 加一个**共同**常量不改变 softmax，所以 KL 必须仍是 0。
+    # （第一版就是拿 `t + 50.0` 去构造 FAIL 的，结果它正确地 PASS 了 —— 错的是测试。）
+    # 这条同时验证了 KL 是算在**分布**上而不是 logits 上。
+    shifted = quant_accuracy_report(ref, [t + 50.0 for t in ref], scheme="w4a16", group_size=128)
+    assert shifted["kl"] == pytest.approx(0.0, abs=1e-6)
+    assert shifted["gate"] == "PASS"
+
+    # 真正改变**形状**（放大差异）才会改变分布
+    bad = [t * 5.0 for t in ref]
+    worse = quant_accuracy_report(ref, bad, scheme="w4a16", group_size=128)
+    assert worse["gate"] == "FAIL"
+    assert worse["kl"] > 0.05
+
+    # W8 的门更严：同样的差异在 w8a16 下也必须 FAIL，且阈值是 0.01
+    w8 = quant_accuracy_report(ref, [t * 5.0 for t in ref], scheme="w8a16", group_size=128)
+    assert w8["thresholds"]["kl_max"] == 0.01 and w8["gate"] == "FAIL"
+
+
+def test_quant_accuracy_report_rejects_mismatched_position_counts():
+    """位置数不同 = 两条臂跑的不是同一串 token，必须报错而不是默默比较。"""
+    from benchmarks.quant_gate import quant_accuracy_report
+
+    ref = [torch.randn(1, 1, 16) for _ in range(4)]
+    with pytest.raises(ValueError):
+        quant_accuracy_report(ref, ref[:3], scheme="w4a16", group_size=128)
