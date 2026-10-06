@@ -470,8 +470,10 @@ def test_chunk_bounds_the_gather_at_real_ctx():
     assert worst_gib <= MAX_GATHER_BYTES / 1024**3 + 1e-9, (
         "单块 gather %.2f GiB 超过预算" % worst_gib
     )
-    # 而且要留足余量：加载 13 GiB 模型后只有约 17.68 GiB 可用
-    assert worst_gib < 2.0, "单块 %.2f GiB 对 31 GiB 的卡来说太大" % worst_gib
+    # 而且要留足余量：加载 13 GiB 模型后只有约 17.68 GiB 可用。
+    # 上界跟着预算走，但绝不允许超过可用显存的一半。
+    assert worst_gib <= MAX_GATHER_BYTES / 1024**3 + 1e-9
+    assert worst_gib < 17.68 / 2, "单块 %.2f GiB 超过可用显存的一半" % worst_gib
 
 
 def test_chunk_size_is_one_for_a_single_token():

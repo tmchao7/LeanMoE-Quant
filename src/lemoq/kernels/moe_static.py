@@ -106,7 +106,11 @@ def fuse_experts(experts: Any) -> FusedExperts:
 #   decode 时 T=1（8 个专家，67 MiB）没问题，但 **prefill 时 T=1024**
 #   → (8192, 2048, 2048) fp16 = **64 GiB**，在 31 GiB 的卡上直接 OOM。
 #   小模型的 parity 测试（ctx=5）完全没暴露它 —— 只有真实 ctx 的算术才会。
-MAX_GATHER_BYTES = 512 * 1024 * 1024
+# ★ 512 MiB 太保守了：ctx=1024 时每块只有 5 个 token，要 205 块，
+#   TTFT 因此从 111 ms 恶化到 2303 ms。2 GiB 仍然是加载 13 GiB 模型后
+#   （余约 17.68 GiB）可以放心用的量，而块数降到 49。
+#   注意：这只影响 **prefill**；decode（T=1）永远只走一块，不进这个循环。
+MAX_GATHER_BYTES = 2 * 1024 * 1024 * 1024
 
 
 def gather_bytes_per_token(*, top_k: int, hidden: int, ffn: int, item_size: int = 2) -> int:

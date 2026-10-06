@@ -1053,8 +1053,20 @@ def build_cudagraph_payload(
         "thresholds": {
             "kl_max_fp16_graph": 1e-5,
             "top1_min_fp16_graph": 1.0,
-            "note": "CUDA Graph logits compared with eager fp16 reference on the same prompt",
+            "note": (
+                "与**同路径 eager**（同 StaticCache、同 4D mask、同 MoE，只是不进图）"
+                "比较 —— 这才是'图回放是否忠实'。跨 cache / 跨实现的差异另见 "
+                "informational_vs_hf_dynamic_cache，它不作为门槛。"
+            ),
         },
+        # ★ 这些字段原来被白名单丢掉了。门通过时它们是唯一的证据链：
+        #   没有 token 序列与 informational KL，事后无法复核"图到底忠不忠实"。
+        "seed_token_match": correctness.get("seed_token_match"),
+        "token_sequence_match": correctness.get("token_sequence_match"),
+        "eager_seed_token": correctness.get("eager_seed_token"),
+        "graph_seed_token": correctness.get("graph_seed_token"),
+        "graph_output_tokens": correctness.get("graph_output_tokens"),
+        "informational_vs_hf_dynamic_cache": correctness.get("informational_vs_hf_dynamic_cache"),
     }
     budget = res["budget"]
     payload["bytes"] = {
