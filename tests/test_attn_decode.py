@@ -174,8 +174,16 @@ def test_launch_plan_rejects_illegal_shapes():
 
 def test_resolve_num_splits_defaults_and_overrides():
     assert resolve_num_splits(7, heads=16) == 7
-    # 没有 CUDA 时退回 1（而不是写死 170/16）：默认值不许假装知道 SM 数
-    assert resolve_num_splits(None, heads=16) == 1
+    # `None` = ceil(SM / heads)，SM 数**实测**自当前设备；没有 CUDA 时退回 1。
+    # ★ 这条断言必须跟着设备走：第一版写成"没有 CUDA 时 == 1"，于是它在 Mac 上绿、
+    #   在 5090 上是红的（11 != 1）—— 也就是"只在没有 GPU 的机器上验证过"。
+    #   默认值既不许写死 170，也不许在没有设备时假装知道 SM 数。
+    if torch.cuda.is_available():
+        sm = int(torch.cuda.get_device_properties(0).multi_processor_count)
+        expected = max(1, -(-sm // 16))
+        assert resolve_num_splits(None, heads=16) == expected
+    else:
+        assert resolve_num_splits(None, heads=16) == 1
     with pytest.raises(ValueError):
         resolve_num_splits(0, heads=16)
 
