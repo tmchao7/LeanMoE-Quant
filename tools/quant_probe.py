@@ -506,10 +506,22 @@ def main(argv: list[str] | None = None) -> int:
     snapshot = _snapshot(model, all_names)
     print("  %.1f s" % (time.perf_counter() - t_snap), flush=True)
 
-    sigma_table: dict[str, Any] = {}
     sigma_names = _candidate_names(model, targets=["attention"], layers=None)
     print("sigma table for %d attention tensors ..." % len(sigma_names), flush=True)
     sigma_table = _sigma_table(model, sigma_names)
+    _sig = sorted(v["rmse"] for v in sigma_table.values())
+    _fro2 = sum(float(v["fro"]) ** 2 for v in sigma_table.values())
+    _numel = sum(int(v["numel"]) for v in sigma_table.values())
+    _sq = sum(float(v["rmse"]) ** 2 * int(v["numel"]) for v in sigma_table.values())
+    result["sigma_table_summary"] = {
+        "source": "W8A16 group=128, fp16 scale（生产路径）",
+        "n_tensors": len(sigma_table),
+        "rmse_median": _sig[len(_sig) // 2],
+        "rmse_min": _sig[0],
+        "rmse_max": _sig[-1],
+        "attention_rel_fro": (float(_sq**0.5) / float(_fro2**0.5)) if _fro2 else None,
+        "numel": _numel,
+    }
 
     def _write() -> None:
         if args.json:
