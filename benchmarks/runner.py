@@ -154,39 +154,54 @@ def _decode_step(model, tok, past, device, dtype):
     return nxt, out.past_key_values
 
 
-def _execution_for_exp(exp_id: str, requested: str | None) -> str:
-    """Resolve the execution arm without silently falling back."""
-    if requested is not None:
-        return normalize_execution(requested)
-    if "cudagraph" in exp_id:
-        return "cudagraph"
-    return "eager"
-
-
-def _moe_for_exp(exp_id: str) -> str:
-    """Read `config.moe` from the experiment matrix; default to the HF path.
-
-    ★ 为什么不从 EXP-ID 里猜（`_execution_for_exp` 那种做法在这里不安全）：
-    p0-03 / p0-04 / p2-02 的 id 里都含 "cudagraph"，但 moe 分别是 hf / static /
-    grouped —— 猜不出来。而 moe 决定了结果是哪一条假设的证据，所以只能从矩阵读。
-    矩阵里没有这个实验时返回 "hf"（= "没有替换 MoE"，这是唯一安全的默认）。
-    """
+def _matrix_entry(exp_id: str) -> dict[str, Any]:
+    """The experiment's declaration from `configs/experiments.yaml`, or `{}`."""
     try:
         import yaml  # noqa: PLC0415
     except Exception:  # noqa: BLE001
-        return "hf"
+        return {}
     path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "experiments.yaml"
     )
     try:
         with open(path, encoding="utf-8") as fh:
             matrix = yaml.safe_load(fh)
-        for exp in matrix.get("experiments") or []:
-            if exp.get("id") == exp_id:
-                return str((exp.get("config") or {}).get("moe", "hf"))
     except Exception:  # noqa: BLE001
-        return "hf"
-    return "hf"
+        return {}
+    for exp in matrix.get("experiments") or []:
+        if exp.get("id") == exp_id:
+            return exp
+    return {}
+
+
+def _execution_for_exp(exp_id: str, requested: str | None) -> str:
+    """Resolve the execution arm **from the matrix**, never from the name.
+
+    ★ 这条原来是从 EXP-ID 里找子串 "cudagraph"。新加的 `EXP-p2-02-moe-grouped-gemm`
+    里没有这个子串，于是它**静默跑成了 eager 臂**（`run_baseline`），并且在没有
+    外网的机器上去连 huggingface —— 报错说的是网络，真正的原因是臂选错了。
+    如果那台机器有外网，它还会写出一个 `execution=eager` 却被当成 grouped 证据的
+    结果文件。臂决定了结果是哪条假设的证据，只能读声明。
+    """
+    if requested is not None:
+        return normalize_execution(requested)
+    declared = (_matrix_entry(exp_id).get("config") or {}).get("execution")
+    if declared is not None:
+        return normalize_execution(str(declared))
+    # 矩阵里没有这个实验：保留老的启发式，但只作为最后手段
+    if "cudagraph" in exp_id:
+        return "cudagraph"
+    return "eager"
+
+
+def _moe_for_exp(exp_id: str) -> str:
+    """`config.moe` from the matrix; default to the HF path (no replacement).
+
+    ★ 与 `_execution_for_exp` 同理：moe 决定了结果是哪一条假设的证据，
+    绝不能从 EXP-ID 猜。矩阵里没有这个实验时返回 "hf" —— "没有替换 MoE"
+    是唯一安全的默认。
+    """
+    return str((_matrix_entry(exp_id).get("config") or {}).get("moe", "hf"))
 
 
 def _load_model(model_id: str, dtype_name: str, device: str):

@@ -455,6 +455,30 @@ def test_moe_mode_is_read_from_the_matrix_not_guessed_from_the_id():
     assert _moe_for_exp("EXP-does-not-exist") == "hf"
 
 
+def test_execution_arm_is_read_from_the_matrix_not_the_id():
+    """★ 回归：`EXP-p2-02-moe-grouped-gemm` 的 id 里**没有** "cudagraph"。
+
+    老的 `_execution_for_exp` 靠 id 里有没有 "cudagraph" 来选臂，于是这条新实验
+    **静默跑成了 eager 臂**（run_baseline），还在无外网的机器上去连 huggingface
+    —— 报错指向网络，真正的原因是臂选错了。有外网时更糟：它会写出一个
+    `execution=eager` 的结果文件，却被当成 grouped 的证据引用。
+    """
+    from benchmarks.runner import _execution_for_exp
+
+    # 这三条都是 cudagraph 臂，尽管只有前两条的 id 里含 "cudagraph"
+    for exp in (
+        "EXP-p0-03-baseline-cudagraph",
+        "EXP-p0-04-cudagraph-static-moe",
+        "EXP-p2-02-moe-grouped-gemm",
+    ):
+        assert _execution_for_exp(exp, None) == "cudagraph", exp
+    # 显式请求优先于矩阵声明
+    assert _execution_for_exp("EXP-p2-02-moe-grouped-gemm", "eager") == "eager"
+    # 矩阵里没有的 → 老的启发式作为最后手段
+    assert _execution_for_exp("EXP-weird-cudagraph-thing", None) == "cudagraph"
+    assert _execution_for_exp("EXP-plain-baseline", None) == "eager"
+
+
 def test_exp_p0_04_declared_with_static_moe():
     """矩阵里必须有 p0-04，且它声明 moe: static。
 
