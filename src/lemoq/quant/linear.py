@@ -347,10 +347,22 @@ def quantize_model(
     if not spec.enabled:
         return model, report
 
-    for module_name, module in list(model.named_modules()):
+    # ★ 只收集**名字**（字符串），不要 `list(model.named_modules())`。
+    #
+    #   `named_modules()` 返回的是模块对象，把它们物化进一个 list 会让**全部**
+    #   原始 fp16 权重在整轮循环期间都无法释放 —— 于是峰值变成
+    #   "fp16 全部 + 量化后全部"（OLMoE 上约 13.8 + 5.5 = 19.3 GB），而不是
+    #   "未处理的 fp16 + 已处理的量化"（滑动窗口，峰值≈13.8 GB）。
+    #   实测环境里 GPU 已被另一个进程占了 13.8 GB，这 5 GB 的差就是能不能跑的区别。
+    #
+    #   也不能直接遍历 `named_modules()` 生成器 + 就地替换：那会在迭代中改
+    #   模块树（RuntimeError）。收集名字两全。
+    candidates: list[str] = [
+        name for name, module in model.named_modules() if name and isinstance(module, nn.Linear)
+    ]
+    for module_name in candidates:
+        module = model.get_submodule(module_name)
         if not isinstance(module, nn.Linear):
-            continue
-        if not module_name:
             continue
         target = classify_linear(module_name)
         if target is None:
