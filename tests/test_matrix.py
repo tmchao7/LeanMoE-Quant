@@ -113,7 +113,11 @@ def test_sm120_expands_to_expected_total(matrix):
     # p2-01 从 4 格变 6 格：给它的 bit_width 轴加 `w8a16`（+2 格）。理由是硬规则 2：
     # p1-04 之后 w8a8/w4a16 都不过门，不加 w8a16 本实验就没有可发表的格子。
     # p4b-01 从 12 格变 16 格：给它加同一个 `w8a16`（+4 格），理由同上 —— E7 的量化臂。
-    assert len(real) == 54
+    # 再 54 变 55：p1-04（门实验）的 ctx 轴从 [1024] 扩到 [1024, 4096]（+1 格）。
+    #   理由与 p0-04 那次 ctx 扩轴完全相同：ctx 是**声明的轴**，不同 ctx = 不同 prompt
+    #   = 不同轨迹 = KL 是新测量；p4b-01/p2-01 的量化格要在两个 ctx 上跑。
+    #   实测结论写在 EXP-p1-04 记录的「ctx=4096 复测」节。
+    assert len(real) == 55
 
 
 def test_exp_ids_are_unique(matrix):

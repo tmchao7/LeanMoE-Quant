@@ -249,20 +249,55 @@ def build_exp_id(exp_id: str, values: dict[str, Any]) -> str:
 
 
 # ★ 正确性门的**引用表**（硬规则 2：没过门的配置不许报性能数字）。
-#   数值全部来自 EXP-p1-04 的 5 窗口真实 prompt 集实测（ctx=1024、32 步 teacher forcing）：
-#       results/EXP-p1-04-prompt-set-gate/probe_prompt_set.json -> arms[...].aggregate
+#   数值全部来自 EXP-p1-04 的 5 窗口真实 prompt 集实测（32 步 teacher forcing）：
+#       ctx=1024: results/EXP-p1-04-prompt-set-gate/probe_prompt_set.json
+#       ctx=4096: results/EXP-p1-04-prompt-set-gate/probe_prompt_set_ctx4096.json
+#   两张工件都由 `tools/quant_probe.py --prompt-windows 5 --include-ones-control` 产出，
+#   后者是 EXP-p4b-01 记录 §3 的 **P2**（ctx 不同 → prompt 不同 → KL 是**新测量**）。
 #   key = (bit_width, group_size, ctx)；targets 恒为 ("attention", "experts")（与 p1-04 逐字一致）。
-#   换任何一项（g=64、ctx=4096、加 router…）就**没有**门实测 → runner 直接拒绝。
+#   换任何一项（g=64、ctx=2048、加 router…）就**没有**门实测 → runner 直接拒绝。
+#
+# ★ 门是**两个判据的合取**（docs/METRICS.md §1：「KL 或 top-1 不达标 → 不报性能数字」），
+#   聚合口径 = p1-04 记录自己写明的「mean_pass（METRICS 的口径）」：
+#       gate = PASS  ⟺  KL 均值 < 门限  且  top-1 **均值** ≥ 0.95
+#   `gate` 由 `gate_from_metrics()` 从实测值**推导**，不在表里手写 —— 手写会漂移。
+#   这条规则**不改动任何已有判定**（w8a16@1024 两个判据都过；w8a8/w4a16@1024 的 KL 本就超门），
+#   但它挡住了一个真实的放松：`w8a8@ctx=4096` 的 KL 均值 0.0046 过了 W8 门，
+#   而 top-1 均值 0.9455 < 0.95 —— 只看 KL 就会让它发表延迟，那是放宽门。
+#   （top-1 的**逐窗口最小值**只作为额外信息保留在工件里：p1-04 的 w8a16 也有一个窗口
+#    0.9394 < 0.95，若按下限判门，过门的配置一个都不剩 —— 与 p1-04 已记录的 PASS 矛盾。）
 GATE_CITATIONS: dict[tuple[str, int, int], dict[str, Any]] = {
-    ("w8a16", 128, 1024): {"kl": 0.001273, "gate": "PASS"},
-    ("w8a8", 128, 1024): {"kl": 0.032753, "gate": "FAIL"},
-    ("w4a16", 128, 1024): {"kl": 0.093323, "gate": "FAIL"},
+    # ctx=1024 —— EXP-p1-04 的五窗口实测
+    ("w8a16", 128, 1024): {"kl": 0.001273, "top1": 0.981818},
+    ("w8a8", 128, 1024): {"kl": 0.032753, "top1": 0.975758},
+    ("w4a16", 128, 1024): {"kl": 0.093323, "top1": 0.860606},
+    # ctx=4096 —— P2 补测（EXP-p4b-01-truncation 记录 §3）
+    ("w8a16", 128, 4096): {"kl": 0.000714, "top1": 0.981818},
+    ("w8a8", 128, 4096): {"kl": 0.004606, "top1": 0.945455},
+    ("w4a16", 128, 4096): {"kl": 0.053876, "top1": 0.854545},
 }
+
+# docs/METRICS.md §1 的门槛（**门不动**；本表只引用实测，不改门槛）
+KL_MAX_W8 = 0.01
+KL_MAX_W4 = 0.05
+TOP1_MIN = 0.95
+
+
+def gate_from_metrics(bit_width: str, kl_mean: float, top1_mean: float) -> str:
+    """由**实测聚合值**推导门判定。唯一真值来源，禁止在表里手写 PASS/FAIL。"""
+    kl_max = KL_MAX_W4 if str(bit_width).startswith("w4") else KL_MAX_W8
+    return "PASS" if (kl_mean < kl_max and top1_mean >= TOP1_MIN) else "FAIL"
 
 
 def gate_for_cell(bit_width: str, group_size: int, ctx: int) -> dict[str, Any] | None:
-    """该量化配置有没有**实测过**的正确性门。None = 没测过，不许跑。"""
-    return GATE_CITATIONS.get((bit_width, int(group_size), int(ctx)))
+    """该量化配置有没有**实测过**的正确性门。None = 没测过，不许跑。
+
+    `gate` 是推导出来的：表里只存实测的 `kl` / `top1`，判定不可能与数值漂移。
+    """
+    cite = GATE_CITATIONS.get((bit_width, int(group_size), int(ctx)))
+    if cite is None:
+        return None
+    return dict(cite, gate=gate_from_metrics(bit_width, cite["kl"], cite["top1"]))
 
 
 def quant_spec_for_cfg(cfg: dict[str, Any]) -> Any:
@@ -321,9 +356,9 @@ def correctness_for_cell(cfg: dict[str, Any], *, consistency_passed: bool) -> di
                     "fp16 基线：KL / top-1 对参考实现无意义（本配置即参考），故为 null。"
                     "可证伪的门槛是自洽性 —— 见 consistency。"
                 ),
-                "kl_max_w8": 0.01,
-                "kl_max_w4": 0.05,
-                "top1_min": 0.95,
+                "kl_max_w8": KL_MAX_W8,
+                "kl_max_w4": KL_MAX_W4,
+                "top1_min": TOP1_MIN,
             },
         )
     cite = gate_for_cell(bit_width, int(cfg.get("group_size") or 0), int(cfg.get("ctx") or 0))
@@ -334,20 +369,29 @@ def correctness_for_cell(cfg: dict[str, Any], *, consistency_passed: bool) -> di
             thresholds={"note": "该量化配置没有 EXP-p1-04 的门实测 —— 不得报性能数字。"},
         )
     cited_pass = cite["gate"] == "PASS"
+    ctx = int(cfg.get("ctx") or 0)
+    artifact = (
+        "EXP-p1-04-prompt-set-gate/probe_prompt_set_ctx4096.json"
+        if ctx == 4096
+        else "EXP-p1-04-prompt-set-gate/probe_prompt_set.json"
+    )
     return dict(
         base,
         kl=cite["kl"],
+        top1_agreement=cite["top1"],
         gate="PASS" if (cited_pass and consistency_passed) else "FAIL",
         thresholds={
-            "kl_max_w8": 0.01,
-            "kl_max_w4": 0.05,
-            "top1_min": 0.95,
+            "kl_max_w8": KL_MAX_W8,
+            "kl_max_w4": KL_MAX_W4,
+            "top1_min": TOP1_MIN,
             "note": (
-                "★ kl 是**引用** EXP-p1-04（5 窗口真实 prompt 集、ctx=1024、同 scheme/"
-                "同 group_size/targets=attention+experts）的实测 mean，不是本格实测；"
-                "引用值 = %.6f（%s）。本格只测性能。" % (cite["kl"], cite["gate"])
+                "★ kl / top-1 都是**引用** EXP-p1-04（5 窗口真实 prompt 集、ctx=%d、同 scheme/"
+                "同 group_size/targets=attention+experts）的实测**均值**，不是本格实测；"
+                "引用值 kl=%.6f、top-1=%.6f。门是合取（METRICS §1）：KL < %.2f 且 top-1 ≥ %.2f"
+                " → %s。本格只测性能。"
+                % (ctx, cite["kl"], cite["top1"], KL_MAX_W8, TOP1_MIN, cite["gate"])
             ),
-            "source": "EXP-p1-04-prompt-set-gate/probe_prompt_set.json",
+            "source": artifact,
         },
     )
 
@@ -1763,7 +1807,8 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "  gate: %s"
                 % (
-                    "%s (引用 EXP-p1-04, kl=%.6f)" % (citation["gate"], citation["kl"])
+                    "%s (引用 EXP-p1-04, kl=%.6f, top-1=%.6f)"
+                    % (citation["gate"], citation["kl"], citation["top1"])
                     if citation
                     else "无门实测 → 真跑会被拒绝"
                 )

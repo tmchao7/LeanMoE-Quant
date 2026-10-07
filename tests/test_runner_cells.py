@@ -26,12 +26,15 @@ pytestmark = requires_torch
 
 from benchmarks.runner import (  # noqa: E402
     GATE_CITATIONS,
+    KL_MAX_W8,
+    TOP1_MIN,
     _matrix_axes,
     _moe_for_exp,
     _weight_bytes_actual,
     build_exp_id,
     correctness_for_cell,
     gate_for_cell,
+    gate_from_metrics,
     quant_spec_for_cfg,
     quantize_for_cfg,
 )
@@ -225,34 +228,79 @@ def test_quantized_cudagraph_is_refused(capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_gate_citations_match_the_p104_artifact():
-    """`GATE_CITATIONS` 的数字必须**逐字**来自 EXP-p1-04 的工件。
+def _artifact_for_ctx(ctx: int) -> Path:
+    """CTX -> 那张工件。P2（EXP-p4b-01 §3）把门补测到了 ctx=4096，两张工件同格式。"""
+    name = "probe_prompt_set.json" if int(ctx) == 1024 else "probe_prompt_set_ctx4096.json"
+    return RESULTS / "EXP-p1-04-prompt-set-gate" / name
+
+
+def _top1_mean(arm: dict) -> float:
+    """工件的 aggregate 只存 top1_min；门的口径是**均值**（p1-04 记录：mean_pass）。"""
+    vals = [
+        v["top1_agreement"]
+        for k, v in arm["windows"].items()
+        if k.startswith("w") and v.get("top1_agreement") is not None
+    ]
+    return sum(vals) / len(vals)
+
+
+def test_gate_citations_match_the_artifacts():
+    """`GATE_CITATIONS` 的 kl / top-1 必须**逐字**来自 EXP-p1-04 的落盘工件。
 
     代码里写死的门值若与实测漂移，规则 2 就会在错误的配置上开绿灯 —— 这条测试
     把代码钉在 artifacts 上。工件不在（fresh clone）时跳过：results/ 不进 git。
     """
-    path = RESULTS / "EXP-p1-04-prompt-set-gate" / "probe_prompt_set.json"
-    if not path.exists():
-        pytest.skip("EXP-p1-04 的工件不在本机（results/ 是 gitignored）")
-    artifact = json.loads(path.read_text(encoding="utf-8"))
+    missing = [
+        c for c in {ctx for (_, _, ctx) in GATE_CITATIONS} if not _artifact_for_ctx(c).exists()
+    ]
+    if missing:
+        pytest.skip("EXP-p1-04 的工件不在本机（results/ 是 gitignored）：缺 ctx=%s" % missing)
     for (bit_width, group_size, ctx), cited in GATE_CITATIONS.items():
+        artifact = json.loads(_artifact_for_ctx(ctx).read_text(encoding="utf-8"))
         arm = artifact["arms"]["%s_attn_experts_g%d" % (bit_width, group_size)]
-        mean = arm["aggregate"]["kl_mean"]
-        assert abs(mean - cited["kl"]) < 5e-7, "%s 引用值 %r != 实测 %r" % (
+        kl_mean = arm["aggregate"]["kl_mean"]
+        assert abs(kl_mean - cited["kl"]) < 5e-7, "%s@%d 引用 kl %r != 实测 %r" % (
             bit_width,
+            ctx,
             cited["kl"],
-            mean,
+            kl_mean,
         )
-        expected_gate = "PASS" if mean < 0.01 else "FAIL"  # W8 门（p1-04 全是 W8/W4 分档）
-        if bit_width == "w4a16":
-            expected_gate = "PASS" if mean < 0.05 else "FAIL"
-        assert cited["gate"] == expected_gate, bit_width
+        top1_mean = _top1_mean(arm)
+        assert abs(top1_mean - cited["top1"]) < 5e-7, "%s@%d 引用 top-1 %r != 实测 %r" % (
+            bit_width,
+            ctx,
+            cited["top1"],
+            top1_mean,
+        )
+        # ★ gate 必须能由**实测值 + METRICS 门槛**推出来（合取），不许手写
+        expected = gate_from_metrics(bit_width, kl_mean, top1_mean)
+        assert (
+            gate_for_cell(bit_width, group_size, ctx)["gate"] == expected
+        ), "%s@%d 的 gate 与实测/门槛不符" % (bit_width, ctx)
+
+
+def test_the_top1_criterion_actually_bites_at_ctx4096():
+    """★ P2 的关键发现：`w8a8@4096` 的 KL 过门、**top-1 不过门**。
+
+    这条测试钉住"门是合取"而不是装饰：若有人把规则退回"只看 KL"，
+    `w8a8@4096` 就会变成 PASS 并发表延迟 —— 那是放宽正确性门（硬规则 2）。
+    """
+    if not _artifact_for_ctx(4096).exists():
+        pytest.skip("ctx=4096 的工件不在本机")
+    cite = gate_for_cell("w8a8", 128, 4096)
+    assert cite is not None
+    assert cite["kl"] < KL_MAX_W8, "这条测试的前提是 KL 确实过门"
+    assert cite["top1"] < TOP1_MIN, "这条测试的前提是 top-1 确实不过门"
+    assert cite["gate"] == "FAIL"
+    # 对照：只看 KL 会误判为 PASS —— 显式记录这个陷阱
+    assert gate_from_metrics("w8a8", cite["kl"], 1.0) == "PASS"
 
 
 def test_gate_for_cell_returns_none_for_unmeasured_configs():
     assert gate_for_cell("w8a16", 128, 1024) is not None
+    assert gate_for_cell("w8a16", 128, 4096) is not None  # P2 已补测
     assert gate_for_cell("w8a16", 64, 1024) is None  # g64 没测过
-    assert gate_for_cell("w8a16", 128, 4096) is None  # ctx=4096 没测过
+    assert gate_for_cell("w8a16", 128, 2048) is None  # ctx=2048 没测过
     assert gate_for_cell("w4a8", 128, 1024) is None  # 没有这种 scheme
 
 

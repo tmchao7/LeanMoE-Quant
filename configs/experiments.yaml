@@ -218,13 +218,17 @@ experiments:
   # p1-04 是 p1-01 的**仪器修复**：METRICS.md 说的是"固定 prompt 集上的 KL 平均"，
   # 而 p1-01/p1-02/p1-03 都在用 1024 个 token id=1（退化输入）。本条把门建在
   # 5 个真实窗口的 prompt 集上，并排保留退化对照，重测 p1-01 的 9 格（含 w8a8）。
+  # ★ ctx 轴从 [1024] 扩到 [1024, 4096]：ctx 不同 → prompt 不同 → 轨迹不同 → KL 是
+  #   **新测量**，而 p4b-01/p2-01 的量化格要在两个 ctx 上跑（EXP-p4b-01 记录 §3 的 P2）。
+  #   这不是隐藏的变量变更 —— ctx 是**声明的轴**，与 p0-04 从 [1024] 扩到 [1024, 4096]
+  #   同一个做法。结果：w8a16 两个 ctx 都过门；w8a8@4096 的 KL 过门但 top-1 不过。
   - id: EXP-p1-04-prompt-set-gate
     stage: "p1"
     kind: "correctness"
-    desc: "把 KL 门从退化单 prompt 换成 5 窗口真实 prompt 集，重测 p1-01 的 9 格"
+    desc: "把 KL 门从退化单 prompt 换成 5 窗口真实 prompt 集，重测 p1-01 的 9 格（ctx=1024/4096）"
     hypothesis: "真实 prompt 集上门会翻案：W8A16/W8A8 进门槛，W4A16 仍受 experts 拖累"
     refutation_signal: "真实 prompt 集上 W8 仍然超门（那 p1-01 的结论就不是 prompt 造成的）；或窗口间散布大于方案间差异（那门依然没有分辨力）"
-    ctx: [1024]
+    ctx: [1024, 4096]
     metrics: ["kl", "top1_agreement", "weight_bytes"]
 
   - id: EXP-p2-01-dequant-fusion
