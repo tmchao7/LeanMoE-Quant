@@ -2,22 +2,46 @@
 
 Compact guide for agent sessions working in LeanMoE-Quant. Read this before editing.
 
-## What this repo is
+## 0. Sixty-second state (2026-10-07)
 
-Research project on **byte-budget-driven quantization and kernel optimization for MoE decode
-at batch=1**. Status: **Phase 0 (environment + baseline)** — no optimization is implemented, no
-benchmark has been run. See `PLAN.md`.
+Phases 0, 1 (accuracy gate), 2 (kernels) and 4b (E7) are **executed**. Two headline results are
+settled — do not re-derive them and do not re-run their cells:
+
+- **E2 (`EXP-p2-01`) — `refuted`.** Fusing the dequant into the GEMV is *not* the 1.3–2× the
+  matrix predicted: in the pre-registered eager cells the fused arm is **5% slower** than the
+  separate arm (ratio 1.0507, |Δ| ≫ MAD), because that path is host/launch-bound (`host_share`
+  71.7%, ~19k kernels/step). Isolated, the fused kernel is 1.21× cheaper per call — the kernel
+  win is real, the per-call Python/launch cost eats it.
+- **E7 (`EXP-p4b-01`) — judged.** The truncation is real and **only the fused arm cashes it in**:
+  the same `w8a16` config goes `speedup_eager` **0.76 → speedup_cudagraph 1.11** (ctx=1024;
+  0.79 → 1.05 at ctx=4096) while `host_share` drops 77.5% → 1.2%. The ceiling is measured, not
+  guessed: the weight stream is only 42% (ctx=1024) / 23% (ctx=4096) of a graph step, so even a
+  perfect weight path could not exceed ~1.74× / ~1.30×.
+
+Read, in this order: **`configs/experiments.yaml`** (the only source of hypotheses and cells),
+the **record** of the experiment you are about to touch (`experiments/<EXP-ID>.md`), then
+**`docs/HANDOFF_P2_FUSION.md`** (the current handoff).
+
+Two rules come before everything else: **do not redo what §3 lists as done**, and **ask the user**
+before changing a matrix axis, a cell id, or overwriting a recorded `result.json` (§6).
+
+## 1. What this repo is
+
+Research project on **byte-budget-driven quantization and kernel optimization for MoE decode at
+batch=1**. Delivered so far: the fp16 and quantized decode paths, the CUDA-Graph execution axis,
+and three Triton kernel families (grouped MoE, dense fused dequant, split-KV attention) — the
+inventory with its authority is in §3. The thesis, the frozen hypotheses and the phase plan live
+in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`.**
 
 - **Primary hardware: rented RTX 5090 32 GB (sm_120)**, single card. Single-card project only —
   never design something that needs more than 1 GPU.
 - **Secondary (free): school V100 32 GB (sm_70)**, an optional second bandwidth data point. It
   lacks `cp.async`, FP8, FP4 and bf16 tensor cores, so it cannot host the modern kernel arms.
-- **The Mac may run CPU `torch` for functional/unit tests** (`torch==2.14.0` CPU arm64 wheel),
-  but **no number produced on the Mac may ever enter `results/` or any conclusion** — the Mac has
-  no NVIDIA GPU, so nothing it measures is reportable here.
+- **The Mac may run CPU `torch` for functional/unit tests**, but **no number produced on the Mac
+  may ever enter `results/` or any conclusion** — the Mac has no NVIDIA GPU.
 - Package name: `lemoq`; source under `src/lemoq/`.
 
-## Project hard rules (an agent will get these wrong if it guesses)
+## 2. Project hard rules (an agent will get these wrong if it guesses)
 
 1. **No invented results.** Unmeasured values are written `planned` / `target` /
    `to be evaluated` — never as achieved speedups. Negative and null results are reported too.
@@ -38,85 +62,173 @@ benchmark has been run. See `PLAN.md`.
 7. Every measurement is recorded in the `EXPERIMENTS.md` shape (copy
    `experiments/TEMPLATE.md`) under `results/<EXP-ID>/`. A result not written in that format
    does not exist for the purposes of this project.
+8. **A cell that fails the correctness gate is evidence, never a performance result.** Its
+   `latency` section is `null`; the measured values live in `_measurement.gate_failed_evidence`.
+   `benchmarks/schema.py` enforces this (and `tests/test_schema.py` guards the guard) — do not
+   weaken it, and do not hand-edit a payload to get numbers past it.
+9. **Never add, rename or re-axis the experiment matrix on your own.** Cell ids are built from the
+   declared axes; changing one invalidates recorded artifacts and the harness skeletons. If a new
+   axis is genuinely needed (`attn`, `moe`, `batch` are the known candidates), **ask first**.
+   The same applies to overwriting a `result.json` that already exists: archive the old one under
+   `results/<EXP-ID>-run/v1_archive/`, re-run with `--force`, and say `v1`/`v2` in the record.
 
-## Environment
+## 3. Where the project stands (authority: the records + artifacts)
 
-Phase 0 creates it. Rules are **per machine** — do not apply one box's constraints to another
-(details in `ENVIRONMENT.md`, `docs/SPECS.md`, `docs/SERVER_RUNBOOK.md`):
+| Area | State | Authority |
+| --- | --- | --- |
+| Gate-0 probe, fp16 baseline, static MoE + cudagraph | done | `experiments/EXP-p0-02-baseline-fp16.md`, `experiments/EXP-p0-04-cudagraph-static-moe.md` |
+| cudagraph feasibility with the HF MoE path | `blocked` **by design** (hf + dynamic cache cannot capture) | `experiments/EXP-p0-03-baseline-cudagraph.md` |
+| Accuracy gate — the only source of `GATE_CITATIONS` | done | `experiments/EXP-p1-04-prompt-set-gate.md` |
+| Precision side: error attribution, mixed bits, W8/W4 sweep | done (the old `EXP-p1-01` protocol was superseded by `p1-04`) | `experiments/EXP-p1-02-quant-error-attribution.md`, `experiments/EXP-p1-03-quant-mixed-bits.md`, `experiments/EXP-p1-01-w8-w4-accuracy.md` |
+| Attention path: eager, kernel, in-graph | done | `experiments/EXP-p2-03-decode-attention.md`, `experiments/EXP-p2-04-eager-attention.md`, `experiments/EXP-p2-05-attn-kernel.md` |
+| Grouped MoE GEMV (fp16) | done | `experiments/EXP-p2-02-moe-grouped-gemm.md` |
+| E2 dequant fusion, 6 cells, 8-bit **and** 4-bit | done — **`refuted`** | `experiments/EXP-p2-01-dequant-fusion.md` |
+| P3 wiring + E7, 16/16 cells | done — **judged** | `experiments/EXP-p4b-01-truncation.md` |
+| E4 routing overhead (`EXP-p4-01`) | **not run** — the only unrun item of the plan's `minimal_credible` scope | `configs/experiments.yaml`, `PLAN.md` §5/§7 |
+| E5 expert sensitivity, E6 KV INT8, E8 cross-bandwidth, FP8/MXFP4, dense curves, batch sweep | **not run** | `configs/experiments.yaml`, `PLAN.md` §7 |
+| ncu evidence (a Phase 2 deliverable) | **not done** | `PLAN.md` §5 |
 
-**Rented GPU box (primary — this one is ours):**
-- Python 3.12 via `uv`; `torch==2.14.0` with the CUDA index chosen from the **actual driver**
-  (`nvidia-smi`), never from the image's marketing name. `configs/constraints.txt` freezes the
-  set after the first verified run.
-- Installing toolkits is allowed here. Prefer a **system image** (`Ubuntu-nvidia`) over a
-  pre-baked PyTorch/vLLM image so we do not inherit someone else's pins.
-- Pay-as-you-go billing only — never spot/preemptible (a long experiment dies with it).
+**Do not redo** (executed and recorded): P0 / P1 gate / P2 / P3 wiring; the dense fused dequant
+kernel; the grouped quant expert kernel (8-bit **and** 4-bit); the split-KV attention kernel; the
+E2 verdict; the E7 verdict; p4b's 16 cells and p2-01's 6 cells. If a rerun is genuinely needed,
+justify it in the record and archive the old artifacts (§2 rule 9).
 
-**School V100 box (shared — hands off the machine layer):**
-- `fp16` only; no bf16 tensor cores.
-- **Never** install or upgrade the CUDA toolkit / driver / system Python — shared with other
-  students. Release memory when done.
+**Known artifact-id wrinkle**: the older precision experiments stored their artifacts under the
+*base* id (e.g. `results/EXP-p1-04-prompt-set-gate/probe_prompt_set*.json`), while the matrix
+expands them to `...__ctx=1024` skeletons that still read `planned`. A `planned` skeleton is
+**not** evidence that the science was not done — read the record first.
 
-**Mac (docs + CPU logic tests):** may run CPU `torch`; see the hard limit in "What this repo is".
+## 4. Queue (ordered; hypotheses stay in `configs/experiments.yaml`)
 
-## Daily commands
+| # | Task | Why now | Acceptance | Needs user? |
+| --- | --- | --- | --- | --- |
+| P0 | ✅ **done 2026-10-07** (see §5): README status, `PLAN.md` pointer, p4b `Status`, p1-02/03/04 artifact notes, `constraints.txt` freeze | those files contradicted the records | four gates green, both machines on one commit | no |
+| P1 | `EXP-p4-01` — **E4 routing overhead** (`routing_share`, `per_token_p50`) | the plan's `minimal_credible` scope has exactly one unrun item, and E4 is one of its two "differentiation cores" | `result.json` + record giving the routing/pack share for fp16 and quantized, eager and cudagraph; if the share is **<5%**, write the matrix's `refutation_signal` ("ceiling hypothesis does not hold") | no |
+| P2 | Make the headline **bigger**: attention kernel in the graph, elementwise/copy fusion | E7's attribution says the unremovable 55% is `fmha` 33–65% + elementwise 12–23% — the only action that can move 1.11× | the two-graph interleaved A/B (`tools/bench_attn_in_graph.py`) per cell + a record | **YES — no such experiment exists and there is no `attn` axis**: pick (a) a new `EXP-` id or (b) an `attn` axis on p4b (changes recorded cell ids). Do not start before that call |
+| P3 | Breadth: E5 (`EXP-p4-02`), E6 (`EXP-p5-01`), E8 (`EXP-p8-01`, needs the V100), E1's group axis under the corrected prompt set, dense curves, batch sweep (E3 — today it has **no** experiment), FP8/MXFP4 (`EXP-p3-01/02`), repairing the W4A16 gate | each closes a declared hypothesis or lever; several need a matrix entry that does not exist | per matrix entry; E8 only after the same protocol passes on the V100 | partial: new matrix entries need approval |
+| P4 | Publication: ncu evidence, E7 charts, final README/PLAN pass | closes Phase 2's last deliverable and Phase 7 | ncu metrics per `lemoq.kernels.NCU_METRICS`; charts regenerated from `result.json` | no |
+
+## 5. Wrap-up (docs/config only — **done 2026-10-07**, nothing outstanding)
+
+README status block rewritten · `PLAN.md` got a pointer (its hypotheses stay frozen) · p4b
+`Status` → `done` · p1-02/03/04 note that their artifacts live under the base id (the `__ctx=`
+skeletons are placeholders) · `configs/constraints.txt` frozen from a read-only server
+`uv pip freeze` (`frozen: 2026-10-07`, torch corrected to the measured `2.8.0`) · this file ≤ ~230
+lines (rationale belongs in the records). Any *new* wrap-up item goes in §4, not here.
+
+## 6. Guardrails
+
+### Ask the user first
+
+- adding / renaming a matrix axis or a cell id, or changing an existing cell's meaning;
+- overwriting an existing `result.json`, or re-running a cell that is already `done`;
+- installing or upgrading anything on the server (the documented `export PATH=…` is not an install);
+- committing `results/`, model weights, `__pycache__` or credentials.
+
+### Before you claim anything
+
+| Claim | Prerequisite |
+| --- | --- |
+| a performance number | cited gate PASS (`GATE_CITATIONS`, never relaxed) + canary + clean occupancy + `result.json` + record + commit |
+| "this kernel is correct" | K1 parity (`PARITY_GATE` 1e-3, not relaxed) + `pytest -m gpu` actually run |
+| "this cell ran" | `result.json` with `status=done` + a results section in the record — a `planned` skeleton is not a run |
+| "quantization pays / fusion helps" | one-round adjacent or interleaved A/B with MAD and per-pair wins; a single arm run in isolation is not accepted |
+| "I changed X safely" | the tests that pin X (see §9) + a statement of whether recorded cell ids move |
+
+### Shared card protocol (this box is shared)
+
+- check `nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader` before timing;
+- a foreign process is **recorded, never killed** — wait for it to exit and re-run the round;
+- **canary**: run the same cell first and last in a round; >5% drift ⇒ the whole round is `VOID`
+  (keep the occupancy log, publish nothing);
+- **cudagraph cells need their own canary**: an `eager` canary is *not* sensitive to a co-tenant
+  (measured: it drifted 1.16% while three graph cells in the same round were ruined — one OOM, one
+  3× outlier). Add a same-cell graph canary plus a payload self-check: a graph cell with
+  `host_share_pct > 5` is contaminated.
+
+### Commit and verification gate
+
+Run all four before every commit, on the machine you are editing:
 
 ```bash
-uv venv -p 3.12 .venv                 # interpreter is pinned by .python-version
-uv pip install -e ".[dev]"            # editable install of `lemoq`
-uv run pytest -m "not gpu"            # correctness gates first (also runs on the Mac)
-uv run ruff check . && uv run black . # lint / format (line-length 100)
-uv run python -m tools.probe_machine --json results/machine_probe.json   # device facts to disk
+ruff check . && black --check . && pytest -m "not gpu" -q && python -m tools.check_docs
 ```
 
-**Never call bare `python3`.** On the Mac it resolves to Xcode's 3.9.6, which violates
-`requires-python>=3.10`. Always go through `uv run` / `.venv/bin/python`.
+The bar is **0 failed** — not a count (counts drift as tests are added). A handful of skips is
+normal (GPU, missing machine-local artifacts, optional deps). Then: push, `git pull --no-rebase`
+on the other machine, re-run the suite there, and rsync `results/` back to the Mac.
 
-## Models
+### Never relax or bypass
 
-Single source of truth: `configs/models.yaml`. Roles:
+- the thresholds in `docs/METRICS.md` §1, `PARITY_GATE` (1e-3), `benchmarks/schema.py`, or the
+  existing `GATE_CITATIONS` rows — new rows only from a **new measurement with its own artifact**;
+- the runner's five load-time refusals (all before any model load; pinned by
+  `tests/test_runner_cells.py`): fused on a non-quantized cell; fused without triton/CUDA; a
+  quantized cell with no gate citation; quantized × `--moe gather`; grouped quant with an odd
+  `--group-size`. If a cell "cannot run", fix the cause — do not delete the refusal.
 
-- **dev**: `Qwen/Qwen2.5-0.5B` / `1.5B` (dense) — kernel and quantization debugging;
-- **primary (MoE)**: `allenai/OLMoE-1B-7B-0924` — the MoE main line. The `-0924` suffix is
-  **required**; `allenai/OLMoE-1B-7B` does not exist (verified 2026-09). Use the *base* checkpoint,
-  not `-Instruct`: the primary gates are KL/PPL on a base reference.
-- **dense comparison**: `Qwen/Qwen3-4B` / `8B`;
-- **stretch (48 GB box)**: `Qwen/Qwen3-30B-A3B` — cannot fit on 24 GB, and not on 32 GB by default.
+## 7. Machines and exact commands
 
-Any run using a different checkpoint must say so explicitly and justify it.
+**Mac (docs + CPU logic tests).** The working interpreter is the repo-local `.venv-mac`
+(Python 3.12, torch 2.14.0 CPU); a `.venv` may also exist — do not rebuild either one.
 
-## Remotes and sync
+```bash
+.venv-mac/bin/python -m pytest -m "not gpu" -q     # ~all green
+.venv-mac/bin/ruff check . && .venv-mac/bin/black --check .
+```
 
-`origin` is GitHub (`tmchao7/LeanMoE-Quant`). This is **not** a fork of any upstream — there is
-no upstream remote and no upstream sync story. If a remote is not yet configured, do not invent
-one; the repo works locally until the user adds it.
+Never call bare `python3` (Xcode 3.9.6, violates `requires-python>=3.10`). Nothing measured here
+is reportable.
 
-Work happens from **three writers** — the rented GPU box (which may itself run an autonomous
-agent), the school V100 box, and the Mac — so histories diverge:
+**Rented RTX 5090 (primary; ours).** `ssh -p 43086 root@connect.weste.seetacloud.com`
+(alias `5090b`). Verified set: Python 3.12.3, `torch 2.8.0+cu128`, `triton 3.4.0`,
+`transformers 4.57.6`, driver 595.71.05, sm_120 with 170 SMs, **measured** read bandwidth
+1561.9 GB/s.
+
+```bash
+export PATH=/root/miniconda3/bin:$PATH          # python AND uv live here (uv 0.12.17)
+/root/miniconda3/bin/python -m pytest -m "not gpu" -q
+# always pass the local snapshot, or the runner tries huggingface.co and times out:
+/root/miniconda3/bin/python -m benchmarks.runner --exp <EXP-ID> \
+    --model /root/autodl-tmp/ms/models/allenai--OLMoE-1B-7B-0924/snapshots/master --force
+# prompt cache: /root/autodl-tmp/lemoq-data/wikitext2_test_8k.pt
+# HF_HOME=/root/autodl-tmp/hf   HF_ENDPOINT=https://hf-mirror.com
+```
+
+Installing packages is allowed here but never mid-experiment; record versions in the result.
+
+**School V100 (shared — hands off the machine layer).** `fp16` only; no bf16 tensor cores; the
+modern kernel arms cannot run there. **Never** install or upgrade the toolkit / driver / system
+Python — it is shared with other students. Release memory when done.
+
+## 8. Remotes, commits, verification
+
+`origin` is GitHub (`tmchao7/LeanMoE-Quant`) — not a fork, no upstream. Three writers (the GPU box,
+the V100 box, the Mac) diverge, so:
 
 - **merge, never rebase, never force-push**;
-- an agent running on the GPU box works on a **feature branch** and pushes it; the Mac only
+- an agent on the GPU box may work on a feature branch and push it; the Mac only
   `git pull --no-rebase`s;
-- every agent iteration must leave: `results/<EXP-ID>/result.json`, a matching
-  `experiments/<EXP-ID>.md` filled from `experiments/TEMPLATE.md`, and a commit;
-- **an agent may not relax a correctness gate.** If KL/top-1 fails, the record says `FAIL`.
+- every agent iteration leaves: `results/<EXP-ID>/result.json`, a matching
+  `experiments/<EXP-ID>.md`, and a commit;
+- `results/` is gitignored and machine-local: the durable record is the markdown, and `results/`
+  must be rsynced back to the Mac before the round is called finished;
+- commit prefixes: `chore:`, `docs:`, `env:`, `baseline:`, `quant:`, `kernel:`, `bench:`,
+  `analysis:`; reference the experiment id; one logical change per commit, docs and behaviour in
+  separate commits.
 
-## Commit conventions
-
-Small, scoped, phase-prefixed commits: `chore:`, `docs:`, `env:`, `baseline:`, `quant:`,
-`kernel:`, `bench:`, `analysis:`. Reference the experiment id (`EXP-p1-01`) in the body when a
-commit implements a measured change. One logical change per commit; do not mix docs and
-behaviour. Never commit `results/`, model weights, `__pycache__`, or credentials.
-
-## Reference docs
+## 9. Reference docs
 
 | File | For |
 | --- | --- |
-| `PLAN.md` | the authoritative plan: thesis, hardware, phases, experiment matrix, risks |
-| `ENVIRONMENT.md` | machine access, environment bootstrap, model acquisition, first-run checklist |
-| `docs/SERVER_RUNBOOK.md` | the exact command sequence to run the moment a GPU box exists |
-| `EXPERIMENTS.md` | mandatory experiment record format and metric definitions |
-| `docs/SPECS.md` | confirmed hardware specs, the cross-generation feature matrix, GPU selection |
-| `docs/MODELS.md` | model candidates, verified OLMoE architecture, per-token byte budget |
-| `docs/METRICS.md` | metric definitions: KL, PPL, `[W]`/`[T]` byte budgets, attainment, VRAM split |
-| `configs/experiments.yaml` | the declarative experiment matrix the harness expands |
+| `PLAN.md` | the frozen plan: thesis, hypotheses, phases, budget, risks (not a status page) |
+| `configs/experiments.yaml` | the declarative matrix: the only source of hypotheses and cell ids |
+| `experiments/<EXP-ID>.md` | the authoritative record of each experiment (status, results, applicability) |
+| `docs/HANDOFF_P2_FUSION.md` | the current handoff (finished + next); `docs/HANDOFF*.md` are historical |
+| `EXPERIMENTS.md` | mandatory record format and metric definitions |
+| `docs/METRICS.md` | metric definitions and the correctness thresholds |
+| `docs/MODELS.md` | model candidates and the verified OLMoE architecture (incl. the ctx≤4096 limit) |
+| `docs/SPECS.md`, `docs/SERVER_RUNBOOK.md`, `ENVIRONMENT.md` | hardware facts, runbook, machine access |
+| `benchmarks/runner.py` | the harness that produces cells; its refusals and payloads are the contract |
+| `benchmarks/schema.py` | the machine-checked shape of `result.json` (hard rule 8 lives here) |
+| `tools/check_docs.py` | dead-link and table-column checker (also run by `tests/test_links.py`) |
