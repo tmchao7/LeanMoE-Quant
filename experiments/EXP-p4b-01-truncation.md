@@ -1,24 +1,34 @@
 # EXP-p4b-01-truncation
 
-> **状态：`running` —— P1/P2 已落地，量化臂与 fp16 臂都跑通了；** 但 **E7 仍不可判定**
-> （判据要 `speedup_cudagraph`，而量化 × cudagraph 还没接线 = P3）。
+> **状态：`running` —— P1/P2/P3 与 `EXP-p2-01` 的 dense fused 臂都已落地，E7 已判定（§2.8）。**
+> ★ **E7 判定（2026-10-07，§2.8.5）**：截断效应**成立，但只在 fused 臂上兑现** ——
+> 同一个 w8a16 实现只换 execution 轴：`speedup_eager` 0.76 → `speedup_cudagraph` **1.11**
+> （ctx=1024；ctx=4096 是 0.79 → 1.05），`host_share` 77.5% → 1.2%。量级是 **1.05–1.11×**，
+> **不是**矩阵猜的 2×（2× 那一行是 W4A16，引用门 FAIL 且 4-bit grouped 未实现，跑不了）。
+> ★ 预注册的 `separate` 臂对照（v1 的语义）**没有**这个效应（0.767 → 0.767 @1024）：
+> 它的成本是 GPU 侧的反量化物化，而 cudagraph 只拿得掉 host/launch ⇒ **P2-01 的融合是
+> cudagraph 兑现量化收益的前提**。第 1 轮因共享卡上的外人进程整轮 **VOID**（§2.8.2）。
 > ★ 本记录最重要的产出不只是门，而是 §3 的**依赖链**（P0–P3）。P1 已从"不存在"变成
 > "已落地（8-bit、K1 门 PASS）"，见 §2.7。
 > ★ §2.7 同时给出第一次量化臂实测：**负结果**（0.82×/0.80×），并定位了它的**混淆来源**
-> （experts 走融合 kernel、attention 走 separate 臂）—— 这条直接决定下一步做 `EXP-p2-01`。
+> （experts 走融合 kernel、attention 走 separate 臂）—— 这条直接决定做 `EXP-p2-01`，
+> 而 `EXP-p2-01` 的结论（eager 融合 −5%、隔离测 +21%）又是 §2.8 判定 E7 的前提。
 
 - **ID**: `EXP-p4b-01-truncation`
-- **Date**: 2026-10-06（假设与门冻结）→ 2026-10-07（P2 补测 + fp16 基线 + P1 落地 + 量化臂首测）
-- **Operator**: `benchmarks.runner`（`--bit-width {fp16,w8a16} --execution eager --moe grouped
-  --ctx {1024,4096}`）+ `tools/quant_probe.py`（P2）+ `tools/bench_grouped_gemm_quant.py`（§2.7 机制）
-- **Status**: `running`（8/16 格已测且有效；其余被 P3、4-bit、门挡住）
-- **原始数据**: `results/EXP-p4b-01-truncation__bit_width=*_execution=*_ctx=*/result.json`
-  （第 1 轮作废件在 `results/EXP-p4b-01-run/round1-void/`）；
-  金丝雀/占用证据在 `results/EXP-p4b-01-run/`；
-  隔离 kernel 微基准 `results/bench_quant_grouped.json`
+- **Date**: 2026-10-06（假设与门冻结）→ 2026-10-07（P2 补测 + fp16 基线 + P1 落地 + 量化臂首测
+  + `EXP-p2-01` + **P3 接线与 E7 判定**）
+- **Operator**: `benchmarks.runner`（`--bit-width {fp16,w8a16,w8a8} --execution {eager,cudagraph}
+  --moe grouped --ctx {1024,4096} [--dequant {separate,fused}]`）+ `tools/quant_probe.py`（P2）
+  + `tools/bench_grouped_gemm_quant.py`（§2.7 机制）
+- **Status**: `running`（**12/16 格已测且有效**；w8a8×eager 的 2 格未跑；w4a16 的 4 格被
+  引用门 + 4-bit grouped 挡住。E7 已判定 —— §2.8.5）
+- **原始数据**: `results/EXP-p4b-01-truncation__bit_width=*_execution=*_ctx=*/result.json`；
+  每轮的金丝雀/占用/日志在 `results/EXP-p4b-01-run/`（第 1 轮作废件在 `round1-void/`，
+  P3 第 1 轮污染件在 `p3-*.log` 与 `v1_archive/`）；隔离 kernel 微基准
+  `results/bench_quant_grouped.json`
 - **对照**: `EXP-p1-04-prompt-set-gate`（门，含 ctx=4096 复测）、`EXP-p0-04`（静态 MoE + cudagraph）、
-  `EXP-p2-02`（grouped + cudagraph，per-token 4.083 ms）、`EXP-p2-01`（E2：反量化融合 vs 独立，
-  现在是 §2.7 指出的下一步）
+  `EXP-p2-02`（grouped + cudagraph，per-token 4.083 ms）、`EXP-p2-01`（E2：反量化融合 vs 独立 ——
+  它的 fused 臂就是 §2.8 里让量化第一次 >1× 的那个实现）
 
 ## Hypothesis（先写，跑之前冻结；来自矩阵，原文不动）
 
@@ -347,6 +357,9 @@ cell id 加 `moe` 轴，否则 grouped 重跑会覆盖已落盘的 hf 格。详�
 `cudagraph`（p4b §2.6：fp16 上 host_share 67% → 1.4%）才是让 fused kernel 的
 GPU 优势（2.6 µs vs 28 µs 工作量）兑现的前提 —— 这也让 P3 的优先级更高。
 
+> ★ **2026-10-07 已完成并验证**：P3 落地后，fused 臂的 `speedup_cudagraph` = **1.11**（ctx=1024）
+> vs `speedup_eager` 0.76；而 separate 臂仍是 0.767 → **§2.8.5 的 E7 判定**。
+
 ### P3 的真实工作量（上卡前先看清，2026-10-07 排查）
 
 P3 **不只是**"把 `quant_cfg` 传给 `run_cudagraph`"。排查发现两处必须先改，否则会写出
@@ -361,27 +374,123 @@ P3 **不只是**"把 `quant_cfg` 传给 `run_cudagraph`"。排查发现两处必
 
 **在哪之前不要跑**：`w8a8` 的 cudagraph 格现在会被这条漏掉的门放行。
 
-### E7 判定：仍**不可判定**
+### E7 判定：2026-10-07 已判定（P3 落地）→ 见 §2.8
 
-§6 的判据要比较 `speedup_cudagraph` 与 `speedup_eager`。现在只有 eager 臂
-（cudagraph 臂要 P3 接线），所以：
-- **不给出 E7 的判定**；
-- 上面 0.82×/0.80× 只是 **eager 臂的实测比值**，且混了两种反量化语义（见上）。
+当时只有 eager 臂（cudagraph 臂要 P3 接线），所以那 0.82×/0.80× 只是 **eager 臂的实测比值**，
+且混了两种反量化语义。**P3 已在同一天落地并跑完，判定写在 §2.8。**
 
-## 4. 现状表：哪些格子现在能跑（P1 落地后更新）
+## 2.8 P3 落地与 **E7 判定**（2026-10-07）
+
+### 2.8.1 P3 接线：三处必须先修的坑
+
+| # | 坑 | 修法 | 实测验证 |
+|---|---|---|---|
+| 1 | `run_cudagraph` 没有 `quant_cfg`（量化进不了 capture） | 量化在 capture **之前**：`replace_moe_blocks(impl, quant=qspec)` → `quantize_for_cfg`；量化 grouped kernel 的首调编译落在 `capture()` 自己的 warmup 相位（专用 stream、capture 之前）→ **fused kernel 因此可 capture** | w8a16 × cudagraph 的 6 个格子全部 capture/replay 成功 |
+| 2 | `build_payload_cudagraph` 把 `config.bit_width` 硬编码 `"fp16"`，且 `gate` 只用图回放门 | 三个字段来自 cfg；量化格的门 = `correctness_for_cell(cfg, consistency_passed=图回放门)` = **引用门 ∧ 图回放门** | w8a8 × cudagraph 的 gate = **FAIL**（引用 KL 0.0328/0.0046）→ 延迟只进 `_measurement.gate_failed_evidence`。**这就是"跳过引用门"会放行的那一格** |
+| 3 | `cudagraph.blocked_result` 也硬编码 fp16（本轮实测撞上） | 三个字段来自 config | 第 1 轮一次 capture OOM 写出的 payload 里 `bit_width=fp16` —— 已改，见 §2.8.2 |
+
+第 3 条是"写错记录"的实例，不是理论：被阻塞的量化格**必须以量化位宽落盘**，
+否则"这一格为什么没有数字"就是一条错的记录。
+
+### 2.8.2 第 1 轮：**VOID**（共享卡上的外人进程；记录，不杀）
+
+19:17:03–19:22:10 期间 pid **31929** 占着卡（峰值 **14.0 GB**，逐格快照见
+`results/EXP-p4b-01-run/p3-contention.log`）：
+
+| 症状 | 实测 | 干净时的值 |
+|---|---|---|
+| `w8a16 × cudagraph × 1024`（fused）capture | **OOM**：`Tried to allocate 1024 MiB … this process has 17.49 GiB … Process 31929 has 13.38 GiB` | 该格在 v2 成功（3.6737 ms） |
+| `fp16 × cudagraph × 4096` | **22.0633 ms**、host_share **67.1%** | v1 7.311 ms / 0.7%；v2 7.3211 ms / 0.8% |
+| `w8a16 × cudagraph × 4096`（fused） | 14.9888 ms、host_share 54% | v2 6.9645 ms / 0.9% |
+
+★ **教训（写进协议）**：`EXP-p2-01` 用的 eager 金丝雀对这种污染**不敏感** —— 那一轮 eager 金丝雀只漂
+1.16%，而上面三格全废。所以 v2 加了两件事：（a）**cudagraph 臂自己的同格首尾金丝雀**；
+（b）每格后的 payload 自检：graph 格的 `host_share > 5%` 就是"有共租户"的硬信号。
+协议仍是**记录不杀**，等它退出后整轮重跑；v1 的 `result.json` 未用于任何结论。
+
+### 2.8.3 第 2 轮：**有效**（两张金丝雀都 <1%，14 格 exit=0、`schema problems: 0`）
+
+| 金丝雀（同格首尾） | 首 | 尾 | 相对差 | 门槛 |
+|---|---|---|---|---|
+| `fp16 × eager × 1024`（K2.1 指定） | 9.7751 ms | 9.7223 ms | **−0.54%** | 5% |
+| `w8a16 × cudagraph × 1024`（本轮新增，cudagraph 噪声带） | 5.2998 ms | 5.3028 ms | **+0.06%** | 5% |
+
+每格计时前后 `nvidia-smi --query-compute-apps` **均为空**（`p3-v2-contention.log`），
+且脚本在每格后打印 payload 自检（无 `!!`）。
+
+### 2.8.4 数据（同轮、相邻执行；p50，单位 ms）
+
+| 格 | eager | cudagraph（separate 臂） | cudagraph（fused 臂） | `host_share` eager→cg | `[W]` |
+|---|---|---|---|---|---|
+| `fp16 × 1024` | 9.7751 / 9.7223（金丝雀 A/B） | **4.0670** | — | 67.0% → 1.1% | 2.358 GB |
+| `fp16 × 4096` | 9.8716 | **7.3211** | — | 61.2% → 0.8% | 2.358 GB |
+| `w8a16 × 1024` | 12.6838（A/B sep）/ 12.8018（A/B fus） | **5.2998 / 5.3028**（金丝雀 A/B） | **3.6737** | 77.5% → 0.6–1.2% | 1.301 GB |
+| `w8a16 × 4096` | 12.4429 / 12.5111 | **8.5825** | **6.9645** | 73.6% → 0.5–0.9% | 1.301 GB |
+| `w8a8 × 1024`（evidence） | — | _(6.0640)_ | — | — → 0.4% | 1.301 GB |
+| `w8a8 × 4096`（evidence） | — | _(9.3360)_ | — | — → 0.2% | 1.301 GB |
+
+- eager 的 `w8a16` 格是**同进程交错 A/B**（每臂 60 样本）：`separate` 与 `fused` 差 0.9%/0.5%，
+  `separate` 胜 54/60 与 41/60 —— 与 `EXP-p2-01` 的 5% 负号一致（host-bound，融合拿不到）。
+- 图的量化格口径已经正确：`[W]` 用**量化后**的分母（1.301 GB）、门是引用门 ∧ 图回放门
+  （`correctness.kl = 0.001273`（引用）、`correctness.graph_replay.kl = 0.0`、
+  `_measurement.dequant.activity` 显示 `arm=fused` 时 `fused_calls = 4480`）。
+- graph 格每格只有 **3 个 repeat**（既有协议：`measure_graph_gap(repeats=3)`，每 repeat 是 20 次重放的均值），
+  所以 p99 基本等于 p50（例：4.0670/4.0678）。这是既有口径，本轮没有改它。
+
+### 2.8.5 ★ E7 判定：**截断效应成立，但只在 fused 臂上兑现**
+
+`speedup = p50(fp16) / p50(w8a16)`（**>1 = 量化更快**；fp16 取同轮金丝雀/同轮格）：
+
+| ctx | 量化臂 | `speedup_eager` | `speedup_cudagraph` | 差（cg − eager） | `host_share` |
+|---|---|---|---|---|---|
+| 1024 | `separate`（v1 的语义，预注册对照） | 0.7665 | 0.7674 | **+0.0009（0.1%）** | 77.5% → 0.6% |
+| 1024 | **`fused`（P2-01 的实现）** | 0.7594 | **1.1071** | **+0.3477（46%）** | 77.5% → 1.2% |
+| 4096 | `separate` | 0.7933 | 0.8530 | +0.0597（7.5%） | 73.6% → 0.5% |
+| 4096 | **`fused`** | 0.7890 | **1.0512** | **+0.2622（33%）** | 73.6% → 0.9% |
+
+判定（严格按 §6）：
+
+1. **fused 臂：支持"截断存在"。** 同一个实现只换 execution 轴，比值从 **0.76 → 1.11**（ctx=1024）
+   与 **0.79 → 1.05**（ctx=4096）；差值 0.26–0.35 **远大于**噪声带（0.06%–0.54%），
+   且 `host_share` 同时从 ~75% 掉到 <1.5%（§6 要求的机制自洽）。
+   ⇒ `w8a16 × cudagraph × 1024 = 3.6737 ms` 是**本项目第一个 >1× 的量化格**（fp16: 4.0670 ms）。
+2. **separate 臂（预注册的 v1 语义）：不支撑任何"量化兑现"的读法。** 0.767 → 0.767（1024，
+   在噪声带内）/ 0.793 → 0.853（4096，仍 <1）。原因不是 host —— 它的成本是**GPU 侧的反量化
+   物化**，而 cudagraph 只拿得掉 host/launch。⇒ **P2-01 的融合是 cudagraph 兑现量化收益的前提**；
+   只做 P3 不做 P2-01，会得出"量化在 cudagraph 下也不行"的错结论。
+3. **量级：1.05–1.11×，不是矩阵猜的 2×。** 2× 那一行是 `W4A16`（引用门 FAIL 0.0933 > 0.05，
+   且 grouped 的 4-bit expert 路径未实现 → 那 4 格**跑不了**）。即便在 graph 里，这一步也不是
+   权重带宽受限的：`w8a16` 的 `[W]` 地板 0.8328 ms vs 实测 3.6737 ms（达成率 **22.7%**），
+   fp16 是 1.5095 vs 4.0670（37.1%）。"权重减半"换不到"时间减半"。
+4. **evidence 格不得引用**：`w8a8 × cudagraph` = _(6.0640)_ / _(9.3360)_ ms（gate FAIL，
+   `latency` 全 null）→ 对 fp16 的比值 0.67 / 0.78，比 w8a16 差（fake-quant 激活 + 2002 kernel/步）。
+
+### 2.8.6 现状：哪些格现在能跑（P3 落地后）
+
+| 格 | 状态 |
+|---|---|
+| `fp16 × {eager,cudagraph} × {1024,4096}` | ✅ 已测（本轮重跑，与 §2.6 一致：cg 4.0670/7.3211 vs 4.070/7.311） |
+| `w8a16 × eager × {1024,4096}` | ✅ 已测（本轮同轮 + 交错 A/B；v1 的 12.0154/12.3566 归档在 `results/EXP-p4b-01-run/v1_archive/`） |
+| `w8a16 × cudagraph × {1024,4096}` | ✅ **已测（P3）**：5.2998/5.3028 与 8.5825（separate）、3.6737 与 6.9645（fused，evidence） |
+| `w8a8 × cudagraph × {1024,4096}` | ✅ 已测（evidence，gate FAIL） |
+| `w8a8 × eager × {1024,4096}` | ⬜ 未跑（v1 也没有；要跑就得跟其余格同轮，且只作 evidence） |
+| `w4a16 × *` | ⛔ 拒绝（引用门 FAIL + grouped 的 4-bit expert 未实现） |
+
+## 4. 现状表：哪些格子现在能跑（**P3 落地后更新 → 细节见 §2.8.6**）
 
 | 格 | 状态 | 说明 |
 |---|---|---|
-| `fp16 × eager × grouped × {1024, 4096}` | ✅ 已测（§2.6） | P0 已交付 |
-| `fp16 × cudagraph × grouped × {1024, 4096}` | ✅ 已测（§2.6） | p0-04/p2-02 的成熟路径 |
-| `w8a16 × eager × grouped × {1024, 4096}` | ✅ **已测**（§2.7） | P1 已落地：experts 量化走融合 kernel |
-| `w8a8 × eager × grouped` | ✅ 可跑（evidence-only） | 同上；引用门 FAIL → `verdict=FAIL`，延迟不得引用 |
-| `w4a16 × eager × grouped` | ⛔ 拒绝（4-bit） | nibble 解包未实现（P1 只做 8-bit） |
-| 任意量化 × `cudagraph` | ⛔ 拒绝（P3） | 路径本身可 capture，缺的是 quant_cfg 接线 |
+| `fp16 × eager × grouped × {1024, 4096}` | ✅ 已测（§2.6；本轮 §2.8 重跑一致） | P0 已交付 |
+| `fp16 × cudagraph × grouped × {1024, 4096}` | ✅ 已测（§2.6；本轮 §2.8 重跑一致） | p0-04/p2-02 的成熟路径 |
+| `w8a16 × eager × grouped × {1024, 4096}` | ✅ **已测**（§2.7；本轮同轮 + 交错 A/B） | P1：experts 量化走融合 kernel |
+| `w8a16 × cudagraph × grouped × {1024, 4096}` | ✅ **已测（P3，§2.8）** | separate 5.2998/8.5825 ms；fused 3.6737/6.9645 ms（evidence） |
+| `w8a8 × cudagraph × grouped × {1024, 4096}` | ✅ 已测（evidence，§2.8.5 第 4 条） | 引用门 FAIL → `latency` 全 null，延迟不得引用 |
+| `w8a8 × eager × grouped` | ⬜ 未跑（v1 也没有） | 要跑就得与其余格同轮；只作 evidence |
+| `w4a16 × *` | ⛔ 拒绝 | 引用门 FAIL（0.0933 > 0.05）+ grouped 的 4-bit expert 未实现 |
 | 量化 × `gather` | ⛔ 拒绝 | gather 直接索引 fp16 融合张量，无量化版 |
 | 任意量化 × 其它 ctx/g | ⛔ 拒绝 | 没有门实测 |
 
-**8 格已测 / 8 格可跑未测（w8a8 的 4 格含 cudagraph 不算）/ 其余被 P3、4-bit、门挡住。**
+**12 格已测且有效 / 2 格可跑未测（w8a8 × eager）/ 4 格被引用门 + 4-bit 挡住。**
 
 ## 5. 上机前冻结的门
 
@@ -432,29 +541,35 @@ W4A16 行       : 无论跑出什么，verdict=FAIL（引用门 0.0933 > 0.05）
 1. ✅ **P2** 补测 ctx=4096 的门 → 已并进 `GATE_CITATIONS`（合取推导）+ 测试（§2.5）；
 2. ✅ 跑 §4 表里 fp16 的 4 格（开头/结尾金丝雀）→ **execution 轴的 fp16 基线**（§2.6）；
 3. ✅ **P1** 量化感知 expert 路径（grouped，8-bit）→ K1 门在 5090 上 PASS，量化臂跑通（§2.7）；
-4. ⬜ **P3** 把 `quant_cfg` 接进 `run_cudagraph` → 之后才能给出 **E7 判定**；
-5. ⬜ **`EXP-p2-01` 的 dense fused 臂**（attention）：§2.7 的机制发现把它从"建议先做"
-   变成硬前提 —— 现在量化格里 attention 走的是 **separate** 臂（每次反量化），
-   而 experts 走融合臂，两种语义混在一格里，测出来的 0.82× 不能归因；
-6. ⬜ 4-bit 的 nibble 解包（P1 目前只做 8-bit）；w8a8 的 4 格 evidence；
+4. ✅ **P3** 把 `quant_cfg` 接进 `run_cudagraph`（两处必修的坑 + 第三处 blocked 路径）→
+   量化 × cudagraph 12 格跑通、**E7 判定见 §2.8.5**；
+5. ✅ **`EXP-p2-01` 的 dense fused 臂**（attention）：已落地并跑完 6 格（记录 §6）。
+   ★ 它不只是"拆开混淆"：§2.8 显示**没有它，cudagraph 也兑现不了量化收益**（separate 臂
+   `speedup_cudagraph` 0.767，fused 臂 1.107）；
+6. ⬜ 4-bit 的 nibble 解包（P1 目前只做 8-bit）；`w8a8 × eager` 的 2 格 evidence。
+   ★ 4-bit 是**下一步最值钱的一格**：`w4a16` 的 `[W]` 是 fp16 的 25%，而 §2.8.5 第 3 条说明
+   上限不在字节——要先把门修过（p1-04）或明确标 FAIL；
 7. 每格 `results/<cell>/result.json` + 本记录补"结果"节 + commit。
 
-## Applicability（按已测的 8 格填全）
+## Applicability（按已测的 12 格 + 4 个 evidence 格填全）
 
 ```text
-适用于：RTX 5090（sm_120）、实测带宽 1561.9 GB/s（results/machine_probe.json）、
+适用于：RTX 5090（sm_120、170 SM、驱动 595.71.05）、**实测**读带宽 1561.9 GB/s、
         dtype=fp16、batch=1、ctx ∈ {1024,4096}、MoE=grouped（两臂同一路径）、
         attention=sdpa（模型默认）、q_len=1 decode、warmup 5 / timed 20、
         torch 2.8.0+cu128 / triton 3.4.0 / transformers 4.57.6、
         量化 = per-group 对称 RTN g=128、targets=attention+experts（与 p1-04 门逐字一致）；
-        §2.6/§2.7 的数字在各自金丝雀噪声带（0.10% / 0.70%）内有效
-不适用于：E7 的任何判定（cudagraph 臂未接线 —— P3）；
-          "量化能不能兑现收益"这个一般性问题：**当前量化格混了两种反量化语义**
-          （experts=融合 kernel、attention=separate 臂），见 §2.7，不能归因；
-          W4A16/W8A8 的性能结论（引用门 FAIL）；4-bit fused expert（未实现）；
-          量化 × gather、量化 × 其它 ctx/g；batch>1；
+        §2.6/§2.7 的数字在各自金丝雀噪声带（0.10% / 0.70%）内有效；
+        §2.8 的数字绑定本轮两张金丝雀：fp16×eager×1024 −0.54%、w8a16×cudagraph×1024 +0.06%；
+        **E7 的判定只在 "w8a16 + P2-01 的 fused attention" 这个实现上成立**
+        （1.05–1.11×），且 cudagraph 格只有 3 个 repeat
+不适用于：W4A16/W8A8 的**性能结论**（引用门 FAIL；它们的 cudagraph 延迟只作 evidence）；
+          4-bit fused expert（未实现）；量化 × gather；量化 × 其它 ctx/g；batch>1；
+          **把 E7 的 1.05–1.11× 外推到 W4A16 或其它 ctx**（2× 那一行没有测过：W4A16 门 FAIL
+          且 grouped 4-bit 未实现）；把 1.05–1.11× 当成"接近带宽墙"的证据
+          （w8a16 的 [W] 地板 0.8328 ms vs 实测 3.6737 ms，达成率只有 22.7%）；
           V100（无 triton/无 cp.async，只能做 fp16 对照）
-原因：    截断的量级绑定在这台卡的 host/launch 开销与实测带宽上；
-          expert kernel 的隔离微基准显示这条路径**不是带宽受限的**（int8 只用到
-          实测带宽的 36%），所以权重字节数不是当前的第一约束。
+原因：    截断的量级绑定在这台卡的 host/launch 开销上（eager 的 host_share ~75% → cudagraph <1.5%
+          是本条机制量）；而 cudagraph 之后剩下的差距是 GPU 侧（反量化物化 / kernel 数），
+          两者都换机器、换 triton 版本就得重测。
 ```

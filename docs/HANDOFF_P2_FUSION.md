@@ -85,10 +85,26 @@ E7 结论要靠它。加格要在记录里写明（这是对计划矩阵的扩�
 >   隔离测里 fused 每调用快 1.21×（33.5 vs 40.6 µs），但其中 ~16 µs 是 triton launcher 地板。
 >   **E2 的 1.3–2× 在 eager 配置下否证**（不是 inconclusive）；§2.7 那句 "+2.02 ms = 物化流量"
 >   已被修正为 host/算子数成本。详见 `experiments/EXP-p2-01-dequant-fusion.md` §6。
-> - **下一步**：② P3（`quant_cfg` 接进 `run_cudagraph`，并同时接引用门 + 修正
->   `build_payload_cudagraph` 的硬编码 `bit_width`）→ 才能判 E7。★ 依据本会话的结果，
->   P3 的优先级**更高了**：eager 臂的税主要是 host/launch，只有 cudagraph 压掉它之后，
->   fused kernel 的 GPU 优势才可能兑现。
+> - **★ ② P3 已完成（2026-10-07）→ E7 已判定**（`EXP-p4b-01-truncation` §2.8）：
+>   `run_cudagraph(quant_cfg=…)` 接上（量化在 capture 之前），`build_payload_cudagraph`
+>   的 `bit_width` 改为读 cfg、门改成 **引用门 ∧ 图回放门**；`blocked_result` 的同类硬编码
+>   也修了（实测撞上：一次 capture OOM 的 payload 里 `bit_width` 写成了 fp16）。
+>   ```text
+>   speedup = p50(fp16)/p50(w8a16)  (>1 = 量化更快)
+>   ctx=1024  separate : eager 0.7665 -> cudagraph 0.7674  (host 77.5% -> 0.6%)
+>   ctx=1024  fused    : eager 0.7594 -> cudagraph 1.1071  (host 77.5% -> 1.2%)
+>   ctx=4096  separate : eager 0.7933 -> cudagraph 0.8530
+>   ctx=4096  fused    : eager 0.7890 -> cudagraph 1.0512
+>   ```
+>   **结论**：截断效应成立，但**只在 fused 臂上兑现** —— `w8a16 × cudagraph × 1024 =
+>   3.6737 ms` 是项目第一个 >1× 的量化格（fp16 4.0670 ms）。量级 1.05–1.11×，不是 2×
+>   （2× 那行是 W4A16：门 FAIL + 4-bit grouped 未实现）。**P2-01 的融合是前提**：
+>   只做 P3 会得出"量化在 cudagraph 下也不行"的错结论。
+> - **第 1 轮 P3 作废**：共享卡上外人进程 pid 31929（峰值 14 GB）→ capture OOM +
+>   `fp16×cudagraph×4096` 3× 离群。★ eager 金丝雀对这种污染**不敏感**（只漂 1.16%）——
+>   下一轮起给 cudagraph 臂加**自己的同格金丝雀** + 每格 `host_share>5%` 自检。
+> - **剩下最值钱的一格**：把 `w4a16` 的门修过（或明确标 FAIL），并给 P1 加 4-bit nibble
+>   解包 —— `w4a16` 的 `[W]` 是 fp16 的 25%，而 §2.8.5 说明上限不在字节，需要重测才知道。
 >
 > 下面这段是当时按 12 格写的规划，保留作背景：
 

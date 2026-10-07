@@ -337,6 +337,9 @@ def test_quantized_cudagraph_is_no_longer_refused_before_loading(capsys, monkeyp
             "cudagraph",
             "--ctx",
             "1024",
+            # ★ 必须 --force：这一格在跑过的机器上 `is_done()` 为真，会被短路成
+            #   `skip (done)` 返回 0 —— 断言就变成"本机跑没跑过这一格"的函数（实测红过）。
+            "--force",
         ]
     )
     out = capsys.readouterr()
