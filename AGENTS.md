@@ -32,6 +32,12 @@ settled — do not re-derive them and do not re-run their cells:
   invisible (A/B ratio 1.0093 → 1.0091) — the improvement only cashes in inside the graph.
   v1 artifacts are archived under `results/<EXP>-run/v1_archive/` and labelled in the records.
 
+- **The elementwise/copy tail is now classified (`EXP-p4c-02`).** The "~330 kernels / 0.90 ms" is
+  **13 named families × 16–83 calls/step** (copies 0.17 ms; RMSNorm mean+rsqrt 0.15–0.25; KV-cache
+  write+cat 0.11; residual add 0.05; routing topK 0.05) — no single kernel >20%, so there is no
+  one-shot fix. ★ Its **module-level** attribution is **VOID by its own pre-registered K1**
+  (eager/graph top-8 overlap 5/8) — the record says so instead of quoting it.
+
 - **E4 (`EXP-p4-01`) — supported.** Routing/packing is the largest bucket in the hf/gather baseline
   (4.478 ms = **44.2%** of GPU busy) and **quantization-invariant** (4.478 / 4.512 / 4.526 / 4.555 ms
   for fp16 → w4a16) — the cap the plan predicted. The grouped path already removed it; see P2b.
@@ -104,6 +110,7 @@ in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`
 | P3 wiring + E7, 16/16 cells | done — **judged** | `experiments/EXP-p4b-01-truncation.md` |
 | In-graph attention × quantization, 8 cells | done — **supported**; re-measured after the kernel fix (**1.70× / 2.77×** combined, §5.6) | `experiments/EXP-p4c-01-in-graph-attention.md` |
 | E4 routing overhead | done — **supported**: 44.2% of GPU busy, and **quantization-invariant** (4.478/4.512/4.526/4.555 ms for fp16/w8a16/w8a8/w4a16) | `experiments/EXP-p4-01-moe-routing-overhead.md` |
+| The elementwise/copy tail (0.90 ms, "~330 kernels") | done — classified: it is **~13 named families × 16–83 calls/step**, not a flat tail; module-level attribution VOID (its own K1 failed) | `experiments/EXP-p4c-02-elementwise-tail.md` |
 | E5 expert sensitivity, E6 KV INT8, E8 cross-bandwidth, FP8/MXFP4, dense curves, batch sweep | **not run** | `configs/experiments.yaml`, `PLAN.md` §7 |
 | ncu evidence (a Phase 2 deliverable) | **not done** | `PLAN.md` §5 |
 
@@ -124,7 +131,9 @@ that the science was not done — read the record first.
 | P0 | ✅ **done 2026-10-07** (see §5): README status, `PLAN.md` pointer, p4b `Status`, p1-02/03/04 artifact notes, `constraints.txt` freeze | those files contradicted the records | four gates green, both machines on one commit | no |
 | P1 | ✅ **done 2026-10-07**: E4 → routing/pack = **44.2%** of GPU busy and constant within 1.7% across fp16→w4a16 | the plan's `minimal_credible` scope is now **6/6** | `experiments/EXP-p4-01-moe-routing-overhead.md` | no |
 | P2 | ✅ **done 2026-10-07** (re-measured after the kernel fix): in-graph attention + projection-kernel fix → speedup **1.169 / 1.250** (1024) and 1.084 / 1.214 (4096); best cell **1.70× / 2.77×** vs fp16 × sdpa | the user approved a new id (`EXP-p4c-01`), see §3 | `experiments/EXP-p4c-01-in-graph-attention.md` | no |
-| P2b | **The next bottleneck is the elementwise/copy tail** (~35% of the step, ~330 tiny kernels) | §5.4 of `EXP-p4c-01`; the projection half of this row is ✅ done (§5.6, kernel `7d1f92b`) | a record classifying the tail by source (residual adds / RMSNorm casts / routing index writes / `direct_copy`) + a fusion decision | **YES — no matrix entry exists**; ask before adding an `EXP-` id (or an axis) |
+| P2b | ✅ **classified 2026-10-07** (`EXP-p4c-02`): the 0.90 ms tail is **13 named families × 16–83 calls/step** — copies 0.17 (149 calls), RMSNorm mean+rsqrt 0.15–0.25, KV-cache write+cat 0.11, residual add 0.05, routing topK 0.05; **no single kernel >20%** | it was the largest non-weight bucket left | `experiments/EXP-p4c-02-elementwise-tail.md` | no |
+| P2f | Kill the **copy family** (0.17 ms, 149 calls/step): first *identify* it (the module-level attribution is VOID — use counters/point probes), then remove it — **numerics-preserving** if it is a needless `.contiguous()`/same-dtype cast | 7% of the step with no gate risk | in-graph A/B + a record; may fit inside `EXP-p4c-02` | no, unless it needs a new id |
+| P2g | Fuse **RMSNorm** into the projection kernel (0.15–0.25 ms, 6–11%) | the biggest remaining self-inflicted chain | **must re-measure the citation gate** (`tools/quant_probe.py --prompt-windows 5`) because it changes the reduction order — a *new measurement*, not a relaxation | **YES — it changes numerics, so the gate must be re-established first** |
 | P2d | ✅ **done 2026-10-07** (9 + 2 cells, canary −0.006%, occupancy clean): E7 fused `speedup_cudagraph` **1.1071 → 1.1703** (1024) / **1.0512 → 1.0839** (4096); E2's eager ratios unchanged (1.0442 / 1.0523 / 0.9681) — the fix is graph-only | the kernel fix made the recorded absolute ms stale | v1 archived under `results/<EXP>-run/v1_archive/`, v1/v2 labelled in both records | no |
 | P2e | Optional: fuse q/k/v into **one** launch (3→1) — the projection kernel is now 5.15 µs/call vs a 2.72 µs byte floor, so ~2.4 µs/call of launch/ramp is left | follows P2b's elementwise verdict; needs a shape decision (the three projections must share `in_features`) | isolated in-graph A/B (the P2d-style tool) before any cell run | no, if it stays inside `EXP-p4c-01`'s declared config; ask if it needs a new id |
 | P2c | Widen the routing classifier (torch `topk`/`sort`/`index_select`/`gather`/`scatter`) so the **grouped** path's routing cost can be quoted | `EXP-p4-01` §5.3: the classifier's 0.0% on the grouped path is a **blind spot**, not a measurement | new rules + tests; the number must be produced in its own round | **YES — it changes the meaning of the `routing_share_pct` field** |
