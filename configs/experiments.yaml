@@ -251,13 +251,28 @@ experiments:
     stage: "p4b"
     kind: "perf"
     combined: true            # 同时改 bit-width 与 execution —— 必须显式标注
-    desc: "E7：{fp16,w8a8,w4a16} x {eager,cudagraph}，逐格拆 host/kernel"
+    desc: "E7：{fp16,w8a16,w8a8,w4a16} x {eager,cudagraph}，逐格拆 host/kernel"
     hypothesis: "量化对 token 延迟的收益被 host/launch 开销截断：W4A16+eager < 1.5x，W4A16+cudagraph > 2x"
     refutation_signal: "两者接近 → 截断效应不存在，量化可独立兑现"
     factors:
-      bit_width: ["fp16", "w8a8", "w4a16"]
+      # ★ 加 `w8a16` 的理由与 p2-01 相同：EXP-p1-04 之后它是**唯一过门**的量化配置
+      #   （5 窗口真实 prompt 集 mean KL 0.001273 < 0.01）。按硬规则 2，W4A16/W8A8 的
+      #   延迟**不得**作为性能结论 —— 不加 w8a16，E7（本项目的头号结论）就没有可发表的
+      #   量化臂。假设原文保留（它说的是 W4A16）；其定量部分在现有门下不可发表，
+      #   后果写在 experiments/EXP-p4b-01-truncation.md §1。
+      bit_width: ["fp16", "w8a16", "w8a8", "w4a16"]
       execution: ["eager", "cudagraph"]
     ctx: [1024, 4096]
+    config:
+      # ★ **两臂必须同一个 MoE 路径**（硬规则 1：一次只改一个变量）：
+      #   hf 不能 capture（EXP-p0-03 blocked），cudagraph 臂必须 static/grouped；
+      #   若 eager 臂用 hf 而 cudagraph 臂用 grouped，execution 轴就与 MoE 实现混在一起。
+      #   选 grouped：p2-02 已在 grouped+cudagraph 下过门（per-token 4.083 ms），
+      #   是当前最优 fp16 路径；static 的 gather 税（3.22 GB/token）是**设备侧**代价，
+      #   会盖住 E7 要测的 host 侧开销。
+      #   ⚠️ 量化臂在 grouped 上还不存在（replace_moe_blocks 只吃 fp16 融合权重）——
+      #   这条依赖链写在 EXP-p4b-01 记录 §3，runner 现在会直接拒绝量化×非 hf 的组合。
+      moe: grouped
     metrics: ["host_share", "gpu_p50", "host_p50", "per_token_p50", "bw_attainment"]
 
   # ---------- Phase 3：架构特性臂（**arch 门控真正生效的地方**） ----------

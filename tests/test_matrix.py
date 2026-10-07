@@ -43,18 +43,25 @@ def test_arch_arms_come_from_verified_llvm_predicates(matrix):
 
 
 def test_e7_truncation_matrix_is_complete(matrix):
-    """E7 必须是 {fp16,w8a8,w4a16} x {eager,cudagraph} x ctx{1024,4096} = 12 格。"""
+    """E7 必须是 {fp16,w8a16,w8a8,w4a16} x {eager,cudagraph} x ctx{1024,4096} = 16 格。
+
+    `w8a16` 是 EXP-p1-04 之后唯一过门的量化配置（0.001273 < 0.01）——按硬规则 2，
+    不加它 E7 就没有可发表的量化臂（与 p2-01 加轴的理由相同，见矩阵注释）。
+    另外**两臂必须同一个 MoE 路径**（硬规则 1），所以断言 moe 只有一种取值。
+    """
     runs = expand(matrix, arch="sm_120")
     e7 = [
         r
         for r in runs
         if r.base_id == "EXP-p4b-01-truncation" and not r.exp_id.endswith("__SKIPPED-arch")
     ]
-    assert len(e7) == 12
+    assert len(e7) == 16
     bit_widths = {r.config.get("bit_width") for r in e7}
     executions = {r.config.get("execution") for r in e7}
-    assert bit_widths == {"fp16", "w8a8", "w4a16"}
+    assert bit_widths == {"fp16", "w8a16", "w8a8", "w4a16"}
     assert executions == {"eager", "cudagraph"}
+    # execution 轴要可比，两臂必须同一 MoE 实现（hf 不能 capture，p0-03 已证）
+    assert {r.config.get("moe") for r in e7} == {"grouped"}
 
 
 def test_e7_is_marked_combined(matrix):
@@ -105,7 +112,8 @@ def test_sm120_expands_to_expected_total(matrix):
     # p1 再 11 变 12：EXP-p1-04（5 窗口真实 prompt 集上门，ctx=1024 单点）。
     # p2-01 从 4 格变 6 格：给它的 bit_width 轴加 `w8a16`（+2 格）。理由是硬规则 2：
     # p1-04 之后 w8a8/w4a16 都不过门，不加 w8a16 本实验就没有可发表的格子。
-    assert len(real) == 50
+    # p4b-01 从 12 格变 16 格：给它加同一个 `w8a16`（+4 格），理由同上 —— E7 的量化臂。
+    assert len(real) == 54
 
 
 def test_exp_ids_are_unique(matrix):
