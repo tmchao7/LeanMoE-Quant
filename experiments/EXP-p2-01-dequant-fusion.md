@@ -208,6 +208,12 @@ fp16 scale（**部署口径**，`QuantLinear` 按字节账存 fp16）与 fp32 sc
 | `fused`（本 kernel，默认配置） | 0.1338 | 0.0019 | **2.141 ms** |
 | `separate`（物化 fp16 权重 + `F.linear`） | 0.1624 | 0.0028 | **2.599 ms** |
 
+★ **口径提醒（2026-10-07 补）**：这张表的 fused/separate 两行**都被 Triton launcher 主导**
+（同节 (b) 自己测出 launcher 地板 16–32 µs）。图里没有 launcher，`EXP-p4c-01` §5.4 的 profiler
+给的是 fused kernel **8.2 µs/次**；`EXP-p4c-01` §5.6 又把 kernel 本身从 8.14 改到 **5.15 µs/次**
+（按组广播 scale）。所以本表的**绝对值是改前、且是 launcher 口径**，不要与图内数字混比；
+E2 的**判定**（eager 1.05×、host 受限）不受这两件事影响。
+
 ⇒ 隔离测里 **fused 比 separate 快 1.21×**（每调用 33.5 µs vs 40.6 µs）——但两者都远慢于
 fp16 的 12.6 µs。默认配置是声明空间的一个**子集**扫描（B4K512w4 并列最快 0.1338，
 其余 7 个配置 0.1344–0.1377，差 ≤3%）。**不是全网格 autotune**，别当 autotune 引用。

@@ -16,10 +16,18 @@ settled — do not re-derive them and do not re-run their cells:
   stream is only 42% (1024) / 23% (4096) of a graph step ⇒ even a perfect weight path ≤ ~1.74× / ~1.30×.
 
 - **`EXP-p4c-01` — supported (the other big non-weight block was the ATTENTION IMPLEMENTATION).**
-  Swapping HF sdpa for this repo's split-KV core *inside the graph* cuts the step 1.36–2.44× and
-  **raises the quantized speedup**: 1.109 → **1.153** (1024) / 1.053 → **1.131** (4096); best cell
-  `w8a16 × kernel` = **1.57× / 2.57×** vs fp16 × sdpa. Mechanism: the removed attention cost is
-  bit-width-independent (both arms save ~4.1 ms @4096) — a constant that helps the smaller total.
+  Swapping HF sdpa for this repo's split-KV core *inside the graph* cuts the step 1.36–2.44×;
+  with the projection-kernel fix below, the quantized speedup is **1.169 (sdpa) / 1.250 (kernel)**
+  @1024 and 1.084 / 1.214 @4096, and the best cell `w8a16 × kernel` = **1.70× / 2.77×** vs
+  fp16 × sdpa. Mechanism: the removed attention cost is bit-width-independent (@4096 both arms
+  save ~4.1 ms) — a constant that helps the smaller (quantized) total relatively more.
+- **The projection kernel was 3× off its byte floor — and it is fixed.** In-graph config tuning
+  (new tool `tools/bench_dequant_gemm_graph.py`) showed the old ranking was launcher-bound and that
+  the default config is optimal, so the 5.4 µs/call gap was structural: the scale was gathered
+  per element while one value covers 128 of them. Loading it per group + broadcasting gives
+  **8.14 → 5.15 µs/call (523 → 826 GB/s)**; the model's projection bucket fell 0.5245 → 0.3254 ms.
+  ★ `EXP-p4b-01`'s and `EXP-p2-01`'s absolute ms are **pre-fix** (both records say so); verdicts
+  unchanged, magnitudes pending a re-run (archive first, §2 rule 9).
 
 - **E4 (`EXP-p4-01`) — supported.** Routing/packing is the largest bucket in the hf/gather baseline
   (4.478 ms = **44.2%** of GPU busy) and **quantization-invariant** (4.478 / 4.512 / 4.526 / 4.555 ms
@@ -91,7 +99,7 @@ in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`
 | Grouped MoE GEMV (fp16) | done | `experiments/EXP-p2-02-moe-grouped-gemm.md` |
 | E2 dequant fusion, 6 cells, 8-bit **and** 4-bit | done — **`refuted`** | `experiments/EXP-p2-01-dequant-fusion.md` |
 | P3 wiring + E7, 16/16 cells | done — **judged** | `experiments/EXP-p4b-01-truncation.md` |
-| In-graph attention × quantization, 8 cells | done — **supported** (1.57× / 2.57× combined) | `experiments/EXP-p4c-01-in-graph-attention.md` |
+| In-graph attention × quantization, 8 cells | done — **supported**; re-measured after the kernel fix (**1.70× / 2.77×** combined, §5.6) | `experiments/EXP-p4c-01-in-graph-attention.md` |
 | E4 routing overhead | done — **supported**: 44.2% of GPU busy, and **quantization-invariant** (4.478/4.512/4.526/4.555 ms for fp16/w8a16/w8a8/w4a16) | `experiments/EXP-p4-01-moe-routing-overhead.md` |
 | E5 expert sensitivity, E6 KV INT8, E8 cross-bandwidth, FP8/MXFP4, dense curves, batch sweep | **not run** | `configs/experiments.yaml`, `PLAN.md` §7 |
 | ncu evidence (a Phase 2 deliverable) | **not done** | `PLAN.md` §5 |
@@ -112,8 +120,9 @@ that the science was not done — read the record first.
 | --- | --- | --- | --- | --- |
 | P0 | ✅ **done 2026-10-07** (see §5): README status, `PLAN.md` pointer, p4b `Status`, p1-02/03/04 artifact notes, `constraints.txt` freeze | those files contradicted the records | four gates green, both machines on one commit | no |
 | P1 | ✅ **done 2026-10-07**: E4 → routing/pack = **44.2%** of GPU busy and constant within 1.7% across fp16→w4a16 | the plan's `minimal_credible` scope is now **6/6** | `experiments/EXP-p4-01-moe-routing-overhead.md` | no |
-| P2 | ✅ **done 2026-10-07**: in-graph attention → speedup 1.11 → **1.15** (1024) / 1.05 → **1.13** (4096); best cell **1.57× / 2.57×** vs fp16 × sdpa | the user approved a new id (`EXP-p4c-01`), see §3 | `experiments/EXP-p4c-01-in-graph-attention.md` | no |
-| P2b | **The next bottleneck is the elementwise/copy tail** (~35% of the step, ~330 tiny kernels); runner-up: the 64 `_dequant_gemm_kernel` projection launches (~5.4 µs of launch overhead each) | §5.4 of `EXP-p4c-01` measured it after the attention swap; it is the largest non-weight bucket left | a record with the tail classified by source + a fusion decision | **YES — no matrix entry exists**; ask before adding an `EXP-` id (or an axis) |
+| P2 | ✅ **done 2026-10-07** (re-measured after the kernel fix): in-graph attention + projection-kernel fix → speedup **1.169 / 1.250** (1024) and 1.084 / 1.214 (4096); best cell **1.70× / 2.77×** vs fp16 × sdpa | the user approved a new id (`EXP-p4c-01`), see §3 | `experiments/EXP-p4c-01-in-graph-attention.md` | no |
+| P2b | **The next bottleneck is the elementwise/copy tail** (~35% of the step, ~330 tiny kernels) | §5.4 of `EXP-p4c-01`; the projection half of this row is ✅ done (§5.6, kernel `7d1f92b`) | a record classifying the tail by source (residual adds / RMSNorm casts / routing index writes / `direct_copy`) + a fusion decision | **YES — no matrix entry exists**; ask before adding an `EXP-` id (or an axis) |
+| P2d | Re-measure the **pre-fix** cells once someone wants to quote their magnitudes: `EXP-p4b-01`'s w8a16 cudagraph cells and `EXP-p2-01`'s fused/separate arms; then optionally fuse q/k/v into one launch (3→1) | the kernel fix (`7d1f92b`) made their recorded absolute ms stale — verdicts are unaffected, magnitudes are conservative | re-run with the canary protocol, **archive v1 first** (`results/<EXP>-run/v1_archive/`), label v1/v2 in the record | **YES — it re-runs cells that are already `done`** (§6) |
 | P2c | Widen the routing classifier (torch `topk`/`sort`/`index_select`/`gather`/`scatter`) so the **grouped** path's routing cost can be quoted | `EXP-p4-01` §5.3: the classifier's 0.0% on the grouped path is a **blind spot**, not a measurement | new rules + tests; the number must be produced in its own round | **YES — it changes the meaning of the `routing_share_pct` field** |
 | P3 | Breadth: E5 (`EXP-p4-02`), E6 (`EXP-p5-01`), E8 (`EXP-p8-01`, needs the V100), E1's group axis under the corrected prompt set, dense curves, batch sweep (E3 — today it has **no** experiment), FP8/MXFP4 (`EXP-p3-01/02`), repairing the W4A16 gate | each closes a declared hypothesis or lever; several need a matrix entry that does not exist | per matrix entry; E8 only after the same protocol passes on the V100 | partial: new matrix entries need approval |
 | P4 | Publication: ncu evidence, E7 charts, final README/PLAN pass | closes Phase 2's last deliverable and Phase 7 | ncu metrics per `lemoq.kernels.NCU_METRICS`; charts regenerated from `result.json` | no |
