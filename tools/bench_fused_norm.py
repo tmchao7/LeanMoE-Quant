@@ -101,6 +101,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-new-tokens", type=int, default=32)
     ap.add_argument("--rounds", type=int, default=15)
     ap.add_argument("--json", default=None)
+    ap.add_argument(
+        "--profile",
+        action="store_true",
+        help="额外给每条臂的图重放做一次 CUDA profile，打印各自前 10 个 kernel（解释为什么快/慢）",
+    )
     args = ap.parse_args(argv)
 
     import torch  # noqa: PLC0415
@@ -215,6 +220,49 @@ def main(argv: list[str] | None = None) -> int:
         "k1_kl_below_1e-3": bool(cmp["kl"] < 1e-3),
         "k1_top1_at_least_0.99": bool(cmp["top1_agreement"] >= 0.99),
     }
+    if args.profile:
+        from torch.profiler import ProfilerActivity, profile  # noqa: PLC0415
+
+        profiled: dict[str, Any] = {}
+        for name, sess in sessions.items():
+            for _ in range(3):
+                sess.replay()
+            torch.cuda.synchronize()
+            with profile(activities=[ProfilerActivity.CUDA]) as prof:
+                for _ in range(args.rounds):
+                    sess.replay()
+                torch.cuda.synchronize()
+            rows = []
+            for e in prof.key_averages():
+                tot = float(getattr(e, "self_device_time_total", 0.0) or 0.0)
+                if tot <= 0:
+                    continue
+                rows.append(
+                    {
+                        "name": e.key,
+                        "ms_per_step": tot / args.rounds / 1000.0,
+                        "count_per_step": e.count / float(args.rounds),
+                    }
+                )
+            rows.sort(key=lambda r: -r["ms_per_step"])
+            profiled[name] = {
+                "gpu_ms_per_step": sum(r["ms_per_step"] for r in rows),
+                "kernels_per_step": sum(r["count_per_step"] for r in rows),
+                "top": rows[:10],
+            }
+        payload["profile"] = profiled
+        for name in sessions:
+            pr = profiled[name]
+            print(
+                "\n[%s] GPU %.3f ms/步 | kernel %.0f/步"
+                % (name, pr["gpu_ms_per_step"], pr["kernels_per_step"])
+            )
+            for r in pr["top"]:
+                print(
+                    "    %8.4f ms ×%-6.1f %s"
+                    % (r["ms_per_step"], r["count_per_step"], r["name"][:74])
+                )
+
     print("\n%-16s %10s %10s %8s" % ("arm", "p50(ms)", "min(ms)", "wins"))
     for name in sessions:
         print(
