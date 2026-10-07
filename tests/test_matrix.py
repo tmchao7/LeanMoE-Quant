@@ -103,7 +103,9 @@ def test_sm120_expands_to_expected_total(matrix):
     # 而不是它的另一个臂 —— 回答的是"那两个非单调性信号是实现缺陷还是模型敏感"。
     # p1 再 10 变 11：EXP-p1-03（混合位宽 + PPL + prompt 口径更正，ctx=1024 单点）。
     # p1 再 11 变 12：EXP-p1-04（5 窗口真实 prompt 集上门，ctx=1024 单点）。
-    assert len(real) == 48
+    # p2-01 从 4 格变 6 格：给它的 bit_width 轴加 `w8a16`（+2 格）。理由是硬规则 2：
+    # p1-04 之后 w8a8/w4a16 都不过门，不加 w8a16 本实验就没有可发表的格子。
+    assert len(real) == 50
 
 
 def test_exp_ids_are_unique(matrix):

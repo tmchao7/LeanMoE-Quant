@@ -235,7 +235,12 @@ experiments:
     hypothesis: "融合带来 1.3-2x（E2）"
     refutation_signal: "差值 <10% → 反量化不是瓶颈，融合判断被否证"
     factors:
-      bit_width: ["w8a8", "w4a16"]
+      # ★ `w8a16` 是 EXP-p1-04 之后**唯一过门**的量化配置（5 窗口真实 prompt 集
+      #   mean KL 0.001273 < 0.01）。w8a8（0.0328）与 w4a16（0.0933）都不过门，按
+      #   硬规则 2 它们的格子只能作为"融合没有改变正确性判定"的 evidence，不得给出
+      #   性能结论。不加 w8a16 这一档，本实验就**没有任何**可发表的格子 —— 加它不是
+      #   扩变量，是让矩阵与 EXP-p1-04 的门结论对齐（改轴的理由写在 EXP-p2-01 记录里）。
+      bit_width: ["w8a16", "w8a8", "w4a16"]
       dequant: ["separate", "fused"]
     timeout_gpu_hours: 25
     fallback: "用现成融合 kernel（vLLM/torchao）当'已融合'臂，贡献转落字节预算分析 + E7"
