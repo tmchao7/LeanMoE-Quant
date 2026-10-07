@@ -492,3 +492,91 @@ def test_quantize_model_can_restrict_to_an_explicit_name_whitelist():
     assert isinstance(model.model.layers[0].self_attn.v_proj, QuantLinear)
     assert not isinstance(model.model.layers[0].self_attn.q_proj, QuantLinear)
     assert any("不在 names=" in s for s in report.skipped)
+
+
+# ---------------------------------------------------------------------------
+# 5) ★ EXP-p2-01 的 fused 臂：分派、回退、计数（离线可测）
+#
+# ★ 这里**不测 kernel 的数值** —— 那是 GPU 上的 K1 门
+#   （tests/test_kernel_parity.py::test_triton_fused_gemm_matches_reference）。
+#   这里钉住的是"fused 没赢"与"fused 根本没跑"能不能被区分开：
+#   没有这套计数，一次退回 separate 的运行会被读成"融合没有收益"。
+# ---------------------------------------------------------------------------
+def test_dequant_axis_is_part_of_the_spec_and_is_recorded():
+    """`dequant` 必须进 spec 的落盘字典 —— 否则结果里看不出这一格是哪个臂。"""
+    assert _spec("w8a16", 128).dequant == "separate"
+    assert _spec("w8a16", 128, dequant="fused").dequant == "fused"
+    assert _spec("w8a16", 128, dequant="fused").to_dict()["dequant"] == "fused"
+    with pytest.raises(ValueError):
+        _spec("w8a16", 128, dequant="magic")
+
+
+def test_fused_mode_without_a_kernel_falls_back_and_says_why():
+    """Mac / 无 CUDA 的机器上 fused 必须**退回 separate**，并把原因计数下来。
+
+    这是"没有 kernel 时不能假装融合"的执行点：`fused_calls == 0` 且有 fallback 计数，
+    调用方就能判断这一格到底有没有跑到 kernel。
+    """
+    from lemoq.quant.linear import dequant_activity, reset_dequant_counters, set_dequant_mode
+
+    torch.manual_seed(0)
+    ql = QuantLinear(nn.Linear(64, 32), _spec("w8a16", 32, dequant="fused"))
+    set_dequant_mode(ql, "fused")
+    reset_dequant_counters(ql)
+    x = torch.randn(1, 64)
+    y = ql(x)
+    expect = torch.nn.functional.linear(x, ql.dequantized_weight(dtype=x.dtype), ql.bias)
+    assert torch.allclose(y, expect, atol=1e-6), "退回 separate 的结果必须逐位等于原生路径"
+
+    activity = dequant_activity(ql)
+    assert activity["modes"] == {"fused": 1}
+    assert activity["fused_calls"] == 0, "本机没有 kernel，不可能出现 fused 调用"
+    assert activity["separate_calls"] == 1
+    assert set(activity["fallbacks"]) in (
+        {"not_cuda"},
+        {"kernel_import_failed(ModuleNotFoundError)"},
+        {"kernel_unavailable(ModuleNotFoundError: No module named 'triton')"},
+    ), activity["fallbacks"]
+
+
+def test_fused_requires_a_single_token_and_counts_the_prefill_fallback():
+    """fused 只在 decode 单 token 兑现；多 token 退回 separate 并**计数**（不是静默）。"""
+    from lemoq.quant.linear import dequant_activity, reset_dequant_counters, set_dequant_mode
+
+    ql = QuantLinear(nn.Linear(64, 32), _spec("w8a16", 32, dequant="fused"))
+    set_dequant_mode(ql, "fused")
+    reset_dequant_counters(ql)
+    ql(torch.randn(1, 3, 64))  # 多 token：prefill
+    activity = dequant_activity(ql)
+    assert activity["fused_calls"] == 0
+    assert "multi_token" in activity["fallbacks"] or "not_cuda" in activity["fallbacks"]
+    # 计数只按**相位**累加：换回 separate 模式后 separate 计数继续涨
+    set_dequant_mode(ql, "separate")
+    ql(torch.randn(1, 1, 64))
+    assert dequant_activity(ql)["separate_calls"] == 2
+
+
+def test_set_dequant_mode_reports_how_many_modules_it_switched():
+    """两臂同进程交错靠它：返回值必须是**被切换的模块数**（0 表示模型没量化层）。"""
+    from lemoq.quant.linear import dequant_activity, set_dequant_mode, supported_dequant_modes
+
+    model = nn.Sequential(nn.Linear(32, 32))
+    assert set_dequant_mode(model, "fused") == 0
+    assert supported_dequant_modes(model) == ("separate",)
+
+    class _Attn(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([nn.Module()])
+            self.layers[0].self_attn = nn.Module()
+            self.layers[0].self_attn.q_proj = nn.Linear(64, 32)
+            self.layers[0].self_attn.v_proj = nn.Linear(64, 32)
+
+    m = _Attn()
+    m, report = quantize_model(m, _spec("w8a16", 32, targets=("attention",)))
+    assert report.replaced == {"attention": 2}
+    assert set_dequant_mode(m, "fused") == 2
+    assert dequant_activity(m)["modes"] == {"fused": 2}
+    # 没有 triton/CUDA 时，模型层面也如实报告只有 separate 可用
+    if not QuantLinear(nn.Linear(4, 4), _spec("w8a16", 32)).fused_available:
+        assert supported_dequant_modes(m) == ("separate",)

@@ -1,0 +1,358 @@
+"""_dequant_triton — dense 反量化融合 GEMV 的 Triton kernel（`EXP-p2-01` 的 fused 臂）。
+
+## 这个文件为什么单独存在
+
+与 `_attn_triton.py` / `_grouped_triton.py` 同一条理由：`triton` 在 Mac 上装不了
+（没有 CUDA 后端）。把 `@triton.jit` 放进 `lemoq/quant/linear.py` 会让整个量化模块在
+Mac 上 import 失败 —— 而离线测试（回退逻辑、形状检查）正是发现错误的地方。所以：
+
+    lemoq/quant/linear.py      QuantLinear（host 逻辑 + separate 臂 + fused 分派）
+    _dequant_triton.py         本文件：`@triton.jit` kernel + host wrapper
+
+★ 本文件的 `import triton` 是**可失败的**（`_HAS_TRITON`）：没有 triton 时模块仍可
+import，但 `fused_available()` 返回 False、`dequant_gemm_fused()` 抛出可读的错误。
+这样 `QuantLinear` 的"没有 kernel 就退回 separate 并**如实记录**"才是一条能被测试的代码
+路径，而不是一个只能在 GPU 机器上发现的 ImportError。
+
+## 语义（必须与 `lemoq.kernels.reference` 逐字对应）
+
+    separate : W_hat = dequant(packed)         # 物化 [out,in] 的 fp16 权重（写+读一遍）
+               y     = x @ W_hat.T
+    fused    : y     = x @ dequant(packed).T   # 读 packed 时当场解压，不落中间张量（本文件）
+
+**数学结果相同**，差别只在多不多一次权重的写+读流量 —— 这就是 E2 的全部内容。
+所以 K1 门就是"本 kernel 的输出 == `dequant_gemm_separate_reference`"
+（`atol/rtol 1e-3`，容差不得为了通过而放宽）。
+
+## 数值口径（与 separate 臂一致，不是"差不多"）
+
+1. **累加在 fp32，且不用 `tl.dot`**：fp32 的 `tl.dot` 默认走 tf32，分辨力低于 1e-3，
+   会与"相对 fp64 oracle 的 1e-3 门"打架。M=1 的 decode 是访存受限，FFMA 不是瓶颈 ——
+   正确性门优先（AGENTS.md 规则 2）。这里用 `tl.sum(w * x, axis=1)` 的逐元素 fp32 乘加。
+2. **scale/zero 按原 dtype 读入再转 fp32**：`QuantLinear` 存 fp16 scale（字节账要求），
+   参考实现也吃同一份 fp16 tensor → 两边逐位相同。
+3. **4-bit 的 nibble 在寄存器里展开**（`pack.py` 的约定：低半字节在前），
+   不物化 int8 codes 中间张量 —— 否则"融合"就名不副实。
+
+## CUDA Graph 约束（P3 会 capture 这条路径）
+
+1. **不得用 `@triton.autotune`**：它会真的跑多个 config 计时，capture 期间等于往图里塞
+   计划外的 kernel。配置由 host 显式传入（`DEQUANT_GEMM_CONFIGS`）。
+2. **grid 是 host 侧常量**：`cdiv(N, BLOCK_N)`。M/N/K 进的是核函数参数（decode 期间为常量），
+   与 attn 的"循环上界来自设备内存"不同 —— 那里必须设备端取值，这里不必。
+3. 首次调用会 JIT 编译 —— 必须在 capture **之前** warm 过（`warm()`）。
+
+## 只支持单 token（decode）
+
+`QuantLinear` 只在 `q_len == 1` 的 decode core 上分派到本 kernel；prefill / 多 token
+退回 separate 臂。kernel 的 `M` 是行循环，所以对任意 M 都算得对（K1 测试用 m=4 交叉验证），
+但生产路径只用 M=1。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+# ★ triton 的 import 允许失败：本模块必须在没有 triton 的机器上也能 import。
+try:
+    import triton
+    import triton.language as tl
+
+    _TRITON_IMPORT_ERROR: str | None = None
+except Exception as _exc:  # noqa: BLE001
+    triton = None
+    tl = None
+    _TRITON_IMPORT_ERROR = "%s: %s" % (type(_exc).__name__, _exc)
+
+_HAS_TRITON = triton is not None and tl is not None
+
+__all__ = [
+    "DEQUANT_GEMM_CONFIGS",
+    "dequant_gemm_fused",
+    "fused_available",
+    "warm",
+]
+
+
+# ---------------------------------------------------------------------------
+# 默认配置
+#
+# ★ 不用 @triton.autotune（理由见模块 docstring）。参数敏感性是**要报告的结果**
+#   （`lemoq.kernels.autotune.DEQUANT_GEMM_AUTOTUNE_SPACE`），扫描在隔离微基准里做。
+# ---------------------------------------------------------------------------
+DEQUANT_GEMM_CONFIGS: dict[str, dict[str, int]] = {
+    # BLOCK_N 小 = 更多 program（M=1 的 GEMV 里 grid = cdiv(N, BLOCK_N)，OLMoE 的
+    # q_proj N=2048）；BLOCK_K 大 = 每个 program 一次读更多 packed 权重。
+    # ★ 本默认值是 2026-10-07 在 5090 上按声明空间的**子集**扫出来的赢家，
+    #   不是全网格 autotune；扫描数据见 experiments/EXP-p2-01-dequant-fusion.md 结果节。
+    "dequant_gemm": {"BLOCK_N": 4, "BLOCK_K": 256, "num_warps": 2, "num_stages": 3},
+}
+
+
+def fused_available() -> bool:
+    """fused 臂在这台机器上能不能用（Mac 上永远 False。**不抛异常**）。"""
+    if not _HAS_TRITON:
+        return False
+    try:
+        import torch  # noqa: PLC0415
+
+        return bool(torch.cuda.is_available())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def unavailable_reason() -> str | None:
+    """fused 臂不可用的**可读原因**（可用时 None）。runner 的加载前拒绝要用它。"""
+    if _HAS_TRITON and _TRITON_IMPORT_ERROR is None:
+        try:
+            import torch  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            return "torch 不可用（%s）" % type(exc).__name__
+        if not torch.cuda.is_available():
+            return "本机没有可用的 CUDA 设备"
+        return None
+    return "triton 不可用（%s）" % (_TRITON_IMPORT_ERROR or "unknown")
+
+
+def _resolve_config(config: dict[str, Any] | None) -> dict[str, int]:
+    cfg = dict(DEQUANT_GEMM_CONFIGS["dequant_gemm"])
+    if config:
+        override = config.get("dequant_gemm") or config
+        cfg.update({k: int(v) for k, v in override.items()})
+    for key in ("BLOCK_N", "BLOCK_K", "num_warps", "num_stages"):
+        if key not in cfg:
+            raise ValueError("dequant_gemm 配置缺少 %s" % key)
+    if cfg["BLOCK_N"] < 1 or cfg["BLOCK_K"] < 16:
+        raise ValueError("非法 dequant_gemm 配置：%r" % cfg)
+    if cfg["BLOCK_K"] % 2 != 0:
+        raise ValueError("BLOCK_K 必须是偶数（4-bit 每两个 k 共用一个 uint8）：%r" % cfg)
+    return cfg
+
+
+def dequant_gemm_fused(
+    x: Any,
+    qweight: Any,
+    scale: Any,
+    zero: Any = None,
+    *,
+    group_size: int,
+    bits: int | None = None,
+    symmetric: bool = True,
+    out_dtype: Any = None,
+    config: dict[str, Any] | None = None,
+) -> Any:
+    """`y = x @ dequant(qweight, scale, zero).T`，反量化在 kernel 内完成。
+
+    参数（与 `dequant_gemm_separate_reference` 同一个契约）：
+
+        x         (M, K)  fp16 / fp32，K = 未补齐的输入维
+        qweight   (N, P)  int8（bits=8，P = padded_in）或 uint8（bits=4，P = padded_in/2）
+        scale     (N, n_groups)  fp16 / fp32；n_groups 沿 **输入维**（与 rtn 一致）
+        zero      对称量化传 None
+        group_size  与量化时一致；padded_in = n_groups * group_size
+
+    返回 (M, N)；`out_dtype=None` 时是 fp32（与参考实现一致），否则按 `out_dtype`。
+    边界一律**显式报错**，不静默算错。
+    """
+    if not _HAS_TRITON:
+        raise RuntimeError(
+            "fused dequant-GEMM 需要 triton（本机不可用：%s）。"
+            "separate 臂（QuantLinear 每次 forward 反量化）不需要 triton。"
+            % (_TRITON_IMPORT_ERROR or "unknown")
+        )
+    import torch  # noqa: PLC0415
+
+    cfg = _resolve_config(config)
+    if x.dim() != 2:
+        raise ValueError("x 必须是 (M, K) 二维，得到 %r" % (tuple(x.shape),))
+    if qweight.dim() != 2:
+        raise ValueError("qweight 必须是 (N, P) 二维，得到 %r" % (tuple(qweight.shape),))
+    if scale.dim() != 2:
+        raise ValueError("scale 必须是 (N, n_groups) 二维，得到 %r" % (tuple(scale.shape),))
+
+    M, K = int(x.shape[0]), int(x.shape[1])
+    N, packed_in = int(qweight.shape[0]), int(qweight.shape[1])
+    n_groups = int(scale.shape[1])
+    if int(scale.shape[0]) != N:
+        raise ValueError("scale 的行数 %d 与 qweight 的 %d 不一致" % (int(scale.shape[0]), N))
+    if bits is None:
+        bits = 4 if qweight.dtype == torch.uint8 else 8
+    bits = int(bits)
+    if bits not in (4, 8):
+        raise NotImplementedError("fused dequant-GEMM 只实现 4/8-bit，得到 %d" % bits)
+    padded_in = int(n_groups) * int(group_size)
+    expect_packed = padded_in if bits == 8 else padded_in // 2
+    if packed_in != expect_packed:
+        raise ValueError(
+            "qweight 的第二维 %d 与 n_groups*group_size(/bits) 推出的 %d 不一致"
+            % (packed_in, expect_packed)
+        )
+    if K > padded_in:
+        raise ValueError("K=%d 超过 padded_in=%d：x 比量化权重还宽" % (K, padded_in))
+    if not symmetric and zero is None:
+        raise ValueError("非对称量化必须给 zero")
+    if bits == 4 and int(group_size) % 2 != 0:
+        raise ValueError("4-bit 要求 group_size 为偶数，得到 %d" % int(group_size))
+    expected_q_dtype = torch.uint8 if bits == 4 else torch.int8
+    if qweight.dtype != expected_q_dtype:
+        raise ValueError(
+            "%d-bit 的 qweight 应是 %s，得到 %s（打包格式见 lemoq.quant.pack）"
+            % (bits, expected_q_dtype, qweight.dtype)
+        )
+    if x.dtype not in (torch.float16, torch.float32):
+        raise NotImplementedError("x 只支持 fp16/fp32，得到 %s" % x.dtype)
+    if out_dtype is None:
+        out_dtype = torch.float32
+    if out_dtype not in (torch.float32, torch.float16):
+        raise NotImplementedError("out_dtype 只支持 fp32/fp16，得到 %s" % out_dtype)
+
+    x_c = x.contiguous()
+    q_c = qweight.contiguous()
+    s_c = scale.contiguous()
+    z_arg = s_c if zero is None else zero.contiguous()
+
+    y = torch.empty((M, N), dtype=out_dtype, device=x.device)
+    grid = (triton.cdiv(N, cfg["BLOCK_N"]),)
+    _dequant_gemm_kernel[grid](
+        x_c,
+        q_c,
+        s_c,
+        z_arg,
+        y,
+        M,
+        N,
+        K,
+        padded_in,
+        x_c.stride(0),
+        x_c.stride(1),
+        q_c.stride(0),
+        q_c.stride(1),
+        s_c.stride(0),
+        s_c.stride(1),
+        z_arg.stride(0),
+        z_arg.stride(1),
+        y.stride(0),
+        y.stride(1),
+        GROUP_SIZE=int(group_size),
+        BITS=bits,
+        SYMMETRIC=bool(symmetric),
+        OUT_FP16=bool(out_dtype == torch.float16),
+        BLOCK_N=int(cfg["BLOCK_N"]),
+        BLOCK_K=int(cfg["BLOCK_K"]),
+        num_warps=int(cfg["num_warps"]),
+        num_stages=int(cfg["num_stages"]),
+    )
+    return y
+
+
+def warm(
+    x: Any,
+    qweight: Any,
+    scale: Any,
+    zero: Any = None,
+    **kwargs: Any,
+) -> None:
+    """JIT 编译一次并做一次真实 launch（capture 之前必须调用）。
+
+    ★ 首次编译时间**不得**计入稳态数字（`docs/METRICS.md` §2）——
+    `benchmarks.timing.record_compile_time` 就是为它准备的。
+    """
+    dequant_gemm_fused(x, qweight, scale, zero, **kwargs)
+
+
+if _HAS_TRITON:
+
+    @triton.jit
+    def _dequant_gemm_kernel(
+        x_ptr,  # (M, K)          fp16/fp32
+        q_ptr,  # (N, P)          int8 (BITS=8) / uint8 (BITS=4)
+        s_ptr,  # (N, n_groups)   scale
+        z_ptr,  # (N, n_groups)   zero（SYMMETRIC 时不读，传 s_ptr 占位）
+        y_ptr,  # (M, N)          输出
+        M,
+        N,
+        K,
+        PADDED_K,
+        stride_xm,
+        stride_xk,
+        stride_qn,
+        stride_qk,
+        stride_sn,
+        stride_sg,
+        stride_zn,
+        stride_zg,
+        stride_ym,
+        stride_yn,
+        GROUP_SIZE: tl.constexpr,
+        BITS: tl.constexpr,
+        SYMMETRIC: tl.constexpr,
+        OUT_FP16: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        """`y[m, n] = sum_k x[m, k] * dequant(q[n, k])`（per-group scale，沿 k）。
+
+        ★ 为什么不用 `tl.dot`：fp32 的 `tl.dot` 默认 tf32，分辨力低于 1e-3 的 K1 门。
+        M=1 时是访存受限，逐元素 fp32 乘加不会成为瓶颈（模块 docstring 有完整理由）。
+        """
+        pid_n = tl.program_id(0)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        mask_n = offs_n < N
+
+        for m in range(0, M):
+            acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
+            for k0 in range(0, PADDED_K, BLOCK_K):
+                ks = k0 + tl.arange(0, BLOCK_K)
+                mask_g = ks < PADDED_K  # padded 区域（codes 恒为 0）的边界
+                if BITS == 8:
+                    codes = tl.load(
+                        q_ptr + offs_n[:, None] * stride_qn + ks[None, :] * stride_qk,
+                        mask=mask_n[:, None] & mask_g[None, :],
+                        other=0,
+                    ).to(tl.float32)
+                else:
+                    # 低半字节在前：byte j -> code[2j]（低）、code[2j+1]（高）
+                    offs_j = tl.arange(0, BLOCK_K // 2)
+                    kb = k0 // 2 + offs_j
+                    mask_b = kb < (PADDED_K // 2)
+                    packed = tl.load(
+                        q_ptr + offs_n[:, None] * stride_qn + kb[None, :] * stride_qk,
+                        mask=mask_n[:, None] & mask_b[None, :],
+                        other=0,
+                    ).to(tl.int32)
+                    lo = packed & 0xF
+                    hi = (packed >> 4) & 0xF
+                    lo = tl.where(lo >= 8, lo - 16, lo)  # int4 符号扩展
+                    hi = tl.where(hi >= 8, hi - 16, hi)
+                    # join + reshape 按 (byte, which) 展平成 k 序：k = 2j + which
+                    codes = tl.reshape(tl.join(lo, hi), (BLOCK_N, BLOCK_K)).to(tl.float32)
+
+                g = ks // GROUP_SIZE
+                sc = tl.load(
+                    s_ptr + offs_n[:, None] * stride_sn + g[None, :] * stride_sg,
+                    mask=mask_n[:, None] & mask_g[None, :],
+                    other=0.0,
+                ).to(tl.float32)
+                if SYMMETRIC:
+                    w = codes * sc
+                else:
+                    zz = tl.load(
+                        z_ptr + offs_n[:, None] * stride_zn + g[None, :] * stride_zg,
+                        mask=mask_n[:, None] & mask_g[None, :],
+                        other=0.0,
+                    ).to(tl.float32)
+                    w = (codes - zz) * sc
+
+                # x 在 padded 区域是 0（掩码用未补齐的 K）—— 与 separate 臂的
+                # `_dequant_tile` 把权重尾部切成 [:, :in_features] 等价。
+                xv = tl.load(x_ptr + m * stride_xm + ks * stride_xk, mask=ks < K, other=0.0).to(
+                    tl.float32
+                )
+                acc += tl.sum(w * xv[None, :], axis=1)
+
+            if OUT_FP16:
+                tl.store(
+                    y_ptr + m * stride_ym + offs_n * stride_yn, acc.to(tl.float16), mask=mask_n
+                )
+            else:
+                tl.store(y_ptr + m * stride_ym + offs_n * stride_yn, acc, mask=mask_n)

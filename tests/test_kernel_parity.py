@@ -90,20 +90,77 @@ def test_tolerance_report_flags_mismatch():
 @pytest.mark.gpu
 @requires_cuda
 def test_triton_fused_gemm_matches_reference():
-    """TODO(phase-c): 实现 Triton fused dequant-GEMM 后取消 skip。
+    """★ `EXP-p2-01` 的 **K1 门**：真 Triton fused kernel vs separate 参考实现。
 
-    上机时的步骤：
-        1. 在 src/lemoq/kernels/ 落地 triton_dequant_gemm.py
-        2. 用与 `_case()` 相同的输入跑两侧
-        3. 断言 tolerance_report(...)["allclose_atol_1e-3"] 为 True
-        4. 同时记录 ncu 的 dram__throughput（见 lemoq.kernels.NCU_METRICS）
+    两侧吃**同一份**量化结果（packed codes + scale），所以差异只能来自"读取时解压"
+    的实现，不能来自量化本身。容差是 `moe_grouped.PARITY_GATE`（atol/rtol 1e-3，
+    slack 1.5）—— **不得为了通过而放宽**；放宽必须写明理由并进实验记录。
 
-    容差不得为了通过而放宽；放宽必须写明理由并记录在实验记录里。
+    ★ 部署口径：`QuantLinear` 按字节账把 scale 存成 **fp16**，所以主用例用 fp16 scale；
+      另有一组 fp32 scale 用来排除"scale 舍入"这一项（参考实现与 kernel 同 dtype）。
 
-    ★ 这是 `EXP-p2-01`（E2，dense 侧）的落点，**仍未实现**。P1（E7 的量化 expert 路径）
-    走的是下面那条 grouped 测试 —— 见 `EXP-p4b-01-truncation` 记录 §3。
+    覆盖：8-bit / 4-bit（nibble 寄存器展开是独立代码路径）、m=1（decode）与 m=4
+    （kernel 的 M 行循环）、k 不被 group_size 整除（尾部补零由 padded_in 的 stride 表达）。
     """
-    pytest.skip("Triton kernel 尚未实现（按计划留到有 GPU 时写）")
+    import torch
+
+    from lemoq.kernels._dequant_triton import dequant_gemm_fused
+    from lemoq.kernels.moe_grouped import PARITY_GATE
+    from lemoq.quant import pack as qpack
+
+    def _one(m, k, n, bits, group_size, *, scale_dtype=torch.float16, seed=0):
+        torch.manual_seed(seed)
+        x = torch.randn(m, k, device="cuda", dtype=torch.float16) * 0.5
+        w = torch.randn(n, k, device="cuda", dtype=torch.float32) * 0.05
+        q = qrtn.quantize_rtn(w, bits=bits, group_size=group_size)
+        codes, capped = q["codes"], q["codes_padded"]
+        scale, zero = q["scale"].to(scale_dtype), q["zero"].to(scale_dtype)
+        # 打包：与 `QuantLinear` 完全同一条路径（8-bit 直接 int8；4-bit 两个一组进 uint8）
+        packed = capped.to(torch.int8) if bits == 8 else qpack.pack_4bit(capped)
+        sym = bool(q["symmetric"])
+        ref = dequant_gemm_separate_reference(
+            x, codes, scale, zero, group_size=group_size, out_dtype=torch.float32
+        )
+        got = dequant_gemm_fused(
+            x,
+            packed,
+            scale,
+            None if sym else zero,
+            group_size=group_size,
+            bits=bits,
+            symmetric=sym,
+            out_dtype=torch.float32,
+        )
+        rep = tolerance_report(ref, got)
+        assert rep["allclose_atol_1e-3"], {
+            "case": (m, k, n, bits, group_size, str(scale_dtype)),
+            "report": rep,
+            "gate": PARITY_GATE,
+        }
+        # 打包必须无损（否则上面比较的是两组不同的数）：解包回来后逐位等于 padded codes
+        if bits == 4:
+            back = qpack.unpack_4bit(packed, signed=True).to(torch.int32)
+            back = torch.where(back < 0, back + 16, back)
+            assert torch.equal(back, capped)
+        else:
+            assert torch.equal(packed.to(torch.int32), capped)
+        return rep
+
+    # decode 的最常见形状：m=1、k=2048、n=2048（OLMoE 的 q_proj），g=128
+    _one(1, 2048, 2048, 8, 128)
+    _one(1, 2048, 2048, 4, 128)
+    # m>1：kernel 的 M 行循环（生产路径不用 M>1，但 K1 要交叉验证）
+    _one(4, 256, 512, 8, 128)
+    _one(4, 256, 512, 4, 128)
+    # fp32 scale：与参考实现完全同 dtype，排除 scale 舍入
+    _one(1, 512, 256, 8, 128, scale_dtype=torch.float32)
+    # k 不被 group_size 整除：参考实现补零，kernel 用 padded_in 的 stride 表达同一件事
+    _one(1, 500, 256, 8, 128)
+    _one(1, 500, 256, 4, 128)
+    # 非对称（有 zero）不在 K1 里测：部署路径（QuantLinear + SchemeSpec）只用对称量化
+    # （`symmetric=True` 是默认），而非对称 code 的按位存储在大位宽下另有约定。
+    # 另一个 group_size：只验证 stride 算术（门的配置是 g=128，部署路径只用 128）
+    _one(1, 1024, 512, 8, 64)
 
 
 @pytest.mark.gpu

@@ -58,13 +58,18 @@ except Exception as exc:  # noqa: BLE001
     ) from exc
 
 __all__ = [
+    "DEQUANT_MODES",
     "QuantLinear",
     "SchemeSpec",
     "TARGET_RULES",
     "classify_linear",
+    "dequant_activity",
     "parse_scheme",
     "quantize_model",
     "realized_bytes",
+    "reset_dequant_counters",
+    "set_dequant_mode",
+    "supported_dequant_modes",
 ]
 
 
@@ -91,6 +96,46 @@ def parse_scheme(name: str) -> tuple[int | None, int | None]:
     return _SCHEMES[key]
 
 
+# `EXP-p2-01`（E2）的 dequant 轴。两个模式**数学结果相同**，差别只在是否物化 fp16 权重：
+#
+#     separate  每次 forward 把 packed 反量化成 fp16 权重（写+读一遍 [out,in]）
+#     fused     decode 的单 token GEMV 直接吃 packed，反量化在 kernel 内
+#
+# ★ 只对 **decode 单 token** 生效：prefill / 多 token 退回 separate 并**计数**
+#   （见 `QuantLinear.forward`）。不计数的话，"fused 臂没赢"会被误读成
+#   "融合没有收益"，而真实原因是那一格根本没跑到 kernel。
+DEQUANT_MODES: tuple[str, ...] = ("separate", "fused")
+
+
+def supported_dequant_modes(model: Any) -> tuple[str, ...]:
+    """这个模型上 fused 臂现在能不能用 —— 不可用时只返回 `("separate",)`。
+
+    ★ 这是 runner 的"两臂同进程交错"要问的第一个问题：一台没有 triton / 没有 CUDA
+    的机器上（Mac）只能跑 separate 臂。
+    """
+    fused = False
+    for module in model.modules():
+        if isinstance(module, QuantLinear):
+            fused = module.fused_available
+            break
+    return ("separate", "fused") if fused else ("separate",)
+
+
+def _fused_backend() -> tuple[Any, str | None]:
+    """fused 臂的 kernel 模块；不可用时返回 `(None, 原因)`。**不抛异常**。
+
+    `lemoq.kernels._dequant_triton` 在 Mac 上可以 import，只是 `fused_available()`
+    为 False —— 所以"没有 kernel 就退回 separate"这条路径离线可测。
+    """
+    try:
+        from lemoq.kernels import _dequant_triton as kernel  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        return None, "kernel_import_failed(%s)" % type(exc).__name__
+    if not kernel.fused_available():
+        return None, "kernel_unavailable(%s)" % (kernel.unavailable_reason() or "unknown")
+    return kernel, None
+
+
 @dataclass(frozen=True)
 class SchemeSpec:
     """一个实验臂的完整量化配置。"""
@@ -103,6 +148,16 @@ class SchemeSpec:
     keep_lm_head_fp16: bool = True
     symmetric: bool = True
     scheme: str = "rtn"
+    # `EXP-p2-01` 的 dequant 轴。`"fused"` 只在 decode 单 token 上兑现（kernel），
+    # 其余情况退回 separate 并计数 —— 见 `QuantLinear.forward`。
+    dequant: str = "separate"
+
+    def __post_init__(self) -> None:
+        if str(self.dequant) not in DEQUANT_MODES:
+            raise ValueError(
+                "未知 dequant 模式 %r；已实现：%s（EXP-p2-01 的轴）"
+                % (self.dequant, list(DEQUANT_MODES))
+            )
 
     @classmethod
     def from_flags(
@@ -112,6 +167,7 @@ class SchemeSpec:
         *,
         targets: tuple[str, ...] | None = None,
         keep_lm_head_fp16: bool = True,
+        dequant: str = "separate",
     ) -> "SchemeSpec":
         bits, act = parse_scheme(name)
         return cls(
@@ -121,6 +177,7 @@ class SchemeSpec:
             group_size=group_size,
             targets=targets or ("attention", "experts", "router"),
             keep_lm_head_fp16=keep_lm_head_fp16,
+            dequant=str(dequant),
         )
 
     @property
@@ -137,6 +194,7 @@ class SchemeSpec:
             "keep_lm_head_fp16": self.keep_lm_head_fp16,
             "symmetric": self.symmetric,
             "rtn_scheme": self.scheme,
+            "dequant": self.dequant,
             "activation_quantization": (
                 "fake-quant（quantize 后立刻 dequantize）：只测数值影响，不是 int8 GEMM"
                 if self.act_bits is not None
@@ -250,6 +308,17 @@ class QuantLinear(nn.Module):
         self.padded_in = int(q.meta["padded_in"])
         self.n_groups = int(q.meta["n_groups"])
 
+        # ---------- EXP-p2-01 的 dequant 轴 ----------
+        # `dequant_mode` 是**可切换**的运行期状态（不是 buffer、不进 state_dict）：
+        # runner 的"两臂同进程交错"靠它在一个进程里 round-robin（见 set_dequant_mode）。
+        self.dequant_mode = str(spec.dequant)
+        self._kernel_cache: Any = None
+        self._kernel_checked = False
+        self._kernel_reason: str | None = None
+        # ★ 计数器是**证据**，不是装饰：没有它，"fused 臂没赢"会被误读成"融合无收益"，
+        #   而真实原因可能是这一格全部退回了 separate（Mac、prefill、多 token）。
+        self._counters: dict[str, Any] = {"separate_calls": 0, "fused_calls": 0, "fallbacks": {}}
+
     # ---------- 反量化（separate 臂的核心动作） ----------
     def dequantized_weight(self, dtype: Any = None) -> Any:
         """还原成 (out, in) 的浮点权重。**每次 forward 都会调用它** —— 那就是 separate 臂。
@@ -292,8 +361,70 @@ class QuantLinear(nn.Module):
         q = (xf / scale).round().clamp(-qmax - 1, qmax)
         return (q * scale).to(dt)
 
+    # ---------- fused 臂（EXP-p2-01 / E2） ----------
+    @property
+    def fused_available(self) -> bool:
+        """这台机器上 fused 臂能不能用（Mac 上 False）。查询不抛异常、不改变状态。"""
+        return _fused_backend()[0] is not None
+
+    def _fused_fallback_reason(self, x: Any) -> str | None:
+        """fused **不能**走的前提下，退回 separate 的**可读原因**（能走时 None）。
+
+        ★ 这里的每一条都是"host 侧静态可判定"的：不做任何数值判断，
+          所以同一格同一相位的分派是确定的 —— 这是 CUDA Graph capture 的前提。
+        """
+        if self.dequant_mode != "fused":
+            return "mode_is_separate"
+        if not x.is_cuda:
+            return "not_cuda"
+        if x.dtype not in (torch.float16, torch.float32):
+            return "dtype_unsupported(%s)" % str(x.dtype).replace("torch.", "")
+        if int(self.weight_bits) not in (4, 8):
+            return "bits_unsupported(%d)" % int(self.weight_bits)
+        if x.shape[-1] != self.in_features:
+            return "input_width_mismatch(%d!=%d)" % (int(x.shape[-1]), self.in_features)
+        # decode 的单 token 才走 kernel；prefill / 多 token 退回 separate（并计数）
+        if int(x.numel() // max(self.in_features, 1)) != 1:
+            return "multi_token"
+        if not self._kernel_checked:
+            self._kernel_cache, self._kernel_reason = _fused_backend()
+            self._kernel_checked = True
+        if self._kernel_cache is None:
+            return self._kernel_reason or "kernel_unavailable"
+        return None
+
+    def _fused_forward(self, x: Any) -> Any:
+        """dequant="fused" 时的前进路径；不可用返回 None（由 forward 退回 separate）。"""
+        reason = self._fused_fallback_reason(x)
+        if reason is not None:
+            fallbacks = self._counters["fallbacks"]
+            fallbacks[reason] = fallbacks.get(reason, 0) + 1
+            return None
+        kernel = self._kernel_cache
+        flat = x.reshape(-1, self.in_features)
+        y = kernel.dequant_gemm_fused(
+            flat if flat.is_contiguous() else flat.contiguous(),
+            self.packed,
+            self.scale,
+            self.zero,
+            group_size=self.group_size,
+            bits=int(self.weight_bits),
+            symmetric=bool(self.spec.symmetric),
+            out_dtype=x.dtype,
+        )
+        y = y.reshape(*x.shape[:-1], self.out_features)
+        if self.bias is not None:
+            y = y + self.bias.to(y.dtype)
+        return y
+
     def forward(self, x: Any) -> Any:
         xq = self._fake_quant_activation(x)
+        if self.dequant_mode == "fused":
+            fused = self._fused_forward(xq)
+            if fused is not None:
+                self._counters["fused_calls"] += 1
+                return fused
+        self._counters["separate_calls"] += 1
         w = self.dequantized_weight(dtype=xq.dtype)
         return F.linear(xq, w, self.bias.to(xq.dtype) if self.bias is not None else None)
 
@@ -341,6 +472,69 @@ def realized_bytes(module: Any) -> dict[str, int]:
         "zero_bytes": zero,
         "bias_bytes": bias,
         "total_bytes": packed + scale + zero + bias,
+    }
+
+
+def set_dequant_mode(model: Any, mode: str) -> int:
+    """把模型里**所有** `QuantLinear` 切到 `mode`，返回被切换的模块数。
+
+    ★ `EXP-p2-01` 的 K3.1 要求 `separate` 与 `fused` **同进程、交错**测。
+      一个模型同时持有 packed 权重和 fp16 权重（后者只在 separate 的 forward 里临时出现），
+      所以两条臂可以在**同一个模型实例**上 round-robin —— 不需要加载两份权重，
+      也不需要两次量化。切换只改一个 Python 属性，不改变任何张量。
+    """
+    key = str(mode)
+    if key not in DEQUANT_MODES:
+        raise ValueError("未知 dequant 模式 %r；可用：%s" % (mode, list(DEQUANT_MODES)))
+    switched = 0
+    for module in model.modules():
+        if isinstance(module, QuantLinear):
+            module.dequant_mode = key
+            switched += 1
+    return switched
+
+
+def reset_dequant_counters(model: Any) -> int:
+    """清零所有 `QuantLinear` 的分派计数器（计时前调用，让证据只描述这一相位）。"""
+    n = 0
+    for module in model.modules():
+        if isinstance(module, QuantLinear):
+            module._counters = {"separate_calls": 0, "fused_calls": 0, "fallbacks": {}}
+            n += 1
+    return n
+
+
+def dequant_activity(model: Any) -> dict[str, Any]:
+    """汇总这张模型上**真实发生过**的反量化分派 —— E2 的证据字段。
+
+    没有这一段，"fused 没赢"就无法与"fused 根本没跑"区分开：
+    `fused_calls == 0` 而 `fallbacks` 非空，说明这一格退回的是 separate。
+    """
+    modes: dict[str, int] = {}
+    separate_calls = 0
+    fused_calls = 0
+    fallbacks: dict[str, int] = {}
+    n_modules = 0
+    for module in model.modules():
+        if not isinstance(module, QuantLinear):
+            continue
+        n_modules += 1
+        modes[module.dequant_mode] = modes.get(module.dequant_mode, 0) + 1
+        counters = module._counters
+        separate_calls += int(counters["separate_calls"])
+        fused_calls += int(counters["fused_calls"])
+        for reason, count in counters["fallbacks"].items():
+            fallbacks[reason] = fallbacks.get(reason, 0) + int(count)
+    return {
+        "n_quant_linear": n_modules,
+        "modes": modes,
+        "separate_calls": separate_calls,
+        "fused_calls": fused_calls,
+        "fallbacks": fallbacks,
+        "note": (
+            "分派计数（真实调用次数）。fused_calls==0 而 fallbacks 非空 = 这一相位退回 separate；"
+            "prefill/多 token 必然计入 fallbacks（fused 只在 decode 单 token 兑现）。"
+        ),
     }
 
 
