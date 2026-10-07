@@ -242,8 +242,10 @@ def main(argv: list[str] | None = None) -> int:
         "quantized_moe_kernels_present": (
             any("_gate_up_act_kernel_q" in n for n in names) if quantized else True
         ),
+        # ★ 用**精确名**比较：`_gate_up_act_kernel_q` 也以 `_gate_up_act_kernel` 开头，
+        #   前缀匹配会误报（第一版就是这样，self-check 自己抓到了自己）。
         "fp16_moe_kernel_absent_in_quantized_run": (
-            not any(n.startswith("_gate_up_act_kernel") for n in names) if quantized else True
+            "_gate_up_act_kernel" not in names if quantized else True
         ),
     }
     if not all(checks.values()):
