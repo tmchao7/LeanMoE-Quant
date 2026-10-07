@@ -224,12 +224,19 @@ def main(argv: list[str] | None = None) -> int:
         from torch.profiler import ProfilerActivity, profile  # noqa: PLC0415
 
         profiled: dict[str, Any] = {}
+        # ★ 主循环已经推进了 `rounds` 步；StaticCache 容量只有 ctx+max_new_tokens=1056 ⇒
+        #   额外再放 3+rounds 步会直接 "decode position exceeded StaticCache capacity"（实测撞上）。
+        #   所以 profile 前先 reset+prefill，并且只profile min(rounds, 10) 步。
+        steps_prof = min(args.rounds, 10)
         for name, sess in sessions.items():
+            sess.reset()
+            sess.prefill()
+            torch.cuda.synchronize()
             for _ in range(3):
                 sess.replay()
             torch.cuda.synchronize()
             with profile(activities=[ProfilerActivity.CUDA]) as prof:
-                for _ in range(args.rounds):
+                for _ in range(steps_prof):
                     sess.replay()
                 torch.cuda.synchronize()
             rows = []
@@ -240,8 +247,8 @@ def main(argv: list[str] | None = None) -> int:
                 rows.append(
                     {
                         "name": e.key,
-                        "ms_per_step": tot / args.rounds / 1000.0,
-                        "count_per_step": e.count / float(args.rounds),
+                        "ms_per_step": tot / steps_prof / 1000.0,
+                        "count_per_step": e.count / float(steps_prof),
                     }
                 )
             rows.sort(key=lambda r: -r["ms_per_step"])
