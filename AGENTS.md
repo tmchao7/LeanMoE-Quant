@@ -9,14 +9,19 @@ settled — do not re-derive them and do not re-run their cells:
 
 - **E2 (`EXP-p2-01`) — `refuted`.** Fusing the dequant into the GEMV is *not* the 1.3–2× the
   matrix predicted: in the pre-registered eager cells the fused arm is **5% slower** than the
-  separate arm (ratio 1.0507, |Δ| ≫ MAD), because that path is host/launch-bound (`host_share`
-  71.7%, ~19k kernels/step). Isolated, the fused kernel is 1.21× cheaper per call — the kernel
-  win is real, the per-call Python/launch cost eats it.
+  separate arm, because that path is host/launch-bound (`host_share` 71.7%, ~19k kernels/step).
+  Isolated, the fused kernel is 1.21× cheaper per call — the kernel win is real, Python/launch eats it.
 - **E7 (`EXP-p4b-01`) — judged.** The truncation is real and **only the fused arm cashes it in**:
   the same `w8a16` config goes `speedup_eager` **0.76 → speedup_cudagraph 1.11** (ctx=1024;
-  0.79 → 1.05 at ctx=4096) while `host_share` drops 77.5% → 1.2%. The ceiling is measured, not
-  guessed: the weight stream is only 42% (ctx=1024) / 23% (ctx=4096) of a graph step, so even a
-  perfect weight path could not exceed ~1.74× / ~1.30×.
+  0.79 → 1.05 at 4096) while `host_share` drops 77.5% → 1.2%. The ceiling is measured: the weight
+  stream is only 42% (1024) / 23% (4096) of a graph step ⇒ even a perfect weight path ≤ ~1.74× / ~1.30×.
+
+- **`EXP-p4c-01` — supported (the other big non-weight block was the *attention implementation*).**
+  Swapping HF sdpa for this repo's split-KV core inside the captured graph cuts the step by
+  1.36–2.44× and **raises the quantized speedup**: 1.109 → **1.153** (ctx=1024) and 1.053 → **1.131**
+  (ctx=4096). Best cell `w8a16 × kernel` = **1.57× / 2.57×** vs the fp16 × sdpa baseline.
+  Mechanism: the removed attention cost is **bit-width-independent** (@4096 both arms save ~4.1 ms),
+  i.e. a constant that helps the smaller (quantized) total relatively more.
 
 Read, in this order: **`configs/experiments.yaml`** (the only source of hypotheses and cells),
 the **record** of the experiment you are about to touch (`experiments/<EXP-ID>.md`), then
@@ -84,19 +89,20 @@ in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`
 | Grouped MoE GEMV (fp16) | done | `experiments/EXP-p2-02-moe-grouped-gemm.md` |
 | E2 dequant fusion, 6 cells, 8-bit **and** 4-bit | done — **`refuted`** | `experiments/EXP-p2-01-dequant-fusion.md` |
 | P3 wiring + E7, 16/16 cells | done — **judged** | `experiments/EXP-p4b-01-truncation.md` |
+| In-graph attention × quantization, 8 cells | done — **supported** (1.57× / 2.57× combined) | `experiments/EXP-p4c-01-in-graph-attention.md` |
 | E4 routing overhead (`EXP-p4-01`) | **not run** — the only unrun item of the plan's `minimal_credible` scope | `configs/experiments.yaml`, `PLAN.md` §5/§7 |
 | E5 expert sensitivity, E6 KV INT8, E8 cross-bandwidth, FP8/MXFP4, dense curves, batch sweep | **not run** | `configs/experiments.yaml`, `PLAN.md` §7 |
 | ncu evidence (a Phase 2 deliverable) | **not done** | `PLAN.md` §5 |
 
-**Do not redo** (executed and recorded): P0 / P1 gate / P2 / P3 wiring; the dense fused dequant
-kernel; the grouped quant expert kernel (8-bit **and** 4-bit); the split-KV attention kernel; the
-E2 verdict; the E7 verdict; p4b's 16 cells and p2-01's 6 cells. If a rerun is genuinely needed,
-justify it in the record and archive the old artifacts (§2 rule 9).
+**Do not redo** (recorded): P0 / P1 gate / P2 / P3 wiring; the dense fused dequant kernel; the
+grouped quant expert kernel (8- and 4-bit); the split-KV attention kernel; the E2, E7 and p4c-01
+verdicts; p4b's 16, p2-01's 6 and p4c-01's 8 cells. A rerun needs a justification in the record
+plus archiving (§2 rule 9).
 
-**Known artifact-id wrinkle**: the older precision experiments stored their artifacts under the
-*base* id (e.g. `results/EXP-p1-04-prompt-set-gate/probe_prompt_set*.json`), while the matrix
-expands them to `...__ctx=1024` skeletons that still read `planned`. A `planned` skeleton is
-**not** evidence that the science was not done — read the record first.
+**Known artifact-id wrinkle**: older precision experiments stored their artifacts under the *base*
+id (e.g. `results/EXP-p1-04-prompt-set-gate/probe_prompt_set*.json`) while the matrix expands them
+to `...__ctx=1024` skeletons that still read `planned`. A `planned` skeleton is **not** evidence
+that the science was not done — read the record first.
 
 ## 4. Queue (ordered; hypotheses stay in `configs/experiments.yaml`)
 
@@ -104,17 +110,15 @@ expands them to `...__ctx=1024` skeletons that still read `planned`. A `planned`
 | --- | --- | --- | --- | --- |
 | P0 | ✅ **done 2026-10-07** (see §5): README status, `PLAN.md` pointer, p4b `Status`, p1-02/03/04 artifact notes, `constraints.txt` freeze | those files contradicted the records | four gates green, both machines on one commit | no |
 | P1 | `EXP-p4-01` — **E4 routing overhead** (`routing_share`, `per_token_p50`) | the plan's `minimal_credible` scope has exactly one unrun item, and E4 is one of its two "differentiation cores" | `result.json` + record giving the routing/pack share for fp16 and quantized, eager and cudagraph; if the share is **<5%**, write the matrix's `refutation_signal` ("ceiling hypothesis does not hold") | no |
-| P2 | Make the headline **bigger**: attention kernel in the graph, elementwise/copy fusion | E7's attribution says the unremovable 55% is `fmha` 33–65% + elementwise 12–23% — the only action that can move 1.11× | the two-graph interleaved A/B (`tools/bench_attn_in_graph.py`) per cell + a record | **YES — no such experiment exists and there is no `attn` axis**: pick (a) a new `EXP-` id or (b) an `attn` axis on p4b (changes recorded cell ids). Do not start before that call |
+| P2 | ✅ **done 2026-10-07**: in-graph attention → speedup 1.11 → **1.15** (1024) / 1.05 → **1.13** (4096); best cell **1.57× / 2.57×** vs fp16 × sdpa | the user approved a new id (`EXP-p4c-01`), see §3 | `experiments/EXP-p4c-01-in-graph-attention.md` | no |
+| P2b | **The next bottleneck is the elementwise/copy tail** (~35% of the step, ~330 tiny kernels); runner-up: the 64 `_dequant_gemm_kernel` projection launches (~5.4 µs of launch overhead each) | §5.4 of `EXP-p4c-01` measured it after the attention swap | a record with the tail classified by source (residual adds / RMSNorm casts / routing index writes / `direct_copy`) + a fusion decision | **YES — no matrix entry exists** for either; ask before adding an `EXP-` id (or an axis) |
 | P3 | Breadth: E5 (`EXP-p4-02`), E6 (`EXP-p5-01`), E8 (`EXP-p8-01`, needs the V100), E1's group axis under the corrected prompt set, dense curves, batch sweep (E3 — today it has **no** experiment), FP8/MXFP4 (`EXP-p3-01/02`), repairing the W4A16 gate | each closes a declared hypothesis or lever; several need a matrix entry that does not exist | per matrix entry; E8 only after the same protocol passes on the V100 | partial: new matrix entries need approval |
 | P4 | Publication: ncu evidence, E7 charts, final README/PLAN pass | closes Phase 2's last deliverable and Phase 7 | ncu metrics per `lemoq.kernels.NCU_METRICS`; charts regenerated from `result.json` | no |
 
-## 5. Wrap-up (docs/config only — **done 2026-10-07**, nothing outstanding)
+## 5. Wrap-up (docs/config only — **done 2026-10-07**)
 
-README status block rewritten · `PLAN.md` got a pointer (its hypotheses stay frozen) · p4b
-`Status` → `done` · p1-02/03/04 note that their artifacts live under the base id (the `__ctx=`
-skeletons are placeholders) · `configs/constraints.txt` frozen from a read-only server
-`uv pip freeze` (`frozen: 2026-10-07`, torch corrected to the measured `2.8.0`) · this file ≤ ~230
-lines (rationale belongs in the records). Any *new* wrap-up item goes in §4, not here.
+README status, `PLAN.md` pointer, p4b `Status`, the p1-02/03/04 artifact-id notes and the
+`constraints.txt` freeze all landed; details in git log. Any *new* wrap-up item goes in §4.
 
 ## 6. Guardrails
 
@@ -137,10 +141,9 @@ lines (rationale belongs in the records). Any *new* wrap-up item goes in §4, no
 
 ### Shared card protocol (this box is shared)
 
-- check `nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader` before timing;
-- a foreign process is **recorded, never killed** — wait for it to exit and re-run the round;
-- **canary**: run the same cell first and last in a round; >5% drift ⇒ the whole round is `VOID`
-  (keep the occupancy log, publish nothing);
+- check `nvidia-smi --query-compute-apps=…` before timing; a foreign process is **recorded, never
+  killed** — wait for it to exit and re-run the round;
+- **canary**: same cell first and last; >5% drift ⇒ the whole round is `VOID` (keep the log, publish nothing);
 - **cudagraph cells need their own canary**: an `eager` canary is *not* sensitive to a co-tenant
   (measured: it drifted 1.16% while three graph cells in the same round were ruined — one OOM, one
   3× outlier). Add a same-cell graph canary plus a payload self-check: a graph cell with
