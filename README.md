@@ -2,10 +2,20 @@
 
 > **batch=1 单流 MoE 解码：字节预算（byte budget）驱动的量化与 kernel 优化**
 
-状态：**Phase 0：环境与基线已完成；fp16 CUDA Graph feasibility gate 已在本地实现，
-待 RTX 5090 上做真实 capture/replay 验证**。
-仓库已经包含 RTX 5090 上的 Gate-0 与 fp16 eager 基线记录；CUDA Graph、量化和 kernel
-优化仍以 `planned` / `target` / `to be evaluated` 标注，绝不把本机 Mac 测试当成 GPU 实测。
+状态（2026-10-07）：**阶段 0 / 1（精度门）/ 2（kernel）/ 4b（E7）已执行**，两条头号结论已定：
+
+- **E2 被否证**：融合反量化不是矩阵预期的 1.3–2×——在预注册的 eager 格里它反而比独立 kernel
+  **慢 5%**（`host_share` 71.7%、~19k kernel/步，那条路径是 host/launch 受限的）；
+- **E7 已判定**：截断效应成立，但**只有融合臂兑现**——同一个 `w8a16` **fused** 实现
+  `speedup_eager` 0.76 → `speedup_cudagraph` **1.11**（ctx=1024；4096 是 0.79 → 1.05），
+  `host_share` 77.5% → 1.2%。天花板是**实测**出来的：权重只占 graph 步的 42% / 23%，
+  完美权重路径的上限也只有 ~1.74× / ~1.30×。
+
+进度、工件与"还没做什么"见 [AGENTS.md](AGENTS.md) 的 §0/§3；权威记录是
+`experiments/<EXP-ID>.md`。**未做**：E4 路由开销、E5 专家敏感度、E6 KV INT8、E8 跨带宽（V100）、
+FP8/MXFP4、dense 曲线、batch 扫描、ncu 证据。
+
+绝不把本机 Mac 的测试当成 GPU 实测；`results/` 是机器本地工件（gitignored），不进 git。
 
 ---
 
@@ -22,6 +32,7 @@
 3. MoE 上存在量化收益上限：专家权重字节可降到 1/4，但**路由与打包开销不随量化下降**；
 4. **量化对 token 延迟的收益被 host/launch 开销截断**——字节降到 1/4 不等于 token 快 4 倍，
    除非同时消除 launch 开销（CUDA Graph）。
+   > 这四条现在各走到哪一步（哪条已答、哪条未答），见 [AGENTS.md](AGENTS.md) §0/§3。
 
 完整计划见 **[PLAN.md](PLAN.md)**（立项理由、硬件、阶段划分、实验矩阵、风险）。
 

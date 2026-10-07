@@ -14,6 +14,10 @@
 - **Operator**: `tools/quant_probe.py`（`--prompt-windows 5 --include-ones-control`）
 - **Status**: `done`
 - **原始数据**：`results/EXP-p1-04-prompt-set-gate/probe_prompt_set.json`（12 臂 × 6 窗口 = 72 次测量）
+  - ★ **工件在 base id 下**：矩阵把本实验展开成 `results/EXP-p1-04-prompt-set-gate__ctx=1024/`
+    与 `...__ctx=4096/` 两个骨架，它们是 harness 的占位（永远读 `planned`）。真正的工件是
+    `probe_prompt_set.json`（ctx=1024）与 `probe_prompt_set_ctx4096.json`（ctx=4096）——
+    `tests/test_runner_cells.py` 读的正是这两个路径，**不要移动/改名**。
 - **对照**: `EXP-p1-01`（被重测的 9 格）、`EXP-p1-03`（发现 prompt 口径问题）、
   `tools/quant_ppl.py`（PPL/PPL 配对差，独立指标）
 

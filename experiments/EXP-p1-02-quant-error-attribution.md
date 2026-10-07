@@ -16,6 +16,9 @@
   - `probe_perproj_w4.json` —— 逐投影 W4 RTN（4 臂）
   - `weight_audit_layer0_all.json` —— 197 个真实张量的权重域审计
   - `/tmp/probe_noise_check.json`（服务器）—— 噪声族自检
+  - ★ **工件在 base id 下**：矩阵把本实验展开成 `results/EXP-p1-02-quant-error-attribution__ctx=1024/`，那份骨架是
+    harness 的占位（永远读 `planned`）。判定"跑没跑"看本记录的"结果"节与上面这些文件名，
+    不要看骨架。
 - **对照**: `EXP-p1-01-w8-w4-accuracy`（被解释的对象）；`EXP-p2-05`（同一套"自检 + 交错"的方法论）
 
 ## Hypothesis（跑之前写）

@@ -1,42 +1,57 @@
 # configs/constraints.txt — 冻结的精确版本
 #
-# ★ 状态：**预置值，尚未在服务器上验证**。
-#   首次在 GPU 机器上 bootstrap 成功、且 pytest 全绿之后，
-#   用 `uv pip freeze` 的结果覆盖本文件，并把日期记在下面。
+# ★ 状态：**已在服务器上验证冻结（2026-10-07）**。
+#   触发条件（见下"更新纪律"）：Gate-0 探针 ✅、`pytest -m "not gpu"` 全绿 ✅、
+#   一轮 16 格量化实验（EXP-p4b-01）跑完且 schema 校验 0 问题 ✅。
+#   数据来源：服务器上**只读**执行
+#       uv pip freeze --python /root/miniconda3/bin/python
 #
 # 更新纪律：
 #   1. 只在"完整跑通一次 Gate-0 + 测试"之后才改本文件；
 #   2. 每次改都更新下面的 # frozen: 日期与机器；
-#   3. 不要在这里写 CUDA 索引（那是 env.env 的 TORCH_CUDA_INDEX 的事）。
+#   3. 不要在这里写 CUDA 索引（那是 env.env 的 TORCH_CUDA_INDEX 的事）；
+#   4. ★ 不要把镜像本地的脏值抄进来（`freeze` 会输出
+#      `packaging @ file:///croot/...` 这类路径 —— 换个机器就是死值）。
 #
-# frozen: (未冻结 —— 待服务器首次验证)
+# frozen: 2026-10-07 · RTX 5090 32GB (AutoDL, Ubuntu + "PyTorch 2.8.0/12.8" 镜像)
+#         驱动 595.71.05 · python 3.12.3 (/root/miniconda3/bin/python)
+#         实测读带宽 1561.9 GB/s · sm_120 / 170 SM
 
-# --- 核心 ---
+# --- 核心（= 2026-10-07 服务器实测值，不是索引上的最新值）---
 # ★ torch 版本必须与**镜像里的 CUDA toolkit** 一致（cpp_extension / 自写 kernel 要用它的 nvcc）。
-#   各索引可用版本不同：cu126→2.14.0 / cu128→2.11.0 / cu129→2.13.0 / cu130→2.14.0 / cu132→2.14.0
-#   下面这行对应 CUDA 12.8 的镜像（AutoDL 的 "PyTorch 2.8.0/12.8"）。
-#   若直接使用镜像自带的 torch（bootstrap.sh --no-torch），把这一行改成实际版本。
-torch==2.11.0
+#   ★ 各索引上的"最新"不是 pin 的依据：本机镜像的 cuda 12.8 实际装的是 `2.8.0+cu128`
+#   （pyproject 里 `torch>=2.7`，不是 2.11.0 —— 之前那行是当时的预置值，已按实测更正）。
+#   一律以 `python -c "import torch; print(torch.__version__)"` 为准。
+torch==2.8.0
 transformers==4.57.6
-numpy
-safetensors
-pyyaml
+numpy==2.3.2
+safetensors==0.8.0
+pyyaml==6.0.2
+# triton 仍然**不 pin**（交给 torch 的依赖解析，理由见文末；实测 3.4.0）。
+# ★ 下面两个是**成对约束**，不要拆开装（`tools/quant_ppl.py` 需要 datasets）：
+#       datasets==3.6.0 + huggingface-hub==0.36.2
+#   历史事故：`pip install datasets` 会默认拉 `datasets 5.1.0` + `huggingface-hub 2.1.1`，
+#   而 `transformers 4.57.6` 要求 `hub<1.0` → **transformers 直接 import 失败**。
+#   它们不进下面的安装列表（bootstrap 不必为了一条 PPL 命令多装 pyarrow/pandas）；
+#   真要用 PPL 时按上面这两个版本装，装完逐项核对 torch/transformers 未被改动。
 
 # --- 开发 ---
 # ★ ninja 是 torch.utils.cpp_extension 的**硬依赖**（没有它会报
 #   "Ninja is required to load C++ extensions"）。Gate-0 的编译探针与后续自写
 #   CUDA kernel 都依赖它，所以它不是可选项。
-ninja
-pytest
-pytest-cov
-black>=22.0
-ruff>=0.11.0
-mypy
+ninja                    # 实测 1.13.2（缺失会报 "Ninja is required to load C++ extensions"）
+pytest                   # 实测 9.1.1
+pytest-cov               # 实测 7.1.0
+black>=22.0              # 实测 26.5.1
+ruff>=0.11.0             # 实测 0.16.8
+mypy                     # 实测 2.3.1
 
 # --- 说明 ---
 # triton：**不显式 pin**，交给 torch 的依赖解析。
 #   理由：Triton 自带 ptxas，不需要系统 CUDA toolkit；版本必须与 torch 匹配。
-#   实际版本记录在 results/env-<date>.md。
+#   ★ 本文件头部的 `frozen:` 行 + 上面各包的 `# 实测` 注释就是"实际版本"的权威记录
+#     （`results/` 是机器本地工件、会被清掉，不能当唯一出处）；每个 result.json 的
+#     `runtime` 段也会写下当轮的 torch/triton/驱动版本。
 #
 # vllm / bitsandbytes / torchao：**不进主依赖**。
 #   它们是可选对照臂（PLAN.md §4 的 L3/L4/L5），主矩阵

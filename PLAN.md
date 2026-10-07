@@ -4,6 +4,9 @@
 >
 > 状态：**计划阶段**。本文只描述要做什么、为什么、以及什么结果算成功/算失败；不含任何实测数字。
 >
+> ★ **执行状态不在本文件**：哪些实验已跑、结论是什么、下一步做什么，见 [AGENTS.md](AGENTS.md) §0/§3
+> 与 `experiments/<EXP-ID>.md`。本文的假设与实验矩阵是**冻结**的 —— 改动必须先说明理由。
+>
 > 关联项目：
 > - [MegaKernel-vLLM](<../MegaKernel-vLLM/README.md>)（系统级：整模型融合 vs CUDA Graph 的收益边界）
 > - [MoE-Flow](<../MoE-Flow/PROJECT.md>)（系统级：Host/Device 混合专家管理与专家缓存）

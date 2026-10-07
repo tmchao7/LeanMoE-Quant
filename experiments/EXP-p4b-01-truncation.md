@@ -1,6 +1,7 @@
 # EXP-p4b-01-truncation
 
-> **状态：`running` —— P1/P2/P3 与 `EXP-p2-01` 的 dense fused 臂都已落地，E7 已判定（§2.8）。**
+> **状态：`done` —— P1/P2/P3 与 `EXP-p2-01` 的 dense fused 臂都已落地，16/16 格收口（§2.9），
+> E7 已判定（§2.8）。**
 > ★ **16/16 格已收口（2026-10-07，§2.9）**：4-bit 的 nibble 解包落地后，p4b 声明的每个格子
 > 都有落盘工件（8 格 gate PASS + 8 格 gate FAIL 的 evidence）。证据显示 **实现 > 位宽**：
 > 同一个 `w4a16 × cudagraph`，separate 臂 _(9.12)_ ms / 1810 kernel vs fused 臂 **_(3.38)_ ms /
@@ -26,8 +27,8 @@
 - **Operator**: `benchmarks.runner`（`--bit-width {fp16,w8a16,w8a8} --execution {eager,cudagraph}
   --moe grouped --ctx {1024,4096} [--dequant {separate,fused}]`）+ `tools/quant_probe.py`（P2）
   + `tools/bench_grouped_gemm_quant.py`（§2.7 机制）
-- **Status**: `running` → 实为**收口**（**16/16 格已测**：8 格 gate PASS、8 格 gate FAIL 的
-  evidence；E7 已判定 §2.8.5；4-bit 路径已落地 §2.9）
+- **Status**: `done`（**16/16 格已测**：8 格 gate PASS、8 格 gate FAIL 的 evidence；
+  E7 已判定 §2.8.5；4-bit 路径已落地 §2.9）
 - **原始数据**: `results/EXP-p4b-01-truncation__bit_width=*_execution=*_ctx=*/result.json`；
   每轮的金丝雀/占用/日志在 `results/EXP-p4b-01-run/`（第 1 轮作废件在 `round1-void/`，
   P3 第 1 轮污染件在 `p3-*.log` 与 `v1_archive/`）；隔离 kernel 微基准

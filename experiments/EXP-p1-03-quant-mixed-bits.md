@@ -15,6 +15,9 @@
   - `probe_mixed.json` —— 6 个混合位宽格（all-ones prompt 口径，与 EXP-p1-02 可比）
   - `probe_kl_wikitext_prompt.json` / `probe_kl_wikitext_window2.json` —— 真实 prompt 上的 KL（两个窗口）
   - `ppl.json` —— PPL + 配对 ΔNLL（wikitext-2 test 前 8192 token）
+  - ★ **工件在 base id 下**：矩阵把本实验展开成 `results/EXP-p1-03-quant-mixed-bits__ctx=1024/`，那份骨架是
+    harness 的占位（永远读 `planned`）。判定"跑没跑"看本记录的"结果"节与上面这些文件名，
+    不要看骨架。
 - **对照**: `EXP-p1-02-quant-error-attribution`（逐投影敏感性，本条的输入）；
   `EXP-p1-01-w8-w4-accuracy`（被本条更正的对象）
 
@@ -198,9 +201,10 @@ W4 目标（[W] 减半）：
   已用 `pip install "huggingface-hub==0.36.2" "datasets==3.6.0"` 恢复，并逐项核对
   torch 2.8.0+cu128 / transformers 4.57.6 / numpy 2.3.2 / safetensors 0.8.0 / triton 3.4.0
   与装之前**完全一致**。
-  → `configs/constraints.txt` 至今写着"**尚未在服务器上验证**"（且里面的 torch 是 2.11.0，
-  与服务器的 2.8.0 不符）。这次事故正是它该被冻结的理由：**下次 bootstrap 时先
-  `uv pip freeze` 覆盖它**，并把 `datasets` 的 pin 一起写进去。
+  → 这正是 `configs/constraints.txt` 该被冻结的理由。**2026-10-07 已冻结**：文件头写明
+  `frozen: 2026-10-07 · RTX 5090 (AutoDL PyTorch 2.8.0/12.8 镜像)`，torch 改为实测的 2.8.0，
+  并把 `datasets==3.6.0` / `huggingface-hub==0.36.2` 的**成对约束**写在注释里（下次 bootstrap
+  照它装，不会再拉坏 transformers）。
 - token id 缓存：`/root/autodl-tmp/lemoq-data/wikitext2_test_8k.pt`（8192 个 token，
   wikitext-2-raw-v1 test 前 8192 个 token，不挑样本）。它在仓库外，不进 git。
 

@@ -173,14 +173,18 @@ uv run python -m tools.check_docs
 6. **`results/` 是 gitignored**：跑完必须 `rsync -az 5090b:/root/LeanMoE-Quant/results/ ./results/`
    到 Mac，否则数据随机器关停消失。
 7. **Mac 上的任何数字不得进 `results/` 或结论**。
-8. **依赖**：`configs/constraints.txt` 至今写着"尚未在服务器上验证"（且里面的 torch 是 2.11.0，
-   服务器实际是 2.8.0）。**本会话踩过**：`pip install datasets` 默认装 `datasets 5.1.0` +
-   `huggingface-hub 2.1.1`，而 `transformers 4.57.6` 要求 `hub<1.0` → **transformers 直接坏了**。
-   已用 `"huggingface-hub==0.36.2" "datasets==3.6.0"` 恢复。
-   **装任何包之前先记录版本，装完逐项核对**；有空就把 `uv pip freeze` 覆盖 `constraints.txt`。
+8. **依赖**：`configs/constraints.txt` **已于 2026-10-07 按服务器实测冻结**
+   （`frozen: 2026-10-07 · RTX 5090 (AutoDL PyTorch 2.8.0/12.8 镜像)`；torch 由预置的 2.11.0
+   改为实测的 2.8.0，numpy/safetensors/pyyaml 也钉到实测值）。
+   ★ 保留的坑：`pip install datasets` 默认会装 `datasets 5.1.0` + `huggingface-hub 2.1.1`，
+   而 `transformers 4.57.6` 要求 `hub<1.0` → **transformers 直接坏了**；正确的一对是
+   `datasets==3.6.0` + `huggingface-hub==0.36.2`（现写在 constraints.txt 的注释里，成对装）。
+   **装任何包之前先记录版本，装完逐项核对。**
 9. **merge，不要 rebase，不要 force-push**；运行中的 agent 走 feature 分支。
-10. **服务器上有一个先于本项目存在的失败测试**：`tests/test_scripts.py::test_bootstrap_dry_run_...`
-    （服务器没装 `uv`）。它不是你的回归，但在记录里要写明它是 pre-existing。
+10. **`uv` 在服务器上是有的**：`/root/miniconda3/bin/uv`（0.12.17）。新 shell 里 **先
+    `export PATH=/root/miniconda3/bin:$PATH`** —— 不 export 时 `tests/test_scripts.py` 里
+    依赖 `uv` 的那条会失败（**pre-existing，不是你的回归**）；export 后服务器整套
+    `pytest -m "not gpu"` 是 0 failed。
 
 ## 7. 建议的执行顺序
 
