@@ -113,7 +113,10 @@ def test_triton_fused_gemm_matches_reference():
         x = torch.randn(m, k, device="cuda", dtype=torch.float16) * 0.5
         w = torch.randn(n, k, device="cuda", dtype=torch.float32) * 0.05
         q = qrtn.quantize_rtn(w, bits=bits, group_size=group_size)
-        codes, capped = q["codes"], q["codes_padded"]
+        codes = q["codes"]
+        # ★ `codes_padded` 是 (out, n_groups, group_size) 的**分组**形状（rtn 的约定），
+        #   打包要的是展平后的 (out, padded_in)。
+        capped = q["codes_padded"].reshape(n, -1)
         scale, zero = q["scale"].to(scale_dtype), q["zero"].to(scale_dtype)
         # 打包：与 `QuantLinear` 完全同一条路径（8-bit 直接 int8；4-bit 两个一组进 uint8）
         packed = capped.to(torch.int8) if bits == 8 else qpack.pack_4bit(capped)
@@ -137,11 +140,11 @@ def test_triton_fused_gemm_matches_reference():
             "report": rep,
             "gate": PARITY_GATE,
         }
-        # 打包必须无损（否则上面比较的是两组不同的数）：解包回来后逐位等于 padded codes
+        # 打包必须无损（否则上面比较的是两组不同的数）：解包回来后逐位等于 padded codes。
+        # 对称量化的 nibble 是有符号的（-8..7）：pack 取低 4 位、unpack 做符号扩展，
+        # 与 `dequantize_rtn` 用的是同一组 code 值。
         if bits == 4:
-            back = qpack.unpack_4bit(packed, signed=True).to(torch.int32)
-            back = torch.where(back < 0, back + 16, back)
-            assert torch.equal(back, capped)
+            assert torch.equal(qpack.unpack_4bit(packed, signed=True).to(torch.int32), capped)
         else:
             assert torch.equal(packed.to(torch.int32), capped)
         return rep
