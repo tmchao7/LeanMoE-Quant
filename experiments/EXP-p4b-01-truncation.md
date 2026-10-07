@@ -300,6 +300,20 @@ speedup_eager = p50(fp16)/p50(w8a16)
 > 也走融合 kernel —— 那就是 **P2-01 的 dense fused 臂**，它从"建议先做"变成了
 > **下一步的硬前提**。
 
+### P3 的真实工作量（上卡前先看清，2026-10-07 排查）
+
+P3 **不只是**"把 `quant_cfg` 传给 `run_cudagraph`"。排查发现两处必须先改，否则会写出
+**错的记录**：
+
+1. `run_cudagraph` 完全没有 `quant_cfg` 参数 —— 量化模型进不了 capture（当前是拒绝）。
+2. `build_payload_cudagraph` 里 `config.bit_width` **硬编码 `"fp16"`**，且
+   `correctness.gate` 只用了 `graph_correctness_passed`（图 vs 同路径 eager）。
+   直接接线的后果：量化格会写成 `bit_width: fp16` 且**跳过引用门**
+   （`EXP-p1-04` 的 KL/top-1）—— 那正好违反硬规则 2。P3 必须同时把
+   `correctness_for_cell(cfg, consistency_passed=…)` 接进来（引用门 ∧ 图回放门）。
+
+**在哪之前不要跑**：`w8a8` 的 cudagraph 格现在会被这条漏掉的门放行。
+
 ### E7 判定：仍**不可判定**
 
 §6 的判据要比较 `speedup_cudagraph` 与 `speedup_eager`。现在只有 eager 臂
