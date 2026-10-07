@@ -95,7 +95,10 @@ def _probe(torch: Any, session: Any, *, steps: int, eager: bool) -> dict[str, An
     for _ in range(3):
         (session.decode_eager() if eager else session.replay())
     torch.cuda.synchronize()
-    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+    # ★ 必须同时开 CPU 活动：只有 CUDA 时，kineto 拿不到 CPU 侧的区间事件，
+    #   `record_function` 的 device time 会全是 0（实测踩过；20 行最小复现证明
+    #   开 CPU+CUDA 后同一个作用域能拿到 self_device_time_total）。
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
         for _ in range(steps):
             (session.decode_eager() if eager else session.replay())
         torch.cuda.synchronize()
