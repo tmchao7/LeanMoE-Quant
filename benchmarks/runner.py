@@ -513,7 +513,13 @@ def correctness_for_cell(cfg: dict[str, Any], *, consistency_passed: bool) -> di
     )
 
 
-def _load_model(model_id: str, dtype_name: str, device: str, attn: str | None = None):
+def _load_model(
+    model_id: str,
+    dtype_name: str,
+    device: str,
+    attn: str | None = None,
+    rmsnorm: str = "fused",
+):
     """Load the model, optionally overriding the attention implementation.
 
     ★ `attn` 是必须显式记录的实验变量，不是环境细节：OLMoE 加载后默认
@@ -533,7 +539,19 @@ def _load_model(model_id: str, dtype_name: str, device: str, attn: str | None = 
         kwargs["attn_implementation"] = attn
     AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
-    return model.to(device).eval(), dtype
+    model = model.to(device).eval()
+    # ★ 2026-10-07（P2i）：decode 的 RMSNorm 默认走本仓库的融合 kernel。
+    #   HF 的 `OlmoeRMSNorm` 每个 norm 7 个 kernel（2 cast + pow + mean + rsqrt + 2 mul），
+    #   每步 65 个 norm ⇒ ~455 kernel/步、约 0.43 ms。融合后 1 个 kernel、1.26 µs/次：
+    #   图内 A/B 实测全步 **1.2358×**（EXP-p4c-02 §5.6）。数值 KL 5.261e-04（vs 同一实现
+    #   的 HF 公式），所以引用门必须在新实现下重测（P2i 就是这么做的）。
+    #   `rmsnorm="hf"` 保留为显式退路（复现 v1/v2 的格子、做对照）。
+    from lemoq.kernels.rmsnorm import replace_rms_norms  # noqa: PLC0415
+
+    n_norm = replace_rms_norms(model, rmsnorm)
+    model._lemoq_rmsnorm_impl = rmsnorm
+    model._lemoq_rms_norms_replaced = int(n_norm)
+    return model, dtype
 
 
 def _weight_bytes_actual(model, qreport: Any = None) -> int:
@@ -842,6 +860,7 @@ def run_cudagraph(
     moe: str = "hf",
     attn: str | None = None,
     quant_cfg: dict[str, Any] | None = None,
+    rmsnorm: str = "fused",
 ) -> dict[str, Any]:
     """Run the StaticCache + one-token CUDA Graph path.
 
@@ -888,7 +907,7 @@ def run_cudagraph(
     #   （sdpa）加载，然后在图**外**把 attention core 换成 kernel —— prefill 仍然走
     #   HF 的原路（q_len > 1 自动退回），所以 TTFT 不受这个替换影响。
     load_attn = None if attn == "kernel" else attn
-    model, _dtype = _load_model(model_id, dtype_name, device, attn=load_attn)
+    model, _dtype = _load_model(model_id, dtype_name, device, attn=load_attn, rmsnorm=rmsnorm)
     tr.mark("after_weights")
 
     moe_replaced = 0
@@ -1047,6 +1066,12 @@ def run_cudagraph(
     res["ttft"] = ttft
     res["moe"] = str(moe)
     res["attn"] = attn or str(getattr(model.config, "_attn_implementation", "unknown"))
+    # ★ norm 实现必须进 payload：cell id 里没有这个轴，所以"这一格用的是哪个 norm"
+    #   只能靠记录 —— 否则同一格会被悄悄量成两个东西（P2i）。
+    from lemoq.kernels.rmsnorm import rms_norms_replaced  # noqa: PLC0415
+
+    res["rmsnorm"] = str(getattr(model, "_lemoq_rmsnorm_impl", rmsnorm))
+    res["rms_norms_replaced"] = int(rms_norms_replaced(model))
     res["kernel_warm"] = kernel_warm
     res["moe_blocks_replaced"] = int(moe_replaced)
     res["quantize_report"] = None if qreport is None else qreport.to_dict()
@@ -1081,6 +1106,7 @@ def run_baseline(
     device: str = "cuda",
     quant_cfg: dict[str, Any] | None = None,
     moe: str = "hf",
+    rmsnorm: str = "fused",
 ) -> dict[str, Any]:
     """Load the model, measure prefill / per-token latency / VRAM / host-gap.
 
@@ -1117,6 +1143,13 @@ def run_baseline(
     #   而且会让权重分散到不同设备从而污染显存账。这里显式 `.to(device)`。
     model = AutoModelForCausalLM.from_pretrained(model_id, dtype=dtype)
     model = model.to(device).eval()
+    # ★ P2i：eager 臂也必须用**同一个** norm 实现，否则 execution 轴会与实现混在一起
+    #   （E7 两臂的可比性同理）。默认 fused，与 `_load_model` 一致。
+    from lemoq.kernels.rmsnorm import replace_rms_norms  # noqa: PLC0415
+
+    _n_norm = replace_rms_norms(model, rmsnorm)
+    model._lemoq_rmsnorm_impl = rmsnorm
+    model._lemoq_rms_norms_replaced = int(_n_norm)
     tr.mark("after_weights")
 
     # MoE 替换：必须在量化**之前**，而且两者互斥（docstring 与 main 的拒绝）。
@@ -1298,6 +1331,8 @@ def run_baseline(
         "weight_bytes_actual": weight_bytes_actual,
         "moe": str(moe),
         "moe_blocks_replaced": int(moe_replaced),
+        "rmsnorm": str(getattr(model, "_lemoq_rmsnorm_impl", rmsnorm)),
+        "rms_norms_replaced": int(getattr(model, "_lemoq_rms_norms_replaced", 0)),
         "breakdown": breakdown,
         "moe_block": moe,
         "ttft": ttft,
@@ -1570,6 +1605,9 @@ def build_payload(
         # ★ eager 臂也要记 MoE 实现：E7 的两臂必须同一路径，不记就没法核对
         "moe": cfg.get("moe") or "hf",
         "moe_blocks_replaced": res.get("moe_blocks_replaced"),
+        # ★ P2i：decode 的 RMSNorm 实现（fused = 本仓库 kernel / hf = transformers 原链）
+        "rmsnorm": res.get("rmsnorm") or cfg.get("rmsnorm") or "hf",
+        "rms_norms_replaced": res.get("rms_norms_replaced"),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
         "batch": cfg.get("batch"),
@@ -2118,6 +2156,17 @@ def main(argv: list[str] | None = None) -> int:
         default=128,
         help="量化 group_size。门只实测过 128（EXP-p1-04），其它值会被拒绝。",
     )
+    ap.add_argument(
+        "--rmsnorm",
+        default="fused",
+        choices=["fused", "hf"],
+        help=(
+            "decode 每层的 RMSNorm 实现（默认 fused = 本仓库融合 kernel；需要 triton+CUDA，"
+            "否则加载前拒绝）。hf = transformers 的 OlmoeRMSNorm 原链（7 kernel/norm），"
+            "保留它是为了复现 P2i 之前的格子与做对照。★ cell id 里没有这个轴，"
+            "实现名写进 payload 的 config.rmsnorm。"
+        ),
+    )
     ap.add_argument("--results-dir", default="results")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true")
@@ -2227,6 +2276,23 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
+        # ★ P2i 的第六条拒绝：融合 norm 需要 triton + CUDA。
+        #   顺序刻意排在**配置合法性拒绝之后**：那几条是**与机器无关**的
+        #   （无门实测 / 量化×gather / 奇数 group_size），必须保持最高优先级 ——
+        #   否则在 Mac 上，那四条测试会先撞到"本机没有 triton"，测不到它们本来的对象。
+        #   仍然在**加载 13.4 GB 模型之前**。
+        if args.rmsnorm == "fused":
+            from lemoq.kernels.rmsnorm import unavailable_reason as _norm_reason  # noqa: PLC0415
+
+            _r = _norm_reason()
+            if _r is not None:
+                print(
+                    "runner 拒绝: --rmsnorm fused 需要 triton + CUDA（%s）。"
+                    "本机请用 --rmsnorm hf（见 src/lemoq/kernels/rmsnorm.py）。" % _r,
+                    file=sys.stderr,
+                )
+                return 2
+
     # ★ `--dry-run` **不受 `is_done` 短路**：它是只读查询（不加载模型、不写文件），
     #   必须永远答得出"这一格叫什么、门是什么状态"。`results/` 是**机器本地**的
     #   （gitignored）：同一格在 GPU 机器上跑过之后，dry-run 若被短路成
@@ -2276,6 +2342,7 @@ def main(argv: list[str] | None = None) -> int:
         # fp16 格的 dequant/group_size 必须保持 "none"/None —— 已落盘的 p0/p2 结果
         # 就是这两个值，改它们会让重跑的 payload 与历史不一致。
         "dequant": args.dequant if quantized else "none",
+        "rmsnorm": args.rmsnorm,
         "fusion": "none",
         "group_size": args.group_size if quantized else None,
     }
@@ -2353,6 +2420,7 @@ def main(argv: list[str] | None = None) -> int:
                     if quantized
                     else None
                 ),
+                rmsnorm=args.rmsnorm,
             )
         else:
             res = run_baseline(
@@ -2376,6 +2444,7 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 ),
                 moe=moe_mode,
+                rmsnorm=args.rmsnorm,
             )
     except CudaGraphCorrectnessError as exc:
         payload = failed_result(

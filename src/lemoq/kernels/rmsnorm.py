@@ -49,11 +49,22 @@ except Exception as _exc:  # noqa: BLE001
 
 __all__ = [
     "RMSNORM_CONFIG",
+    "RMSNORM_IMPL_DEFAULT",
+    "RMSNORM_IMPLS",
     "fused_available",
+    "replace_rms_norms",
+    "restore_rms_norms",
     "rms_norm_fused",
+    "rms_norms_replaced",
     "unavailable_reason",
     "warm",
 ]
+
+# decode 路径**默认**用哪个 norm 实现（`--rmsnorm` 覆盖；见 runner 的拒绝与记录）。
+# 默认 fused：cell id 里没有 norm 轴，所以"默认值"就是重跑同一格时会发生的事 ——
+# 默认与记录里写的实现必须一致，否则同一格会被悄悄量成两个东西。
+RMSNORM_IMPL_DEFAULT = "fused"
+RMSNORM_IMPLS = ("fused", "hf")
 
 # 每个 program 处理的目标元素数（源自行宽 2048 的实测形状；不 autotune，声明在这里）
 TARGET_ELEMS = 2048
@@ -189,3 +200,63 @@ if _HAS_TRITON:
         w = tl.load(w_ptr + cols, mask=cmask, other=0.0).to(tl.float16)
         y = normed * w[None, :]
         tl.store(y_ptr + rows[:, None] * H + cols[None, :], y, mask=mask)
+
+
+def _fused_norm_forward(self: Any, hidden_states: Any) -> Any:
+    """`OlmoeRMSNorm.forward` 的替换（实例级、可逆）。"""
+    return rms_norm_fused(
+        hidden_states,
+        self.weight,
+        float(self.variance_epsilon),
+        out_dtype=hidden_states.dtype,
+    )
+
+
+def replace_rms_norms(model: Any, impl: str = RMSNORM_IMPL_DEFAULT) -> int:
+    """把每个 `OlmoeRMSNorm.forward` 切成 `impl`（`hf` = 还原成原方法）。返回命中数。
+
+    ★ 与 `replace_attention_cores` 同一套做法：用**实例属性**覆盖 `forward`
+      （`nn.Module.__call__` 动态查 `self.forward`），原方法存在 `_lemoq_original_norm` 上，
+      可逆（`restore_rms_norms`）。不改类 —— 类级 patch 会影响同进程里所有模型。
+
+    ★ 为什么按**类名**匹配：`OlmoeRMSNorm` 是 transformers 里的类，直接 import 会在
+      版本变动时脆断；类名 + `variance_epsilon` 属性检查足够，且不引入 HF 依赖
+      （本模块离线可用 —— Mac 上也要能 import）。
+    """
+    if impl not in RMSNORM_IMPLS:
+        raise ValueError("未知 rmsnorm 实现 %r；可用 %s" % (impl, list(RMSNORM_IMPLS)))
+    import types  # noqa: PLC0415
+
+    n = 0
+    for module in model.modules():
+        if type(module).__name__ != "OlmoeRMSNorm" or not hasattr(module, "variance_epsilon"):
+            continue
+        if not hasattr(module, "_lemoq_original_norm"):
+            module._lemoq_original_norm = module.forward
+        module.forward = (
+            module._lemoq_original_norm
+            if impl == "hf"
+            else types.MethodType(_fused_norm_forward, module)
+        )
+        n += 1
+    return n
+
+
+def restore_rms_norms(model: Any) -> int:
+    """还原成 HF 原方法（臂之间切换、对照实验都需要）。"""
+    n = 0
+    for module in model.modules():
+        if hasattr(module, "_lemoq_original_norm"):
+            module.forward = module._lemoq_original_norm
+            del module._lemoq_original_norm
+            n += 1
+    return n
+
+
+def rms_norms_replaced(model: Any) -> int:
+    """已挂上融合实现的 norm 个数（供 runner/记录自检）。"""
+    return sum(
+        1
+        for m in model.modules()
+        if hasattr(m, "_lemoq_original_norm") and m.forward is not m._lemoq_original_norm
+    )

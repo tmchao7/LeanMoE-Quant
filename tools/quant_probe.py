@@ -661,6 +661,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--json", default=None)
     ap.add_argument(
+        "--rmsnorm",
+        default="fused",
+        choices=["fused", "hf"],
+        help=(
+            "decode 的 RMSNorm 实现（默认 fused = 本仓库融合 kernel）。★ 门的**测量基准**："
+            "换实现会改数值（P2i：KL 5.261e-04 vs HF 公式），所以门的数字必须与实现名一起记录。"
+            "hf = transformers 的 OlmoeRMSNorm 原链（P2i 之前的门就是在它上面测的）。"
+        ),
+    )
+    ap.add_argument(
         "--published-summary",
         default=None,
         help="EXP-p1-01 的 summary.json（用于核对轨迹是否一致）",
@@ -737,7 +747,22 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     device = "cuda"
-    model, _ = _load_model(args.model, "float16", device)
+    from lemoq.kernels.rmsnorm import (  # noqa: PLC0415
+        rms_norms_replaced,
+        unavailable_reason,
+    )
+
+    if args.rmsnorm == "fused":
+        reason = unavailable_reason()
+        if reason is not None:
+            print(
+                "quant_probe 拒绝: --rmsnorm fused 需要 triton + CUDA（%s）。用 --rmsnorm hf。"
+                % reason,
+                file=sys.stderr,
+            )
+            return 2
+    model, _ = _load_model(args.model, "float16", device, rmsnorm=args.rmsnorm)
+    n_norms = int(rms_norms_replaced(model))
     n_layers = int(model.config.num_hidden_layers)
 
     def _prompt_ids(source: str, offset: int) -> Any:
@@ -776,6 +801,10 @@ def main(argv: list[str] | None = None) -> int:
         "ctx": args.ctx,
         "max_new_tokens": args.max_new_tokens,
         "n_layers": n_layers,
+        # ★ P2i：门的测量基准（norm 实现）。缺这一项，门上的数字就无从对账 ——
+        #   "同一配置"必须包含"同一实现"。
+        "rmsnorm": str(args.rmsnorm),
+        "rms_norms_replaced": n_norms,
         "prompt_source": args.prompt_source,
         "prompt_windows": len(prompts),
         "prompt_labels": [p[0] for p in prompts],

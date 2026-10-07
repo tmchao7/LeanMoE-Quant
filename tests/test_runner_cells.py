@@ -331,6 +331,8 @@ def test_quantized_config_without_gate_citation_is_refused(capsys):
             "64",
             "--dequant",
             "separate",
+            "--rmsnorm",
+            "hf",
         ]
     )
     out = capsys.readouterr()
@@ -360,6 +362,8 @@ def test_quantized_cudagraph_is_no_longer_refused_before_loading(capsys, monkeyp
             # ★ 必须 --force：这一格在跑过的机器上 `is_done()` 为真，会被短路成
             #   `skip (done)` 返回 0 —— 断言就变成"本机跑没跑过这一格"的函数（实测红过）。
             "--force",
+            "--rmsnorm",
+            "hf",
         ]
     )
     out = capsys.readouterr()
@@ -596,6 +600,8 @@ def test_quantized_over_non_hf_moe_is_refused(capsys):
             "1024",
             "--moe",
             "gather",
+            "--rmsnorm",
+            "hf",
         ]
     )
     out = capsys.readouterr()
@@ -658,6 +664,8 @@ def test_quantized_grouped_odd_group_size_is_refused(capsys, monkeypatch):
             "--ctx",
             "1024",
             "--force",
+            "--rmsnorm",
+            "hf",
         ]
     )
     out = capsys.readouterr()
@@ -968,3 +976,36 @@ def test_cudagraph_payload_fails_when_the_graph_is_not_faithful():
     assert payload["correctness"]["gate"] == "FAIL"
     assert payload["correctness"]["consistency"]["passed"] is False
     assert payload["latency"]["per_token_p50_ms"] is None
+
+
+def test_fused_rmsnorm_is_refused_before_loading_but_hf_is_not(capsys, monkeypatch):
+    """★ P2i 的第六条拒绝：`--rmsnorm fused` 在本机跑不了时必须在**加载模型之前**拒绝。
+
+    注入"triton 不可用"，这样断言与机器无关（服务器上有 triton，直接跑会真加载模型）。
+    第二段证明 `--rmsnorm hf` **不撞**这条 —— 它是显式退路，不是被这条拒绝挡住的。
+    """
+    import lemoq.kernels.rmsnorm as rmsnorm
+
+    monkeypatch.setattr(rmsnorm, "unavailable_reason", lambda: "triton 不可用（测试注入）")
+    base = [
+        "--exp",
+        "EXP-p4c-01-in-graph-attention",
+        "--bit-width",
+        "w8a16",
+        "--execution",
+        "cudagraph",
+        "--ctx",
+        "1024",
+        "--attn",
+        "kernel",
+        "--force",
+    ]
+    rc = runner_main([*base, "--rmsnorm", "fused"])
+    out = capsys.readouterr()
+    assert rc == 2, (rc, out.err)
+    assert "rmsnorm" in out.err and "测试注入" in out.err, out.err
+
+    rc_hf = runner_main([*base, "--rmsnorm", "hf"])
+    out_hf = capsys.readouterr()
+    assert "rmsnorm" not in out_hf.err, out_hf.err
+    assert rc_hf == 2, rc_hf  # Mac 上没有 CUDA：仍会失败，但**不是因为 norm**
