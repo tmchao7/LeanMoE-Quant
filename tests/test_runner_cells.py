@@ -27,6 +27,8 @@ pytestmark = requires_torch
 from benchmarks.runner import (  # noqa: E402
     GATE_CITATIONS,
     _matrix_axes,
+    _moe_for_exp,
+    _weight_bytes_actual,
     build_exp_id,
     correctness_for_cell,
     gate_for_cell,
@@ -167,6 +169,8 @@ def test_dry_run_p4b_cell_id_matches_skeleton(capsys):
     out = capsys.readouterr()
     assert rc == 0
     assert "would run: EXP-p4b-01-truncation__bit_width=fp16_execution=eager_ctx=1024" in out.out
+    # ★ E7 两臂必须同一 MoE 路径（矩阵声明 grouped；hf 不能 capture，p0-03 blocked）
+    assert "moe=grouped" in out.out
 
 
 def test_fused_dequant_is_refused_without_a_kernel(capsys):
@@ -296,8 +300,9 @@ def test_correctness_for_cell_quantized_cites_p104_and_respects_fail():
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def tiny_olmoe():
+def _fresh_olmoe():
+    """新模型。★ 不要用共享 fixture 做**会改模型**的测试：
+    量化测试会把 fixture 变成 QuantLinear 满身的模型，后面的测试拿到的是脏状态。"""
     from transformers import OlmoeConfig, OlmoeForCausalLM
 
     cfg = OlmoeConfig(
@@ -313,6 +318,107 @@ def tiny_olmoe():
         tie_word_embeddings=False,
     )
     return OlmoeForCausalLM(cfg).eval()
+
+
+@pytest.fixture(scope="module")
+def tiny_olmoe():
+    return _fresh_olmoe()
+
+
+def test_matrix_declares_one_moe_path_for_both_arms():
+    """E7 的两臂必须同一 MoE 实现（硬规则 1）：矩阵声明 grouped，runner 读得到。"""
+    assert _moe_for_exp("EXP-p4b-01-truncation") == "grouped"
+    # 其它实验不受影响：没声明 config.moe 的仍然默认 hf
+    assert _moe_for_exp("EXP-p0-02-baseline-fp16") == "hf"
+    assert _moe_for_exp("EXP-not-in-matrix") == "hf"
+
+
+def test_run_baseline_accepts_moe_parameter():
+    """eager 臂必须能接 MoE 替换 —— 否则 E7 会一头 grouped 一头 hf（混轴）。"""
+    import inspect
+
+    from benchmarks.runner import run_baseline
+
+    params = inspect.signature(run_baseline).parameters
+    assert "moe" in params and params["moe"].default == "hf"
+    # 量化与 MoE 替换互斥（理由写在 run_baseline 的 docstring 与 main 的拒绝里）
+    doc = inspect.getdoc(run_baseline) or ""
+    assert "不能同时存在" in doc
+
+
+def test_quantized_over_non_hf_moe_is_refused(capsys):
+    """量化 × 非 hf MoE 的组合不存在 —— 这是第四条拒绝（p4b 的量化格会撞上它）。"""
+    rc = runner_main(
+        [
+            "--exp",
+            "EXP-p4b-01-truncation",
+            "--bit-width",
+            "w8a16",
+            "--execution",
+            "eager",
+            "--ctx",
+            "1024",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "拒绝" in out.err and "replace_moe_blocks" in out.err
+    # fp16 臂不受影响：同一命令只换 bit_width 就不该撞这条
+    rc_fp16 = runner_main(
+        [
+            "--exp",
+            "EXP-p4b-01-truncation",
+            "--bit-width",
+            "fp16",
+            "--execution",
+            "eager",
+            "--ctx",
+            "1024",
+            "--dry-run",
+        ]
+    )
+    assert rc_fp16 == 0
+
+
+def test_weight_bytes_actual_counts_static_experts():
+    """MoE 替换后字节账不许少算 96%：`_static_experts` 是普通张量，不在 parameters() 里。
+
+    历史教训：EXP-p0-04 / p2-02 记的是 953,421,824 B（≈ 只剩 attention+embedding）。
+    """
+    import torch
+
+    from lemoq.kernels.moe_static import replace_moe_blocks
+
+    model = _fresh_olmoe()
+    before = _weight_bytes_actual(model)
+    assert before > 0
+    # ★ impl 名是 "gather"：`static` 是 p0-04 时代的旧名，已不在 VALID_MOE_IMPLS
+    #   （实测会 raise unknown impl；runner 里 static→gather 的归一化就是为这个）。
+    #   历史教训：EXP-p0-04 / p2-02 记的 weight_bytes_actual 是 953,421,824 B，
+    #   因为 _static_experts 不在 parameters() 里 —— 那两个格子已落盘，不改。
+    replaced = replace_moe_blocks(model, impl="gather")
+    assert replaced == 2, "tiny 模型有 2 层，每层一个 sparse MoE block"
+    after = _weight_bytes_actual(model)
+    # fuse 只是把 experts 的元素重排（gate‖up, down），元素数与字节数都应守恒
+    assert after == before, "替换前后驻留权重字节应相等：%d != %d" % (after, before)
+    with torch.no_grad():
+        out = model(torch.tensor([[1, 2, 3, 4]]))
+    assert out.logits.shape == (1, 4, 256), "替换后必须还能前向"
+
+
+def test_weight_bytes_actual_counts_quantized_buffers():
+    """量化后字节账不许少算 96%：QuantLinear 的 packed/scale 是 buffer。"""
+    model = _fresh_olmoe()
+    plain = _weight_bytes_actual(model)
+    qreport = quantize_for_cfg(model, {"bit_width": "w8a16", "group_size": 32})
+    assert qreport is not None
+    counted = _weight_bytes_actual(model, qreport)
+    # ★ 不断言与 plain 的比例：测试模型是 fp32、packed 是 int8，比例只由 dtype 决定；
+    #   真实模型是 fp16，w8a16 的 49.4% 已由 EXP-p1-01 实测。
+    #   钉住的不变量是文档里记的陷阱：**不传 qreport 就会漏掉 buffer**。
+    without_buffers = _weight_bytes_actual(model, None)
+    assert without_buffers < counted, "量化后不传 qreport 必须少算（buffer 不在 parameters 里）"
+    assert without_buffers < plain, "量化吃掉了 linears 的参数（它们进了 buffer）"
 
 
 def test_quant_spec_excludes_router_from_targets():

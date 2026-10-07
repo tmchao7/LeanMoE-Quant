@@ -375,8 +375,46 @@ def _load_model(model_id: str, dtype_name: str, device: str, attn: str | None = 
     return model.to(device).eval(), dtype
 
 
-def _weight_bytes_actual(model) -> int:
+def _weight_bytes_actual(model, qreport: Any = None) -> int:
+    """加载后**驻留**的权重字节（区别于 `[W]`：那是每 token 实际流过的字节）。
+
+    三类会被 `model.parameters()` 漏掉的权重，都必须补上：
+
+    1. `QuantLinear`：packed/scale 是 **buffer**，权重参数在量化时被吃掉
+       —— 不补，量化格会少算 96%（experts 占大头）；
+    2. `replace_moe_blocks` 之后的 experts：`block._static_experts` 是**普通张量**，
+       不是 parameter —— 不补，MoE 替换过的格子会少算 96%。
+       实测：EXP-p0-04 / EXP-p2-02 记的是 953,421,824 B（≈ 只剩 attention+embedding），
+       比预算的 2,357,723,136 B（每 token 流过的）还低 59.6%。
+       这两个格子是**已落盘的历史**，本函数只保证**今后**的格子不再犯；
+    3. tie_word_embeddings 的共享（少算一次）。
+    """
     total = sum(p.numel() * p.element_size() for p in model.parameters())
+    if qreport is not None:
+        from lemoq.quant.linear import QuantLinear  # noqa: PLC0415
+
+        total += sum(
+            b.numel() * b.element_size()
+            for m in model.modules()
+            if isinstance(m, QuantLinear)
+            for b in m.buffers()
+        )
+    for m in model.modules():
+        fused = getattr(m, "_static_experts", None)
+        if fused is None:
+            continue
+        # ★ `fuse_experts` 返回的是 `FusedExperts(gate_up=…, down=…)` **dataclass**，
+        #   不是张量 —— 只判 hasattr(fused, "numel") 会静默漏掉整个 experts（实测
+        #   漏 393,216 B，恰好是 tiny 模型全部专家权重）。所以要拆容器。
+        if hasattr(fused, "numel"):
+            parts = (fused,)
+        elif hasattr(fused, "__dataclass_fields__"):
+            parts = tuple(getattr(fused, k) for k in fused.__dataclass_fields__)
+        elif isinstance(fused, (tuple, list)):
+            parts = tuple(fused)
+        else:
+            parts = ()
+        total += sum(int(t.numel()) * int(t.element_size()) for t in parts if hasattr(t, "numel"))
     if bool(getattr(model.config, "tie_word_embeddings", False)):
         total -= (
             model.get_input_embeddings().weight.numel()
@@ -577,7 +615,8 @@ def run_cudagraph(
     `moe` 选 decode 的 MoE 实现（三种，对应三个不同的假设）：
 
         "hf"      HF 的逐专家 Python 循环 —— EXP-p0-03，实测 blocked
-        "static"  固定形状 gather + bmm（moe_static）—— EXP-p0-04
+        "gather"  固定形状 gather + bmm（moe_static；**旧名 static**，EXP-p0-04 的矩阵
+                  与 --static-moe 别名都写 static，main 会归一到 gather）—— EXP-p0-04
         "grouped" Triton grouped GEMV，无 gather 拷贝（moe_grouped）—— EXP-p2-02
 
     prefill 与 `moe` 无关：永远走逐专家循环（理由见 `moe_static.static_moe_forward`）。
@@ -772,11 +811,19 @@ def run_baseline(
     dtype_name: str,
     device: str = "cuda",
     quant_cfg: dict[str, Any] | None = None,
+    moe: str = "hf",
 ) -> dict[str, Any]:
     """Load the model, measure prefill / per-token latency / VRAM / host-gap.
 
     `quant_cfg` 非 None 时在测量前就地量化（`separate` 臂的全部语义：QuantLinear 每次
-    forward 物化 fp16 权重）。fp16 路径**逐字不变**：不传它时不做任何量化动作。
+    forward 物化 fp16 权重）。`moe` 是 decode 的 MoE 实现（与 `run_cudagraph` 同名参数
+    —— **E7 的两臂必须同一个 MoE 路径**，否则 execution 轴与 MoE 实现混在一起）。
+    fp16 + `moe="hf"` 路径**逐字不变**。
+
+    ⚠️ `quant_cfg` 与 `moe != "hf"` **不能同时存在**，main 会先拒绝（见那里的理由）：
+    `replace_moe_blocks` 会把 experts fuse 成 fp16 张量并 `del block.experts` ——
+    之后量化找不到 expert Linear（静默只量 attention），而先量化再替换会读不到
+    `QuantLinear` 的 `.weight`。
     """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -802,10 +849,14 @@ def run_baseline(
     model = model.to(device).eval()
     tr.mark("after_weights")
 
-    # ★ 量化必须在 weight_bytes_actual 与任何测量之前。QuantLinear 把 packed/scale
-    #   存成 **buffer**（`model.parameters()` 看不见它），所以字节账要单独加
-    #   （见下面的 `if qreport is not None`）——漏了它，量化格的 weight_bytes_actual
-    #   会**少算 96%**（experts 占大头）。
+    # MoE 替换：必须在量化**之前**，而且两者互斥（docstring 与 main 的拒绝）。
+    # eager 臂也要能换 —— 否则 E7 的两臂只能一头 grouped 一头 hf，
+    # execution 轴会与 MoE 实现混淆（硬规则 1）。
+    moe_replaced = 0
+    if moe != "hf":
+        from lemoq.kernels.moe_static import replace_moe_blocks  # noqa: PLC0415
+
+        moe_replaced = replace_moe_blocks(model, impl=moe)
     qreport = quantize_for_cfg(model, quant_cfg) if quant_cfg else None
 
     spec = _model_spec(model.config, model_id)
@@ -813,24 +864,9 @@ def run_baseline(
     # 权重实际占用（区别于 checkpoint 里的字节数）。这一步很关键：
     # OLMoE 的 checkpoint 自述是 bf16，我们按 fp16 加载，两者都是 2 字节所以应当接近，
     # 但如果差得远，说明加载路径没按预期走 —— 那样后面所有字节账都是错的。
-    weight_bytes_actual = sum(p.numel() * p.element_size() for p in model.parameters())
-    if qreport is not None:
-        from lemoq.quant.linear import QuantLinear  # noqa: PLC0415
-
-        # QuantLinear 没有 weight 参数（权重在 packed buffer 里）→ 只数 parameters
-        # 会漏掉全部量化权重 + scales。bias 也在 buffer 里，一并计入。
-        weight_bytes_actual += sum(
-            b.numel() * b.element_size()
-            for m in model.modules()
-            if isinstance(m, QuantLinear)
-            for b in m.buffers()
-        )
-    tie = bool(getattr(model.config, "tie_word_embeddings", False))
-    if tie:
-        weight_bytes_actual -= (
-            model.get_input_embeddings().weight.numel()
-            * model.get_input_embeddings().weight.element_size()
-        )
+    # ★ 三类会被 parameters() 漏掉的权重由 helper 统一补（QuantLinear buffer、
+    #   _static_experts、tie），理由见 `_weight_bytes_actual` 的 docstring。
+    weight_bytes_actual = _weight_bytes_actual(model, qreport)
 
     # 用重复的 token 构造一个长度为 ctx 的 prompt（内容对延迟无影响）
     prompt_ids = [1] * ctx
@@ -929,6 +965,8 @@ def run_baseline(
     return {
         "spec": spec,
         "weight_bytes_actual": weight_bytes_actual,
+        "moe": str(moe),
+        "moe_blocks_replaced": int(moe_replaced),
         "breakdown": breakdown,
         "moe_block": moe,
         "ttft": ttft,
@@ -1160,6 +1198,9 @@ def build_payload(
         "dequant": cfg.get("dequant") or "none",
         "fusion": cfg.get("fusion") or "none",
         "execution": cfg.get("execution") or "eager",
+        # ★ eager 臂也要记 MoE 实现：E7 的两臂必须同一路径，不记就没法核对
+        "moe": cfg.get("moe") or "hf",
+        "moe_blocks_replaced": res.get("moe_blocks_replaced"),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
         "batch": cfg.get("batch"),
@@ -1516,8 +1557,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--moe",
         default=None,
-        choices=["hf", "static", "grouped"],
-        help="decode 的 MoE 实现（默认从 --exp 的 config.moe 推；grouped 需要 triton）",
+        choices=["hf", "static", "gather", "grouped"],
+        help=(
+            "decode 的 MoE 实现（默认从 --exp 的 config.moe 推；grouped 需要 triton）。"
+            "★ 'static' 是旧名，归一到实现名 'gather'（VALID_MOE_IMPLS = gather|grouped）"
+        ),
     )
     ap.add_argument(
         "--static-moe",
@@ -1573,8 +1617,26 @@ def main(argv: list[str] | None = None) -> int:
     quantized = args.bit_width != "fp16"
     citation = None if not quantized else gate_for_cell(args.bit_width, args.group_size, args.ctx)
 
+    # decode 的 MoE 实现。优先级：显式 --moe > 兼容别名 --static-moe > 实验矩阵里
+    # 声明的 config.moe > "hf"。从矩阵读是关键：结果文件里的 moe 字段必须与矩阵
+    # 声明一致，否则 p0-03 / p0-04 / p2-02 三条**不同假设**会混进同一个口径。
+    # ★ 必须在拒绝逻辑之前解析：第四条拒绝（量化 × 非 hf MoE）要用它。
+    if args.moe:
+        moe_mode = args.moe
+    elif getattr(args, "static_moe", False):
+        moe_mode = "static"
+    else:
+        moe_mode = _moe_for_exp(args.exp)
+    # ★ "static" 是 p0-04 时代的旧名，实现现在叫 "gather"
+    #   （`VALID_MOE_IMPLS = ("gather", "grouped")`，随 grouped kernel 一起改的）。
+    #   **不归一就全线崩溃**：run_cudagraph 的 valid 检查会 raise
+    #   `unknown moe 'static'` —— 矩阵里 p0-04 的声明、`--static-moe` 别名、
+    #   以及 scripts/run_cudagraph_gate.sh 今天都会撞上它（p0-04 的格子是 done，
+    #   所以一直没人触发）。归一到实现名，记录里写真实跑的 impl。
+    moe_mode = {"static": "gather"}.get(moe_mode, moe_mode)
+
     if not args.dry_run:
-        # 三条拒绝都发生在**任何模型加载之前** —— 干净失败，且离线（无 GPU）可测。
+        # 四条拒绝都发生在**任何模型加载之前** —— 干净失败，且离线（无 GPU）可测。
         if args.dequant == "fused":
             print(
                 "runner 拒绝: --dequant fused 的融合 kernel 尚未实现"
@@ -1593,7 +1655,19 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if quantized and execution == "cudagraph":
             print(
-                "runner 拒绝: 量化 + cudagraph 的接线尚未完成（EXP-p4b-01 的离线步骤）。",
+                "runner 拒绝: 量化 × cudagraph 目前无路可走 —— hf 不能 capture"
+                "（EXP-p0-03 blocked），grouped/static 又只吃 fp16 融合权重。"
+                "需要'量化感知的 expert 路径'（EXP-p2-01 fused kernel 的 expert 版），"
+                "依赖链见 EXP-p4b-01-truncation 记录 §3。",
+                file=sys.stderr,
+            )
+            return 2
+        if quantized and moe_mode != "hf":
+            print(
+                "runner 拒绝: 量化 × 非 hf MoE 的组合**不存在** —— replace_moe_blocks 只吃 fp16 "
+                "融合权重（先量化后替换会读不到 QuantLinear 的 .weight），而它又会 `del "
+                "block.experts`（后量化则静默只命中 attention）。要 E7 就需要量化感知的 "
+                "expert 路径，见 EXP-p4b-01-truncation 记录 §3。",
                 file=sys.stderr,
             )
             return 2
@@ -1605,16 +1679,6 @@ def main(argv: list[str] | None = None) -> int:
     if execution == "cudagraph" and args.dtype != "float16":
         print("runner 失败: EXP-p0-03 只支持 --dtype float16", file=sys.stderr)
         return 2
-
-    # decode 的 MoE 实现。优先级：显式 --moe > 兼容别名 --static-moe > 实验矩阵里
-    # 声明的 config.moe > "hf"。从矩阵读是关键：结果文件里的 moe 字段必须与矩阵
-    # 声明一致，否则 p0-03 / p0-04 / p2-02 三条**不同假设**会混进同一个口径。
-    if args.moe:
-        moe_mode = args.moe
-    elif getattr(args, "static_moe", False):
-        moe_mode = "static"
-    else:
-        moe_mode = _moe_for_exp(args.exp)
 
     attn_mode = args.attn if getattr(args, "attn", None) else _config_for_exp(args.exp, "attn")
 
@@ -1692,8 +1756,8 @@ def main(argv: list[str] | None = None) -> int:
             "  model=%s ctx=%d batch=%d dtype=%s" % (args.model, args.ctx, args.batch, args.dtype)
         )
         print(
-            "  bit_width=%s group_size=%s dequant=%s execution=%s"
-            % (cfg["bit_width"], cfg["group_size"], cfg["dequant"], cfg["execution"])
+            "  bit_width=%s group_size=%s dequant=%s execution=%s moe=%s"
+            % (cfg["bit_width"], cfg["group_size"], cfg["dequant"], cfg["execution"], cfg["moe"])
         )
         if quantized:
             print(
@@ -1733,6 +1797,7 @@ def main(argv: list[str] | None = None) -> int:
                     if quantized
                     else None
                 ),
+                moe=moe_mode,
             )
     except CudaGraphCorrectnessError as exc:
         payload = failed_result(
