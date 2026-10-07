@@ -2383,8 +2383,15 @@ def main(argv: list[str] | None = None) -> int:
             "  model=%s ctx=%d batch=%d dtype=%s" % (args.model, args.ctx, args.batch, args.dtype)
         )
         print(
-            "  bit_width=%s group_size=%s dequant=%s execution=%s moe=%s"
-            % (cfg["bit_width"], cfg["group_size"], cfg["dequant"], cfg["execution"], cfg["moe"])
+            "  bit_width=%s group_size=%s dequant=%s execution=%s moe=%s rmsnorm=%s"
+            % (
+                cfg["bit_width"],
+                cfg["group_size"],
+                cfg["dequant"],
+                cfg["execution"],
+                cfg["moe"],
+                cfg.get("rmsnorm"),
+            )
         )
         if quantized:
             print(

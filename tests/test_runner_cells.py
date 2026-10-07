@@ -1009,3 +1009,49 @@ def test_fused_rmsnorm_is_refused_before_loading_but_hf_is_not(capsys, monkeypat
     out_hf = capsys.readouterr()
     assert "rmsnorm" not in out_hf.err, out_hf.err
     assert rc_hf == 2, rc_hf  # Mac 上没有 CUDA：仍会失败，但**不是因为 norm**
+
+
+def test_dry_run_surfaces_the_rmsnorm_implementation(capsys):
+    """★ P2i：cell id 里**没有** norm 轴，所以 dry-run（唯一的只读查询）必须报出实现名 ——
+    否则"这一格会用什么 norm"在跑之前无从得知，事后也只能翻 payload。
+
+    dry-run 不加载模型、不需要 GPU/ triton，所以这条断言与机器无关。
+    """
+    rc = runner_main(
+        [
+            "--exp",
+            "EXP-p4c-01-in-graph-attention",
+            "--bit-width",
+            "w8a16",
+            "--execution",
+            "cudagraph",
+            "--ctx",
+            "1024",
+            "--attn",
+            "kernel",
+            "--dry-run",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0, out.err
+    assert "rmsnorm=fused" in out.out, out.out
+
+    rc_hf = runner_main(
+        [
+            "--exp",
+            "EXP-p4c-01-in-graph-attention",
+            "--bit-width",
+            "w8a16",
+            "--execution",
+            "cudagraph",
+            "--ctx",
+            "1024",
+            "--attn",
+            "kernel",
+            "--rmsnorm",
+            "hf",
+            "--dry-run",
+        ]
+    )
+    out_hf = capsys.readouterr()
+    assert rc_hf == 0 and "rmsnorm=hf" in out_hf.out, out_hf.out
