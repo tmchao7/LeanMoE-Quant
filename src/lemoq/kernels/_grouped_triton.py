@@ -307,12 +307,16 @@ def _gate_up_act_kernel_q(
                 qbase + (F + n)[:, None] * packed_row + k[None, :], mask=n_mask[:, None], other=0
             ).to(tl.float32)
         else:
-            kb = k // 2  # 两个 k 共用一个 uint8
+            # ★ 字节轴的**长度是 BLOCK_K//2**（两个 k 共用一个 uint8），不能直接用 k//2：
+            #   那样每个字节会被加载两次、元素数对不上（reshape 会直接报错）。
+            offs_j = k0 // 2 + tl.arange(0, BLOCK_K // 2)
             pg = tl.load(
-                qbase + n[:, None] * packed_row + kb[None, :], mask=n_mask[:, None], other=0
+                qbase + n[:, None] * packed_row + offs_j[None, :], mask=n_mask[:, None], other=0
             ).to(tl.int32)
             pu = tl.load(
-                qbase + (F + n)[:, None] * packed_row + kb[None, :], mask=n_mask[:, None], other=0
+                qbase + (F + n)[:, None] * packed_row + offs_j[None, :],
+                mask=n_mask[:, None],
+                other=0,
             ).to(tl.int32)
             qg = _expand_int4(pg, BLOCK_N, BLOCK_K)
             qu = _expand_int4(pu, BLOCK_N, BLOCK_K)
@@ -379,9 +383,11 @@ def _down_sum_kernel_q(
                     qbase + n[:, None] * packed_row + k[None, :], mask=n_mask[:, None], other=0
                 ).to(tl.float32)
             else:
-                kb = k // 2
+                offs_j = k0 // 2 + tl.arange(0, BLOCK_K // 2)
                 pw = tl.load(
-                    qbase + n[:, None] * packed_row + kb[None, :], mask=n_mask[:, None], other=0
+                    qbase + n[:, None] * packed_row + offs_j[None, :],
+                    mask=n_mask[:, None],
+                    other=0,
                 ).to(tl.int32)
                 wq = _expand_int4(pw, BLOCK_N, BLOCK_K)
             acc += tl.sum(wq * s[:, None] * a[None, :], axis=1) * w
