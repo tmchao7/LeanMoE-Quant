@@ -161,10 +161,15 @@ def blocked_result(
 ) -> dict[str, Any]:
     """Create a schema-valid blocked result with no performance measurements."""
     payload = empty_result(exp_id, status="blocked")
+    # ★ `bit_width` / `group_size` / `dequant` 必须来自 config —— 硬编码 "fp16" 会让
+    #   **被阻塞的量化格**以 fp16 的名义落盘（P3 的第二处同类坑；第一处是
+    #   `build_payload_cudagraph` 的 config 段）。实测过：w8a16 × cudagraph 的一次
+    #   capture OOM 写出的 payload 里 bit_width=fp16，那是错的记录。
+    bit_width = str(config.get("bit_width") or "fp16")
     payload["hypothesis"] = {
         "statement": (
-            "fp16 OLMoE decode can use a continuous StaticCache and capture a fixed-shape "
-            "single-token CUDA Graph"
+            ("%s OLMoE decode" % bit_width)
+            + " can use a continuous StaticCache and capture a fixed-shape single-token CUDA Graph"
         ),
         "refutation_signal": (
             "StaticCache setup, CUDA Graph capture, replay, or correctness comparison fails; "
@@ -173,10 +178,10 @@ def blocked_result(
     }
     payload["config"].update(
         {
-            "bit_width": "fp16",
-            "group_size": None,
-            "dequant": "none",
-            "fusion": "none",
+            "bit_width": bit_width,
+            "group_size": config.get("group_size") if bit_width != "fp16" else None,
+            "dequant": (config.get("dequant") or "none") if bit_width != "fp16" else "none",
+            "fusion": config.get("fusion") or "none",
             "execution": "cudagraph",
             "kv_cache_dtype": "fp16",
             "ctx": config.get("ctx"),

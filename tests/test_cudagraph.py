@@ -393,3 +393,46 @@ def test_compare_logits_rejects_length_mismatch():
     b = [torch.randn(1, 8), torch.randn(1, 8)]
     with _pytest.raises(ValueError):
         compare_logits(a, b)
+
+
+def test_blocked_result_does_not_relabel_a_quantized_cell_as_fp16():
+    """★ P3 的第二处同类坑：被阻塞的**量化格**不得以 fp16 的名义落盘。
+
+    实测过：`w8a16 × cudagraph` 的一次 capture OOM 写出的 payload 里 `bit_width=fp16`
+    —— 那会让"这一格为什么没有数字"变成一条错的记录（它明明是 w8a16）。
+    """
+    from benchmarks.cudagraph import blocked_result
+    from benchmarks.schema import validate_result
+
+    payload = blocked_result(
+        exp_id="EXP-p4b-01-truncation__bit_width=w8a16_execution=cudagraph_ctx=1024",
+        config={
+            "bit_width": "w8a16",
+            "group_size": 128,
+            "dequant": "fused",
+            "execution": "cudagraph",
+            "ctx": 1024,
+            "batch": 1,
+            "max_new_tokens": 32,
+            "warmup": 5,
+            "timed": 20,
+            "dtype": "float16",
+        },
+        failure={"stage": "unknown", "type": "OutOfMemoryError", "message": "CUDA out of memory"},
+    )
+    assert payload["config"]["bit_width"] == "w8a16"
+    assert payload["config"]["group_size"] == 128
+    assert payload["config"]["dequant"] == "fused"
+    assert "w8a16" in payload["hypothesis"]["statement"]
+    assert payload["latency"]["per_token_p50_ms"] is None
+    assert validate_result(payload) == []
+
+    # fp16 的行为逐字不变
+    fp16 = blocked_result(
+        exp_id="EXP-p0-03-baseline-cudagraph__ctx=1024",
+        config={"ctx": 1024, "batch": 1, "max_new_tokens": 32, "dtype": "float16"},
+        failure={"stage": "capture", "type": "RuntimeError", "message": "x"},
+    )
+    assert fp16["config"]["bit_width"] == "fp16"
+    assert fp16["config"]["group_size"] is None
+    assert fp16["config"]["dequant"] == "none"
