@@ -122,10 +122,18 @@ def fuse_experts(experts: Any) -> FusedExperts:
     return FusedExperts(gate_up=gate_up.contiguous(), down=down.contiguous())
 
 
+def _is_quant_fused(fused: Any) -> bool:
+    """量化容器判定。惰性 import（`moe_grouped_quant` 在 Mac 上也能 import：
+    它的 triton kernel 是惰性取的）。"""
+    from lemoq.kernels.moe_grouped_quant import QuantFusedExperts  # noqa: PLC0415
+
+    return isinstance(fused, QuantFusedExperts)
+
+
 def static_moe_forward(
     hidden_states: Any,
     router_weight: Any,
-    fused: FusedExperts,
+    fused: Any,
     *,
     top_k: int,
     norm_topk_prob: bool = False,
@@ -166,6 +174,10 @@ def static_moe_forward(
     所以 prefill 必须回到"每个专家的权重只读一次、作用于所有路由到它的 token"。
     那条路径需要数据依赖的索引（`nonzero`），**但它不进图**，因此安全。
     真正的固定形状约束只作用于 decode。
+
+    `fused` 可以是 fp16 的 `FusedExperts`（原路径），也可以是
+    `moe_grouped_quant.QuantFusedExperts`（P1：量化权重 + kernel 内解包）—— 后者在
+    decode 走量化 grouped kernel，prefill 走**逐专家反量化**。
     """
     import torch.nn.functional as F
 
@@ -187,6 +199,20 @@ def static_moe_forward(
             # 惰性 import：grouped 需要 triton，而 Mac 上装不了。只在真正走到
             # decode 时才 import，这样纯 CPU 的 prefill 路径与 gather 路径
             # 在没有 triton 的机器上依然可用。
+            if _is_quant_fused(fused):
+                from lemoq.kernels.moe_grouped_quant import (  # noqa: PLC0415
+                    static_moe_forward_grouped_quant,
+                )
+
+                return static_moe_forward_grouped_quant(
+                    hidden_states,
+                    router_weight,
+                    fused,
+                    top_k=top_k,
+                    norm_topk_prob=norm_topk_prob,
+                    act_fn=act_fn,
+                    config=moe_config,
+                )
             from lemoq.kernels.moe_grouped import static_moe_forward_grouped
 
             return static_moe_forward_grouped(
@@ -296,7 +322,7 @@ def _prefill_forward(
 
     logits, top_w, top_i = _route(x, router_weight, top_k=top_k, norm_topk_prob=norm_topk_prob)
     out = torch.zeros_like(x)
-
+    quant = _is_quant_fused(fused)
     for e in range(fused.num_experts):  # trip count = num_experts，与数据无关
         selected = top_i == e  # (T, K) bool
         # 数据依赖：这个专家被哪些 token 选中。仅在 eager prefill 路径出现。
@@ -305,10 +331,18 @@ def _prefill_forward(
             continue
         w = top_w[tok, slot].unsqueeze(-1)  # (n, 1)
         xe = x[tok]  # (n, hidden)
-        gu = xe @ fused.gate_up[e].t()  # (n, 2*ffn)
+        if quant:
+            # ★ 逐专家反量化（每个专家 12.6 MB fp16），**不**先把全部专家物化 ——
+            #   那会把省下来的字节又还回去（OLMoE fp32 全量 1.07 GB/层）。
+            gu_w = fused.dequant_gate_up_expert(e, dtype=x.dtype)
+            dn_w = fused.dequant_down_expert(e, dtype=x.dtype)
+        else:
+            gu_w = fused.gate_up[e]
+            dn_w = fused.down[e]
+        gu = xe @ gu_w.t()  # (n, 2*ffn)
         gate, up = gu.chunk(2, dim=-1)
         act = act_fn(gate) * up
-        y = act @ fused.down[e].t()  # (n, hidden)
+        y = act @ dn_w.t()  # (n, hidden)
         out.index_add_(0, tok, y * w)
 
     return out, logits
@@ -319,6 +353,11 @@ class StaticShapedMoE:
 
     刻意**不是** nn.Module 的子类：它复用原 block 的 `gate` 权重与配置，
     并把 experts 换成 fused 张量，这样显存不翻倍。
+
+    `quant`：`SchemeSpec`（来自 `lemoq.quant.linear`）。给定非 fp16 的 spec 时，
+    融合后的 (E, 2F, H) 张量会**当场**被量化成 packed int8 + scale
+    （`moe_grouped_quant.quantize_fused_experts`），decode 走量化 grouped kernel。
+    这是 `EXP-p4b-01` 的 P1。
     """
 
     def __init__(
@@ -328,17 +367,38 @@ class StaticShapedMoE:
         device: Any = None,
         dtype: Any = None,
         impl: str = "gather",
+        quant: Any = None,
     ) -> None:
         if impl not in VALID_MOE_IMPLS:
             raise ValueError("unknown impl %r; expected one of %s" % (impl, VALID_MOE_IMPLS))
+        bits = getattr(quant, "weight_bits", None) if quant is not None else None
+        if bits is not None and impl != "grouped":
+            raise NotImplementedError(
+                "量化 × %s 的路径不存在：量化只接在 grouped 的 fused 张量上"
+                "（量化感知 expert 路径，见 EXP-p4b-01-truncation 记录 §3）。" % impl
+            )
         self.impl = impl
         self.top_k = int(block.top_k)
         self.norm_topk_prob = bool(getattr(block, "norm_topk_prob", False))
         self.act_fn = getattr(block, "act_fn", None)
         self.router_weight = block.gate.weight.detach()
-        self.fused = fuse_experts(block.experts)
-        if device is not None or dtype is not None:
-            self.fused = self.fused.to(device or self.fused.gate_up.device, dtype=dtype)
+        fused = fuse_experts(block.experts)
+        if bits is None:
+            self.fused = fused
+            if device is not None or dtype is not None:
+                self.fused = self.fused.to(device or self.fused.gate_up.device, dtype=dtype)
+        else:
+            # ★ 先融合、再在 fused 张量上量化：RTN 逐行逐组（组沿最后一维），
+            #   融合只堆行/拼 dim=1，不跨行 —— 所以与"逐专家量化再融合"逐位相同
+            #   （测试 test_quantized_fuse_matches_per_expert_quantization 钉住）。
+            from lemoq.kernels.moe_grouped_quant import quantize_fused_experts  # noqa: PLC0415
+
+            self.fused = quantize_fused_experts(
+                fused,
+                bits=int(bits),
+                group_size=int(getattr(quant, "group_size", 128) or 128),
+            )
+            del fused  # 释放 fp16 融合张量，避免显存翻倍
 
     def __call__(self, hidden_states: Any) -> tuple[Any, Any]:
         return static_moe_forward(
@@ -352,14 +412,20 @@ class StaticShapedMoE:
         )
 
 
-def replace_moe_blocks(model: Any, *, verbose: bool = False, impl: str = "gather") -> int:
-    """把模型里每个 `OlmoeSparseMoeBlock` 就地换成固定形状版本。
+def replace_moe_blocks(
+    model: Any, *, verbose: bool = False, impl: str = "gather", quant: Any = None
+) -> int:
+    """把模型里每个 `OlmoeSparseMoEBlock` 就地换成固定形状版本。
 
     返回被替换的 block 数。替换后原来的 `experts` ModuleList 会被释放，
     所以**显存不会翻倍**（峰值短暂 +1 层的量）。
 
     `impl="grouped"` 只在 decode（T=1）生效；prefill 仍然走逐专家循环，
     原因见 `static_moe_forward` 的说明。
+
+    `quant`：`SchemeSpec`（非 fp16 时启用 **P1 的量化感知 expert 路径**）。
+    量化发生在融合后的张量上并把 fp16 释放掉，所以它既不需要 `nn.Linear.weight`
+    （`QuantLinear` 没有），也不会"先融合再丢失量化"。只支持 8-bit + grouped。
 
     ★ 必须在 CUDA Graph capture **之前**调用，且之后不要再改权重。
     """
@@ -378,7 +444,7 @@ def replace_moe_blocks(model: Any, *, verbose: bool = False, impl: str = "gather
         if not hasattr(block, "gate") or not hasattr(block, "top_k"):
             continue  # 不是 sparse MoE（例如 dense 层）
 
-        static = StaticShapedMoE(block, impl=impl)
+        static = StaticShapedMoE(block, impl=impl, quant=quant)
 
         # 释放原始 experts，避免显存翻倍
         del block.experts

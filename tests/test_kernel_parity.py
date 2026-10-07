@@ -99,8 +99,51 @@ def test_triton_fused_gemm_matches_reference():
         4. 同时记录 ncu 的 dram__throughput（见 lemoq.kernels.NCU_METRICS）
 
     容差不得为了通过而放宽；放宽必须写明理由并记录在实验记录里。
+
+    ★ 这是 `EXP-p2-01`（E2，dense 侧）的落点，**仍未实现**。P1（E7 的量化 expert 路径）
+    走的是下面那条 grouped 测试 —— 见 `EXP-p4b-01-truncation` 记录 §3。
     """
     pytest.skip("Triton kernel 尚未实现（按计划留到有 GPU 时写）")
+
+
+@pytest.mark.gpu
+@requires_cuda
+def test_triton_quantized_grouped_matches_oracle():
+    """★ P1 的 K1 门：**量化 grouped kernel** vs 同权重下的 fp32 oracle。
+
+    这里比的是"kernel 在寄存器里解包（code*scale）"与"先把权重量化再反量化、
+    用 fp32 做同一件事"——两者的数学完全相同，所以差异只能来自 fp32 累加顺序。
+
+    `EXP-p4b-01-truncation` §3 的 P1；容差用 `moe_grouped.PARITY_GATE`
+    （1e-3 / 1e-3），不为通过而放宽。
+    """
+    from lemoq.kernels.moe_grouped_quant import (
+        grouped_moe_forward_quant,
+        quantize_fused_experts,
+    )
+    from lemoq.kernels.moe_static import FusedExperts
+
+    torch.manual_seed(0)
+    n_experts, ffn, hidden, top_k = 4, 256, 512, 2
+    fused = FusedExperts(
+        gate_up=torch.randn(n_experts, 2 * ffn, hidden) * 0.05,
+        down=torch.randn(n_experts, hidden, ffn) * 0.05,
+    )
+    quantized = quantize_fused_experts(fused, bits=8, group_size=128).to("cuda")
+
+    x = torch.randn(hidden, dtype=torch.float16, device="cuda") * 0.5
+    ids = torch.tensor([0, 2], dtype=torch.int64, device="cuda")
+    weights = torch.tensor([0.7, 0.3], dtype=torch.float16, device="cuda")
+
+    # down 的 ffn=256：默认 SPLIT_K=4 要求 256 % (4*128) == 0（不成立），
+    # 所以显式用 SPLIT_K=2 —— 顺便覆盖 out_reduce kernel。
+    config = {"down_sum": {"SPLIT_K": 2}}
+
+    got = grouped_moe_forward_quant(x, quantized, ids, weights, config=config, backend="triton")
+    ref = grouped_moe_forward_quant(x, quantized, ids, weights, config=config, backend="oracle")
+
+    report = tolerance_report(ref.float(), got.float())
+    assert report["allclose_atol_1e-3"], report
 
 
 @pytest.mark.gpu

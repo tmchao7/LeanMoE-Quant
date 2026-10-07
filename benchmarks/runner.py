@@ -467,6 +467,57 @@ def _weight_bytes_actual(model, qreport: Any = None) -> int:
     return total
 
 
+def _record_fused_expert_quantization(model: Any, qreport: Any) -> None:
+    """把"在 fused 张量上量化"的 experts 计入 `QuantizeReport`（P1）。
+
+    为什么必须补：`quantize_model` 只看得到 attention —— experts 在
+    `replace_moe_blocks` 里已经被 `del block.experts` 了。不补这一笔，
+    报告会说"experts 量化了 0 个"，而实际上一整条量化 expert 路径都在跑，
+    于是"量化了哪些东西 / 多少个字节"这条信息是**错的**。
+    """
+    from lemoq.kernels.moe_grouped_quant import QuantFusedExperts  # noqa: PLC0415
+
+    blocks = 0
+    packed = 0
+    scale = 0
+    n_params = 0
+    n_experts = 0
+    for module in model.modules():
+        fused = getattr(module, "_static_experts", None)
+        if not isinstance(fused, QuantFusedExperts):
+            continue
+        blocks += 1
+        n_experts += int(fused.num_experts)
+        for tensor in (fused.packed_gate_up, fused.packed_down):
+            packed += int(tensor.numel()) * int(tensor.element_size())
+            n_params += int(tensor.numel())
+        for tensor in (fused.scale_gate_up, fused.scale_down):
+            scale += int(tensor.numel()) * int(tensor.element_size())
+    if not blocks:
+        return
+    qreport.replaced["experts"] = qreport.replaced.get("experts", 0) + blocks
+    bucket = qreport.realized_by_target.setdefault("experts", {})
+    for key, value in (
+        ("packed_bytes", packed),
+        ("scale_bytes", scale),
+        ("zero_bytes", 0),
+        ("bias_bytes", 0),
+    ):
+        bucket[key] = bucket.get(key, 0) + int(value)
+    bucket["total_bytes"] = bucket.get("total_bytes", 0) + packed + scale
+    bucket["n_linear"] = bucket.get("n_linear", 0) + blocks
+    bucket["n_params"] = bucket.get("n_params", 0) + n_params
+    bucket["n_params_padded"] = bucket.get("n_params_padded", 0) + n_params
+    bucket["n_moe_blocks"] = blocks
+    bucket["n_experts"] = n_experts
+    bucket["quantized_in"] = "fused_experts(kernel-side dequant, P1)"
+    qreport.spec["experts_quantization_path"] = (
+        "fuse_experts → 在 (E,2F,H)/(E,H,F) 上做 per-group RTN → packed int8 + fp16 scale；"
+        "decode 由量化 grouped kernel 在 kernel 内解包（不物化 fp16 权重）。"
+        "见 EXP-p4b-01-truncation 记录 §3 的 P1。"
+    )
+
+
 def _eager_reference_logits(model, ids, *, max_new_tokens: int) -> dict[str, Any]:
     """Collect eager logits and greedy token sequence for the graph gate."""
     import torch
@@ -864,10 +915,11 @@ def run_baseline(
     —— **E7 的两臂必须同一个 MoE 路径**，否则 execution 轴与 MoE 实现混在一起）。
     fp16 + `moe="hf"` 路径**逐字不变**。
 
-    ⚠️ `quant_cfg` 与 `moe != "hf"` **不能同时存在**，main 会先拒绝（见那里的理由）：
-    `replace_moe_blocks` 会把 experts fuse 成 fp16 张量并 `del block.experts` ——
-    之后量化找不到 expert Linear（静默只量 attention），而先量化再替换会读不到
-    `QuantLinear` 的 `.weight`。
+    ★ **量化 × grouped** 现在是存在的（`EXP-p4b-01` 的 **P1**）：experts 在**融合后的
+    (E,2F,H) 张量上**被量化（`moe_grouped_quant`），decode 走量化 grouped kernel
+    （读 packed int8 + scale，kernel 内解包，不物化 fp16 权重）；attention 仍由
+    `quantize_for_cfg` 换成 `QuantLinear`。两条路互不重叠 —— experts 在替换时已被
+    `del block.experts`，`quantize_model` 找不到它们，所以不会重复量化。
     """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -897,11 +949,16 @@ def run_baseline(
     # eager 臂也要能换 —— 否则 E7 的两臂只能一头 grouped 一头 hf，
     # execution 轴会与 MoE 实现混淆（硬规则 1）。
     moe_replaced = 0
+    qspec = quant_spec_for_cfg(quant_cfg) if quant_cfg else None
     if moe != "hf":
         from lemoq.kernels.moe_static import replace_moe_blocks  # noqa: PLC0415
 
-        moe_replaced = replace_moe_blocks(model, impl=moe)
+        # ★ P1：量化 × grouped 时 experts 在替换**内部**被量化（在融合后的张量上），
+        #   所以 spec 要传下去。fp16 臂传 None，那条路径逐字不变。
+        moe_replaced = replace_moe_blocks(model, impl=moe, quant=qspec)
     qreport = quantize_for_cfg(model, quant_cfg) if quant_cfg else None
+    if qreport is not None and moe != "hf" and qspec is not None:
+        _record_fused_expert_quantization(model, qreport)
 
     spec = _model_spec(model.config, model_id)
 
@@ -1699,22 +1756,37 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if quantized and execution == "cudagraph":
             print(
-                "runner 拒绝: 量化 × cudagraph 目前无路可走 —— hf 不能 capture"
-                "（EXP-p0-03 blocked），grouped/static 又只吃 fp16 融合权重。"
-                "需要'量化感知的 expert 路径'（EXP-p2-01 fused kernel 的 expert 版），"
-                "依赖链见 EXP-p4b-01-truncation 记录 §3。",
+                "runner 拒绝: 量化 × cudagraph 尚未接线（P3）。★ P1 已经落地 —— "
+                "量化 × grouped 的路径存在且形状静态（可 capture），缺的只是把 quant_cfg "
+                "接进 run_cudagraph。在那之前量化格只能跑 eager 臂，见 "
+                "EXP-p4b-01-truncation 记录 §3。",
                 file=sys.stderr,
             )
             return 2
-        if quantized and moe_mode != "hf":
+        # ★ P1 已落地：量化 × grouped **存在**（moe_grouped_quant：在 fused 张量上量化，
+        #   kernel 内解包）。仍然不存在的只有两条，且都必须在加载模型之前拒绝：
+        #     (a) 量化 × gather —— gather 路径吃 fp16 融合张量，没有量化版；
+        #     (b) 4-bit —— fused expert 的 nibble 解包尚未实现。
+        if quantized and moe_mode == "gather":
             print(
-                "runner 拒绝: 量化 × 非 hf MoE 的组合**不存在** —— replace_moe_blocks 只吃 fp16 "
-                "融合权重（先量化后替换会读不到 QuantLinear 的 .weight），而它又会 `del "
-                "block.experts`（后量化则静默只命中 attention）。要 E7 就需要量化感知的 "
-                "expert 路径，见 EXP-p4b-01-truncation 记录 §3。",
+                "runner 拒绝: 量化 × gather 的组合不存在 —— gather 路径直接索引 fp16 融合"
+                "张量（gate_up[ids]），没有量化版。量化 expert 路径只接在 grouped 上，"
+                "见 EXP-p4b-01-truncation 记录 §3。",
                 file=sys.stderr,
             )
             return 2
+        if quantized and moe_mode == "grouped":
+            _qb = quant_spec_for_cfg(
+                {"bit_width": args.bit_width, "group_size": args.group_size}
+            ).weight_bits
+            if int(_qb) != 8:
+                print(
+                    "runner 拒绝: 量化 grouped 路径目前只实现 8-bit（%s 是 %d-bit）—— "
+                    "4-bit 的 nibble 解包未实现，见 EXP-p4b-01-truncation 记录 §3 的 P1。"
+                    % (args.bit_width, int(_qb)),
+                    file=sys.stderr,
+                )
+                return 2
 
     # ★ `--dry-run` **不受 `is_done` 短路**：它是只读查询（不加载模型、不写文件），
     #   必须永远答得出"这一格叫什么、门是什么状态"。`results/` 是**机器本地**的

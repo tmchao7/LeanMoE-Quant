@@ -421,13 +421,19 @@ def test_run_baseline_accepts_moe_parameter():
 
     params = inspect.signature(run_baseline).parameters
     assert "moe" in params and params["moe"].default == "hf"
-    # 量化与 MoE 替换互斥（理由写在 run_baseline 的 docstring 与 main 的拒绝里）
+    # ★ P1 之后量化与 grouped MoE **可以**共存（experts 在融合张量上量化）；
+    #   docstring 必须写明这一点，否则读者还以为两者互斥。
     doc = inspect.getdoc(run_baseline) or ""
-    assert "不能同时存在" in doc
+    assert "量化 × grouped" in doc
+    assert "P1" in doc
 
 
 def test_quantized_over_non_hf_moe_is_refused(capsys):
-    """量化 × 非 hf MoE 的组合不存在 —— 这是第四条拒绝（p4b 的量化格会撞上它）。"""
+    """★ P1 之后：**量化 × gather** 仍然不存在（gather 直接索引 fp16 融合张量）。
+
+    旧版本这里用矩阵默认的 grouped —— P1 落地后那条路已经通了，再拿它当"应被拒绝"
+    会真的去加载模型（实测：跑成 3 分钟的 huggingface 超时）。
+    """
     rc = runner_main(
         [
             "--exp",
@@ -438,11 +444,13 @@ def test_quantized_over_non_hf_moe_is_refused(capsys):
             "eager",
             "--ctx",
             "1024",
+            "--moe",
+            "gather",
         ]
     )
     out = capsys.readouterr()
     assert rc == 2
-    assert "拒绝" in out.err and "replace_moe_blocks" in out.err
+    assert "拒绝" in out.err and "gather" in out.err
     # fp16 臂不受影响：同一命令只换 bit_width 就不该撞这条
     rc_fp16 = runner_main(
         [
@@ -458,6 +466,25 @@ def test_quantized_over_non_hf_moe_is_refused(capsys):
         ]
     )
     assert rc_fp16 == 0
+
+
+def test_quantized_grouped_4bit_is_refused(capsys):
+    """量化 grouped 只实现 8-bit：4-bit 的 nibble 解包未实现 → 加载前拒绝。"""
+    rc = runner_main(
+        [
+            "--exp",
+            "EXP-p4b-01-truncation",
+            "--bit-width",
+            "w4a16",
+            "--execution",
+            "eager",
+            "--ctx",
+            "1024",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "4-bit" in out.err or "8-bit" in out.err
 
 
 def test_weight_bytes_actual_counts_static_experts():

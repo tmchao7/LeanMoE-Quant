@@ -209,3 +209,138 @@ def _out_reduce_kernel(
     for s in range(SPLIT_K):
         acc += tl.load(part_ptr + s * H + n, mask=m, other=0.0)
     tl.store(out_ptr + n, acc.to(tl.float16), mask=m)
+
+
+# ===========================================================================
+# ★ 量化版（P1：量化 × 可 capture 的 MoE 路径）—— 8-bit per-group 对称 RTN
+#
+# 与上面两个 kernel 的唯一区别：权重不是 fp16，而是
+#     q_ptr   int8 codes，布局与 fp16 权重**逐元素对应**（(E, 2F, H) / (E, H, F) 连续）
+#     s_ptr   fp16 per-group scale，(E, 2F, H//GROUP) / (E, H, F//GROUP)
+# 于是 kernel 在读权重时当场做 `code * scale`，**不物化 fp16 权重**。
+# 这正是 E7 要的：把 experts 的 HBM 流量按位宽砍半，而不是"先反量化再算"。
+#
+# 三条硬约束（host 侧 `quant_launch_plan` 断言，违反直接报错而不是静默算错）：
+#   1. 输入维必须被 group_size 整除（不补零）—— OLMoE 的 2048/1024 对 128 整除；
+#   2. `BLOCK_K` 必须整除 group_size：这样一个 k 块**不会跨组边界**，
+#      整块的 scale 就是同一个标量（省掉一次 (BLOCK_N, BLOCK_K) 的 gather）；
+#   3. k 循环无掩码：要求 `H % (SPLIT_K * BLOCK_K) == 0`（同上，OLMoE 满足）。
+#
+# CUDA Graph 约束与 fp16 版完全一致（无 autotune、循环边界只来自 program_id/constexpr、
+# expert id 只进指针算术）—— 这就是它能当 P3 的前提的原因。
+# ===========================================================================
+
+
+@triton.jit
+def _gate_up_act_kernel_q(
+    x_ptr,  # (H,) fp16     —— 本 token 的 hidden state
+    q_ptr,  # (E, 2F, H) int8 —— packed codes
+    s_ptr,  # (E, 2F, H//GROUP) fp16 —— per-group scale
+    ids_ptr,  # (K,) int64
+    act_ptr,  # (K, F) fp16  —— SPLIT_K == 1
+    part_g_ptr,  # (SPLIT_K, K, F) fp32
+    part_u_ptr,  # (SPLIT_K, K, F) fp32
+    F: tl.constexpr,
+    H: tl.constexpr,
+    GROUP: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+    K_TOKENS: tl.constexpr,
+):
+    """`act[i, n] = silu((W_gate[e_i,n,:]*s).x) * ((W_up[e_i,n,:]*s).x)`，权重在寄存器里解包。"""
+    slot = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    pid_k = tl.program_id(2)
+
+    e = tl.load(ids_ptr + slot)
+
+    n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    n_mask = n < F
+    ng = H // GROUP  # 每行的组数
+
+    qbase = q_ptr + e * (2 * F * H)
+    sbase = s_ptr + e * (2 * F * ng)
+
+    acc_g = tl.zeros((BLOCK_N,), dtype=tl.float32)
+    acc_u = tl.zeros((BLOCK_N,), dtype=tl.float32)
+
+    rows_per_split = tl.cdiv(H, SPLIT_K)
+    k_start = pid_k * rows_per_split
+    k_end = tl.minimum(k_start + rows_per_split, H)
+
+    for k0 in range(k_start, k_end, BLOCK_K):
+        k = k0 + tl.arange(0, BLOCK_K)
+        # ★ BLOCK_K 整除 GROUP ⇒ 本块整体落在第 g0 组，scale 是 (BLOCK_N,) 的广播
+        g0 = k0 // GROUP
+        xv = tl.load(x_ptr + k).to(tl.float32)
+        sg = tl.load(sbase + n * ng + g0, mask=n_mask, other=0.0).to(tl.float32)
+        su = tl.load(sbase + (F + n) * ng + g0, mask=n_mask, other=0.0).to(tl.float32)
+        qg = tl.load(qbase + n[:, None] * H + k[None, :], mask=n_mask[:, None], other=0).to(
+            tl.float32
+        )
+        qu = tl.load(qbase + (F + n)[:, None] * H + k[None, :], mask=n_mask[:, None], other=0).to(
+            tl.float32
+        )
+        acc_g += tl.sum(qg * sg[:, None] * xv[None, :], axis=1)
+        acc_u += tl.sum(qu * su[:, None] * xv[None, :], axis=1)
+
+    if SPLIT_K == 1:
+        act = acc_g * tl.sigmoid(acc_g) * acc_u
+        tl.store(act_ptr + slot * F + n, act.to(tl.float16), mask=n_mask)
+    else:
+        off = (pid_k * K_TOKENS + slot) * F
+        tl.store(part_g_ptr + off + n, acc_g, mask=n_mask)
+        tl.store(part_u_ptr + off + n, acc_u, mask=n_mask)
+
+
+@triton.jit
+def _down_sum_kernel_q(
+    act_ptr,  # (K, F) fp16
+    q_ptr,  # (E, H, F) int8
+    s_ptr,  # (E, H, F//GROUP) fp16
+    ids_ptr,  # (K,) int64
+    wsum_ptr,  # (K,) fp16
+    out_ptr,  # (H,) fp16  —— SPLIT_K == 1
+    part_ptr,  # (SPLIT_K, H) fp32
+    H: tl.constexpr,
+    F: tl.constexpr,
+    GROUP: tl.constexpr,
+    K_TOKENS: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+):
+    """`out[n] = sum_i top_w[i] * ((W_down[e_i,n,:]*s).act[i,:])`，权重在寄存器里解包。"""
+    pid_n = tl.program_id(0)
+    pid_k = tl.program_id(1)
+
+    n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    n_mask = n < H
+    ng = F // GROUP
+
+    acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
+
+    cols_per_split = tl.cdiv(F, SPLIT_K)
+    k_start = pid_k * cols_per_split
+    k_end = tl.minimum(k_start + cols_per_split, F)
+
+    for slot in range(K_TOKENS):
+        e = tl.load(ids_ptr + slot)
+        w = tl.load(wsum_ptr + slot).to(tl.float32)
+        qbase = q_ptr + e * (H * F)
+        sbase = s_ptr + e * (H * ng)
+        for k0 in range(k_start, k_end, BLOCK_K):
+            k = k0 + tl.arange(0, BLOCK_K)
+            g0 = k0 // GROUP
+            a = tl.load(act_ptr + slot * F + k).to(tl.float32)
+            s = tl.load(sbase + n * ng + g0, mask=n_mask, other=0.0).to(tl.float32)
+            wq = tl.load(qbase + n[:, None] * F + k[None, :], mask=n_mask[:, None], other=0).to(
+                tl.float32
+            )
+            acc += tl.sum(wq * s[:, None] * a[None, :], axis=1) * w
+
+    if SPLIT_K == 1:
+        tl.store(out_ptr + n, acc.to(tl.float16), mask=n_mask)
+    else:
+        tl.store(part_ptr + pid_k * H + n, acc, mask=n_mask)
