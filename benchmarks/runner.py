@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from benchmarks.bytes import ModelSpec, byte_budget, weight_budget
+from benchmarks.bytes import ModelSpec, QuantSpec, byte_budget, weight_budget
 from benchmarks.cudagraph import (
     CudaGraphCaptureError,
     CudaGraphConfig,
@@ -207,6 +207,149 @@ def _moe_for_exp(exp_id: str) -> str:
     是唯一安全的默认。
     """
     return str((_matrix_entry(exp_id).get("config") or {}).get("moe", "hf"))
+
+
+# ---------------------------------------------------------------------------
+# 量化格（EXP-p2-01 / p4b-01）的三个纯函数：**全部离线可测**
+# ---------------------------------------------------------------------------
+def _matrix_axes(exp_id: str) -> list[str]:
+    """这个实验声明的**轴**，按 yaml 里的顺序：`factors` 的键依次展开，然后 `ctx`。
+
+    cell id 的后缀必须与 `results/` 里已有的骨架 id **逐字相同**，否则 runner 会
+    写出一个新文件名、`is_done()` 也永远判不了这个格。顺序不是风格问题：
+    `EXP-p4b-01-truncation__bit_width=..._execution=..._ctx=...` 的顺序就是
+    factors 的声明顺序。没有轴的实验（EXP-p4-01）返回空 —— 它的 id 不带后缀。
+    """
+    entry = _matrix_entry(exp_id)
+    axes: list[str] = []
+    for key, value in entry.items():
+        if key == "factors":
+            axes.extend(str(k) for k in (value or {}).keys())
+        elif key == "ctx":
+            axes.append("ctx")
+    return axes
+
+
+def build_exp_id(exp_id: str, values: dict[str, Any]) -> str:
+    """把解析后的轴取值按 `_matrix_axes` 的顺序拼成 cell id。
+
+    矩阵**不认识**的实验（`_matrix_entry` 返回 `{}`）没有可声明的轴 —— 保留老的
+    `__ctx=%d` 口径，因为无法区分"它本来就不带轴"和"矩阵里没有它"。
+    """
+    if not _matrix_entry(exp_id):
+        ctx = values.get("ctx")
+        return "%s__ctx=%s" % (exp_id, ctx) if ctx is not None else exp_id
+    axes = _matrix_axes(exp_id)
+    if not axes:
+        return exp_id
+    missing = [a for a in axes if values.get(a) is None]
+    if missing:
+        raise ValueError("cell id 缺轴取值: %s" % ", ".join(missing))
+    return exp_id + "__" + "_".join("%s=%s" % (a, values[a]) for a in axes)
+
+
+# ★ 正确性门的**引用表**（硬规则 2：没过门的配置不许报性能数字）。
+#   数值全部来自 EXP-p1-04 的 5 窗口真实 prompt 集实测（ctx=1024、32 步 teacher forcing）：
+#       results/EXP-p1-04-prompt-set-gate/probe_prompt_set.json -> arms[...].aggregate
+#   key = (bit_width, group_size, ctx)；targets 恒为 ("attention", "experts")（与 p1-04 逐字一致）。
+#   换任何一项（g=64、ctx=4096、加 router…）就**没有**门实测 → runner 直接拒绝。
+GATE_CITATIONS: dict[tuple[str, int, int], dict[str, Any]] = {
+    ("w8a16", 128, 1024): {"kl": 0.001273, "gate": "PASS"},
+    ("w8a8", 128, 1024): {"kl": 0.032753, "gate": "FAIL"},
+    ("w4a16", 128, 1024): {"kl": 0.093323, "gate": "FAIL"},
+}
+
+
+def gate_for_cell(bit_width: str, group_size: int, ctx: int) -> dict[str, Any] | None:
+    """该量化配置有没有**实测过**的正确性门。None = 没测过，不许跑。"""
+    return GATE_CITATIONS.get((bit_width, int(group_size), int(ctx)))
+
+
+def quant_spec_for_cfg(cfg: dict[str, Any]) -> Any:
+    """cell 的量化 spec（fp16 返回 None）。
+
+    targets 必须显式写 `("attention", "experts")`：`SchemeSpec.from_flags` 的默认值
+    多一个 `router`，而 EXP-p1-04 的门是**不含 router** 测的 —— 用默认值就等于
+    换了一个没过门的配置（p1-01 实测：只量 router 就能让 W8 的 KL 动 14-74%）。
+    """
+    bit_width = cfg.get("bit_width") or "fp16"
+    if bit_width == "fp16":
+        return None
+    from lemoq.quant.linear import SchemeSpec  # noqa: PLC0415
+
+    return SchemeSpec.from_flags(
+        str(bit_width),
+        int(cfg.get("group_size") or 128),
+        targets=("attention", "experts"),
+    )
+
+
+def quantize_for_cfg(model: Any, cfg: dict[str, Any]) -> Any:
+    """按 cell 的 cfg **就地**量化；fp16 返回 None。返回 `QuantizeReport`。CPU 可测。"""
+    spec = quant_spec_for_cfg(cfg)
+    if spec is None:
+        return None
+    from lemoq.quant.linear import quantize_model  # noqa: PLC0415
+
+    _, report = quantize_model(model, spec)
+    return report
+
+
+def correctness_for_cell(cfg: dict[str, Any], *, consistency_passed: bool) -> dict[str, Any]:
+    """这个格的 `correctness` 段。两条互斥的口径，**绝不混用**：
+
+    fp16     ：本配置即参考，KL/top-1 无意义 → 全 null，把守的是自洽性（consistency）。
+    量化配置  ：KL **引用** GATE_CITATIONS 里同配置的 EXP-p1-04 实测（不是本格实测，
+                必须写明），gate 同时要求"引用门 PASS"且"自洽性 PASS"。
+                引用门 FAIL 的格子照跑（它们是 evidence），但 verdict 只能是 FAIL
+                —— 它的延迟**不得**被当成性能结论引用。
+    """
+    bit_width = cfg.get("bit_width") or "fp16"
+    base: dict[str, Any] = {
+        "kl": None,
+        "top1_agreement": None,
+        "ppl_fp16": None,
+        "ppl_this": None,
+        "ppl_delta": None,
+    }
+    if bit_width == "fp16":
+        return dict(
+            base,
+            gate="PASS" if consistency_passed else "FAIL",
+            thresholds={
+                "note": (
+                    "fp16 基线：KL / top-1 对参考实现无意义（本配置即参考），故为 null。"
+                    "可证伪的门槛是自洽性 —— 见 consistency。"
+                ),
+                "kl_max_w8": 0.01,
+                "kl_max_w4": 0.05,
+                "top1_min": 0.95,
+            },
+        )
+    cite = gate_for_cell(bit_width, int(cfg.get("group_size") or 0), int(cfg.get("ctx") or 0))
+    if cite is None:  # 主流程会先拒绝；这里是最后一道闸
+        return dict(
+            base,
+            gate="FAIL",
+            thresholds={"note": "该量化配置没有 EXP-p1-04 的门实测 —— 不得报性能数字。"},
+        )
+    cited_pass = cite["gate"] == "PASS"
+    return dict(
+        base,
+        kl=cite["kl"],
+        gate="PASS" if (cited_pass and consistency_passed) else "FAIL",
+        thresholds={
+            "kl_max_w8": 0.01,
+            "kl_max_w4": 0.05,
+            "top1_min": 0.95,
+            "note": (
+                "★ kl 是**引用** EXP-p1-04（5 窗口真实 prompt 集、ctx=1024、同 scheme/"
+                "同 group_size/targets=attention+experts）的实测 mean，不是本格实测；"
+                "引用值 = %.6f（%s）。本格只测性能。" % (cite["kl"], cite["gate"])
+            ),
+            "source": "EXP-p1-04-prompt-set-gate/probe_prompt_set.json",
+        },
+    )
 
 
 def _load_model(model_id: str, dtype_name: str, device: str, attn: str | None = None):
@@ -628,8 +771,13 @@ def run_baseline(
     timed: int,
     dtype_name: str,
     device: str = "cuda",
+    quant_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Load the model, measure prefill / per-token latency / VRAM / host-gap."""
+    """Load the model, measure prefill / per-token latency / VRAM / host-gap.
+
+    `quant_cfg` 非 None 时在测量前就地量化（`separate` 臂的全部语义：QuantLinear 每次
+    forward 物化 fp16 权重）。fp16 路径**逐字不变**：不传它时不做任何量化动作。
+    """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -654,12 +802,29 @@ def run_baseline(
     model = model.to(device).eval()
     tr.mark("after_weights")
 
+    # ★ 量化必须在 weight_bytes_actual 与任何测量之前。QuantLinear 把 packed/scale
+    #   存成 **buffer**（`model.parameters()` 看不见它），所以字节账要单独加
+    #   （见下面的 `if qreport is not None`）——漏了它，量化格的 weight_bytes_actual
+    #   会**少算 96%**（experts 占大头）。
+    qreport = quantize_for_cfg(model, quant_cfg) if quant_cfg else None
+
     spec = _model_spec(model.config, model_id)
 
     # 权重实际占用（区别于 checkpoint 里的字节数）。这一步很关键：
     # OLMoE 的 checkpoint 自述是 bf16，我们按 fp16 加载，两者都是 2 字节所以应当接近，
     # 但如果差得远，说明加载路径没按预期走 —— 那样后面所有字节账都是错的。
     weight_bytes_actual = sum(p.numel() * p.element_size() for p in model.parameters())
+    if qreport is not None:
+        from lemoq.quant.linear import QuantLinear  # noqa: PLC0415
+
+        # QuantLinear 没有 weight 参数（权重在 packed buffer 里）→ 只数 parameters
+        # 会漏掉全部量化权重 + scales。bias 也在 buffer 里，一并计入。
+        weight_bytes_actual += sum(
+            b.numel() * b.element_size()
+            for m in model.modules()
+            if isinstance(m, QuantLinear)
+            for b in m.buffers()
+        )
     tie = bool(getattr(model.config, "tie_word_embeddings", False))
     if tie:
         weight_bytes_actual -= (
@@ -725,8 +890,21 @@ def run_baseline(
     vram = split_report(tr)
 
     # ---- 字节预算 ----
-    budget = byte_budget(spec, ctx=ctx, batch=batch)
-    w = weight_budget(spec)
+    # 量化格必须把 QuantSpec 传进去：否则 [W] 用 fp16 的分母算"达成率"，
+    # 而量化格的分母本来就该是**打包后**的字节（docs/METRICS.md §3.2）。
+    qspec = quant_spec_for_cfg(quant_cfg) if quant_cfg else None
+    quant = (
+        QuantSpec(
+            bits=qspec.weight_bits,
+            group_size=qspec.group_size,
+            targets=qspec.targets,
+            keep_lm_head_fp16=qspec.keep_lm_head_fp16,
+        )
+        if qspec
+        else None
+    )
+    budget = byte_budget(spec, ctx=ctx, batch=batch, quant=quant)
+    w = weight_budget(spec, quant=quant)
 
     # ---- 达成率（用实测带宽，绝不用规格值） ----
     probe = _load_probe()
@@ -990,29 +1168,18 @@ def build_payload(
         "timed": cfg.get("timed"),
     }
 
-    # ★ fp16 基线没有"与参考比"的意义 —— 这个配置**就是**参考实现。
-    #   所以这里不写 KL=0 冒充"通过了门槛"（那是同义反复，属于自欺）。
-    #   真正可证伪的门槛是**自洽性**：由实测带宽和字节账推出的理论下限，
-    #   必须 <= 实测时间。若 >100%，错的一定是字节账或带宽（本项目全部结论的地基）。
+    # 两条互斥的口径（细节在 `correctness_for_cell`）：
+    #   fp16   ：本配置**就是**参考实现，KL=0 冒充"过门"是同义反复 → 全 null，
+    #            把守的是自洽性：由实测带宽和字节账推出的理论下限必须 <= 实测时间。
+    #   量化格 ：KL **引用** EXP-p1-04 同配置的 5 窗口 prompt 集实测（不是本格实测），
+    #            gate = 引用门 PASS 且自洽性 PASS。
+    #            引用门 FAIL 的格子照跑（它们是"融合没有改变正确性判定"的 evidence），
+    #            但 verdict 只能是 FAIL —— 其延迟不得作为性能结论引用。
     consistency = _consistency_gate(res)
-    payload["correctness"] = {
-        "kl": None,
-        "top1_agreement": None,
-        "ppl_fp16": None,
-        "ppl_this": None,
-        "ppl_delta": None,
-        "gate": "PASS" if consistency["passed"] else "FAIL",
-        "thresholds": {
-            "note": (
-                "fp16 基线：KL / top-1 对参考实现无意义（本配置即参考），故为 null。"
-                "可证伪的门槛是自洽性 —— 见 consistency。"
-            ),
-            "kl_max_w8": 0.01,
-            "kl_max_w4": 0.05,
-            "top1_min": 0.95,
-        },
-        "consistency": consistency,
-    }
+    payload["correctness"] = correctness_for_cell(
+        cfg, consistency_passed=bool(consistency["passed"])
+    )
+    payload["correctness"]["consistency"] = consistency
 
     budget = res["budget"]
     payload["bytes"] = {
@@ -1059,7 +1226,9 @@ def build_payload(
         "host_share_pct": gap.get("host_share_pct"),
         "kernels_per_call": gap.get("kernels_per_call"),
         "host_share_pct_residual": gap.get("host_share_pct_residual"),
-        "dequant_share_pct": None,  # 本阶段没有反量化
+        # separate 臂的 dequant 占比要靠隔离微基准，尚未接入（EXP-p2-01 的待办）；
+        # fused 臂要等 kernel。两者在接入前都必须是 None —— 写 0 会假装"没有反量化"。
+        "dequant_share_pct": None,
         "routing_share_pct": (
             round(100.0 * bucket.get("routing_pack", 0.0) / gpu_total, 1) if gpu_total else None
         ),
@@ -1101,19 +1270,47 @@ def build_payload(
         "method": vram.get("method"),
     }
 
-    payload["verdict"] = {
-        "verdict": "PASS" if consistency["passed"] else "FAIL",
-        "outcome": "supported" if consistency["passed"] else "refuted",
-        "notes": (
+    _gate_pass = payload["correctness"]["gate"] == "PASS"
+    if (cfg.get("bit_width") or "fp16") == "fp16":
+        _notes = (
             "第一条系统级基线，不构成任何量化结论；它建立的是测量管线与绝对数字。"
             "正确性栏位里的 KL/top-1 为 null（对本配置无意义），"
             "实际把守的是 consistency 自洽性检查。"
-        ),
+        )
+        _applies = "fp16、单卡、batch=1、ctx=%s、%s" % (
+            cfg.get("ctx"),
+            payload["hardware"].get("compute_capability"),
+        )
+        _not_applies = "量化配置（见 EXP-p1-*）、batch>1、其它架构"
+    else:
+        _notes = (
+            "量化格（%s group=%s dequant=%s）。KL 引用 EXP-p1-04 的同配置实测；"
+            "本格测的是性能（separate 臂 = QuantLinear 每次 forward 物化 fp16 权重）。"
+            % (cfg.get("bit_width"), cfg.get("group_size"), cfg.get("dequant"))
+        )
+        if not _gate_pass:
+            _notes += (
+                " ★ 正确性门 FAIL：本格的延迟**只允许**被引用为'融合/执行方式不改变"
+                "正确性判定'的证据，不得作为性能结论（硬规则 2）。"
+            )
+        else:
+            _notes += " 性能结论只对引用的这个配置成立，不能外推到其它 group_size/ctx。"
+        _applies = "%s group=%s dequant=%s、单卡、batch=1、ctx=%s、%s" % (
+            cfg.get("bit_width"),
+            cfg.get("group_size"),
+            cfg.get("dequant"),
+            cfg.get("ctx"),
+            payload["hardware"].get("compute_capability"),
+        )
+        _not_applies = "其它 group_size / ctx / targets（门没有实测）、batch>1、其它架构"
+    payload["verdict"] = {
+        "verdict": "PASS" if _gate_pass else "FAIL",
+        "outcome": "supported" if _gate_pass else "refuted",
+        "notes": _notes,
     }
     payload["applicability"] = {
-        "applies_to": "fp16、单卡、batch=1、ctx=%s、%s"
-        % (cfg.get("ctx"), payload["hardware"].get("compute_capability")),
-        "does_not_apply_to": "量化配置（见 EXP-p1-*）、batch>1、其它架构",
+        "applies_to": _applies,
+        "does_not_apply_to": _not_applies,
         "why": "所有数字都绑定在实测带宽 %s GB/s 与该卡的 launch 开销上" % res["measured_bw_gbps"],
     }
     payload["_measurement"] = {
@@ -1337,17 +1534,74 @@ def main(argv: list[str] | None = None) -> int:
             "只作用于 q_len=1；prefill 仍走 HF 原路）"
         ),
     )
+    ap.add_argument(
+        "--bit-width",
+        default="fp16",
+        choices=["fp16", "w8a16", "w8a8", "w4a16"],
+        help="量化位宽（EXP-p2-01 / p4b-01 的 bit_width 轴）。fp16 = 不量化。",
+    )
+    ap.add_argument(
+        "--dequant",
+        default="none",
+        choices=["none", "separate", "fused"],
+        help="反量化方式（EXP-p2-01 的 dequant 轴）。fused 的 kernel 未实现，真跑会被拒绝。",
+    )
+    ap.add_argument(
+        "--group-size",
+        type=int,
+        default=128,
+        help="量化 group_size。门只实测过 128（EXP-p1-04），其它值会被拒绝。",
+    )
     ap.add_argument("--results-dir", default="results")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args(argv)
 
-    exp_id = "%s__ctx=%d" % (args.exp, args.ctx)
+    execution = _execution_for_exp(args.exp, args.execution)
+    # ★ cell id 必须由**矩阵声明的轴**拼出（顺序 = yaml 里 factors 键的顺序，然后 ctx）。
+    #   老代码手拼 `__ctx=%d`：EXP-p2-01 的格子是 `__bit_width=..._dequant=...`，
+    #   于是会写出一个与骨架对不上的文件名 —— `is_done()` 永远判不了它。
+    exp_id = build_exp_id(
+        args.exp,
+        {
+            "ctx": args.ctx,
+            "bit_width": args.bit_width,
+            "dequant": args.dequant,
+            "execution": execution,
+        },
+    )
+    quantized = args.bit_width != "fp16"
+    citation = None if not quantized else gate_for_cell(args.bit_width, args.group_size, args.ctx)
+
+    if not args.dry_run:
+        # 三条拒绝都发生在**任何模型加载之前** —— 干净失败，且离线（无 GPU）可测。
+        if args.dequant == "fused":
+            print(
+                "runner 拒绝: --dequant fused 的融合 kernel 尚未实现"
+                "（src/lemoq/kernels/__init__.py 记录了为什么离线不写它）；"
+                "EXP-p2-01 的 fused 格保持 planned。",
+                file=sys.stderr,
+            )
+            return 2
+        if quantized and citation is None:
+            print(
+                "runner 拒绝: %s / group=%d / ctx=%d 没有 EXP-p1-04 的门实测，"
+                "不许在没有正确性门的配置上跑性能（硬规则 2）。先补测精度。"
+                % (args.bit_width, args.group_size, args.ctx),
+                file=sys.stderr,
+            )
+            return 2
+        if quantized and execution == "cudagraph":
+            print(
+                "runner 拒绝: 量化 + cudagraph 的接线尚未完成（EXP-p4b-01 的离线步骤）。",
+                file=sys.stderr,
+            )
+            return 2
+
     if is_done(exp_id, args.results_dir) and not args.force:
         print("skip (done): %s" % exp_id)
         return 0
 
-    execution = _execution_for_exp(args.exp, args.execution)
     if execution == "cudagraph" and args.dtype != "float16":
         print("runner 失败: EXP-p0-03 只支持 --dtype float16", file=sys.stderr)
         return 2
@@ -1364,14 +1618,20 @@ def main(argv: list[str] | None = None) -> int:
 
     attn_mode = args.attn if getattr(args, "attn", None) else _config_for_exp(args.exp, "attn")
 
+    # ★ 假设优先取**矩阵声明**（harness 写骨架时就是这么取的）。只有矩阵没写、
+    #   且本实验是 fp16 基线时，才用下面这段内置文本 —— 否则 p2-01 的记录里
+    #   会被塞进一句与它无关的 fp16 假设。
+    _mx = _matrix_entry(args.exp)
     hypothesis = {
-        "statement": (
+        "statement": _mx.get("hypothesis")
+        or (
             "fp16 StaticCache 能让固定 batch=1/q_len=1 的 OLMoE decode capture/replay；"
             "graph 与 eager 的 logits/top-1 通过正确性门"
             if execution == "cudagraph"
             else "fp16 能在目标卡上加载并前向；测量管线产出的延迟/显存/归因自洽"
         ),
-        "refutation_signal": (
+        "refutation_signal": _mx.get("refutation_signal")
+        or (
             "prefill、capture、replay 或 graph/eager 正确性门失败；必须记录阻塞阶段，"
             "不填性能数字"
             if execution == "cudagraph"
@@ -1379,7 +1639,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     }
     cfg = {
-        "bit_width": "fp16",
+        "bit_width": args.bit_width,
         "dtype": args.dtype,
         "ctx": args.ctx,
         "batch": args.batch,
@@ -1389,9 +1649,11 @@ def main(argv: list[str] | None = None) -> int:
         "execution": execution,
         "moe": moe_mode,
         "attn": attn_mode or "model-default",
-        "dequant": "none",
+        # fp16 格的 dequant/group_size 必须保持 "none"/None —— 已落盘的 p0/p2 结果
+        # 就是这两个值，改它们会让重跑的 payload 与历史不一致。
+        "dequant": args.dequant if quantized else "none",
         "fusion": "none",
-        "group_size": None,
+        "group_size": args.group_size if quantized else None,
     }
 
     if execution == "cudagraph":
@@ -1429,6 +1691,19 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "  model=%s ctx=%d batch=%d dtype=%s" % (args.model, args.ctx, args.batch, args.dtype)
         )
+        print(
+            "  bit_width=%s group_size=%s dequant=%s execution=%s"
+            % (cfg["bit_width"], cfg["group_size"], cfg["dequant"], cfg["execution"])
+        )
+        if quantized:
+            print(
+                "  gate: %s"
+                % (
+                    "%s (引用 EXP-p1-04, kl=%.6f)" % (citation["gate"], citation["kl"])
+                    if citation
+                    else "无门实测 → 真跑会被拒绝"
+                )
+            )
         return 0
 
     try:
@@ -1453,6 +1728,11 @@ def main(argv: list[str] | None = None) -> int:
                 warmup=args.warmup,
                 timed=args.timed,
                 dtype_name=args.dtype,
+                quant_cfg=(
+                    {"bit_width": args.bit_width, "group_size": args.group_size, "ctx": args.ctx}
+                    if quantized
+                    else None
+                ),
             )
     except CudaGraphCorrectnessError as exc:
         payload = failed_result(
