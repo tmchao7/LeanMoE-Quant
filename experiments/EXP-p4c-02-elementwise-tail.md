@@ -8,7 +8,8 @@
 - **ID**: `EXP-p4c-02-elementwise-tail`
 - **Date**: 2026-10-07
 - **Operator**: `tools/profile_graph_scopes.py`（新工具，GPU）
-- **Status**: `done`（kernel 级归因成立；**模块级归因按自己的预注册判据作废**，见 §4）
+- **Status**: `done`（kernel 级归因成立；**模块级归因按自己的预注册判据作废**，见 §4；
+  拷贝族的第一个修法——torch 融合 `rms_norm`——**被否证**，见 §5.5）
 - **原始数据**: `results/EXP-p4c-02-elementwise-tail/scopes_w8a16_kernel_ctx1024.json`
 - **对照**: `EXP-p4c-01` §5.4（同一个配置的 runner payload）、`EXP-p2-02`（MoE 换掉 gather 的那一步）
 
@@ -95,6 +96,47 @@ eager GPU 3.607 ms/步  vs  graph 2.350 ms/步   （+53%）
   **拷贝族 `direct_copy`+`float16_copy`（≈0.17 ms）**、
   **KV cache 的 `index_copy_`+`cat`（≈0.11 ms）**、残差 `add`（≈0.05）、路由 `topK`（≈0.05）。
 
+## 5.5 拷贝族的追查：`aten::_to_copy` ×150/步，以及一次**被否证的修法**
+
+`--stacks` 归因（新加的 `tools/profile_graph_scopes.py --stacks`，用算子级 device time，
+不依赖在图里作废的作用域）把拷贝族钉住：
+
+```text
+aten::_to_copy      0.1854 ms  ×150/步     ← 全是 dtype cast
+aten::copy_         0.1854 ms  ×150/步     （同一批 kernel 的 op 侧视图）
+```
+
+顺着 cast 数下去就是 HF 的 `OlmoeRMSNorm.forward`（源码抄在 `tools/bench_fused_norm.py` 的
+docstring 里）：`to(float32)` → `pow(2).mean(-1)` → `rsqrt/mul` → `to(fp16)` → `weight *`。
+**每个 norm 7 个 kernel**，而 OLMoE 每层 4 个 norm（q_norm/k_norm/input/post）+ 最后 1 个 =
+**65 个/步** ⇒ 光这一处 ≈455 kernel/步，正好对上长尾里的 `MeanOps`×65、`rsqrt`×65、
+几族 elementwise×64–65 与那 130 次 cast。
+
+**试过的修法（`tools/bench_fused_norm.py`，图内同进程交错 A/B，判据跑之前写死）**：
+把每个 `OlmoeRMSNorm.forward` 实例级换成 `torch.nn.functional.rms_norm`（原生融合 kernel）。
+
+| 臂 | p50 | wins | GPU/步 | kernel/步 |
+|---|---|---|---|---|
+| HF 原实现 | **2.4106 ms** | **15/15** | 2.347 ms | 994 |
+| `F.rms_norm` 融合 | 2.5358 ms | 0/15 | 2.472 ms | 994 |
+
+```text
+K1（数值）：KL = 7.215e-04（<1e-3 ✓）；top-1 一致 = 1.0000（≥0.99 ✓）
+            ⇒ 它确实是**同一个归一化**，数值没问题
+D （性能）：要求融合臂快 >3% —— 实测**慢 5.0%** ⇒ **否证，不采纳**
+```
+
+**为什么会慢（逐 kernel 对照，这才是本节的产出）**：
+
+- 融合臂**并没有**把 `reduce_kernel<MeanOps>` 拿掉：它仍是 ×65 = 0.0990 ms；
+- 融合臂**新增**了 `unrolled_elementwise_kernel<BinaryFunctor<float>>` ×65 = **0.1889 ms** ——
+  因为 `F.rms_norm` 在 **fp32** 里做"乘 weight"这一步，而 HF 是先把归一化结果舍入到 fp16、
+  再用 fp16 的 weight 乘（那一步只要 0.066 ms）；
+- 其余家族（`direct_copy`×66、`elementwise`×64–65、`BinaryFunctor<Half>`×65）**一个都没少**。
+
+⇒ **"7 个 kernel 融成 1 个"这个前提是错的**：`F.rms_norm` 不是一个针对 (1, 2048) 这种行的廉价
+kernel，它把整条链留在 fp32 上做，反而更贵。这也说明长尾里"族多"并不等于"融起来就便宜"。
+
 ## 6. Verdict
 
 ```text
@@ -105,6 +147,8 @@ notes:      长尾确实由**可命名的模块级算子链**构成（假设成�
             没有单点 >40% ⇒ 不存在"改一处就赚 0.4 ms"的机会；只能按家族逐个消。
             ★ 反证信号（"落不到具体模块就作废"）在**模块**这一级确实触发了 —— 我按预注册把它写成
             inconclusive，并且没有拿 eager 的作用域数字去解释图。
+            ★ 修法层面：**把 HF 的 norm 换成 torch 自带融合 `rms_norm` 被否证**（慢 5%，§5.5），
+            并给出了机理（保留同一 reduce + 新增一次 fp32 行乘 0.189 ms）。
 ```
 
 ## 7. Follow-ups（按"数值风险 × 收益"排序）
@@ -113,10 +157,17 @@ notes:      长尾确实由**可命名的模块级算子链**构成（假设成�
    收益 7%、**不动数值**（若确认是无谓的 `.contiguous()`/同 dtype cast，删掉即可）。
    先要**精确指认**它在哪：模块级归因作废了，替代办法是给 `QuantLinear`/`StaticCache` 路径
    加计数器，或在 HF forward 的候选点上打 `record_function` 单独验证（小范围、可判读）。
-2. **RMSNorm 链 0.15–0.25 ms**（mean + rsqrt + elementwise，65 次/步）：
-   收益 6–11%，但**要改数值**（把 norm 折进投影 kernel 会改归约顺序）⇒ 必须**重测引用门**
-   （`tools/quant_probe.py` 的 5 窗口 prompt 集）才能发表 —— 这是**用户决策点**，
-   按 `AGENTS.md` §6 先问。
+2. **RMSNorm 链 ≈0.35–0.43 ms**（mean 0.098 + rsqrt 0.053 + 两族 elementwise + ~130 次 cast）：
+   - ❌ **已试过并否证**：换成 torch 自带融合 `F.rms_norm` —— 慢 5%（§5.5），机理清楚。
+   - ⬜ **剩下的路是自研 kernel**：一次 launch 完成"fp16 读入 → fp32 累加 mean → rsqrt →
+     乘 weight → 写 fp16"，按 (1, 2048) 这种行调 launch 配置。**要打败的门槛是整条链 ≈0.43 ms**；
+     下限由字节定：65 个 norm × (4 KB 读 + 4 KB 写) = 0.5 MB ⇒ 0.33 µs 的 DRAM，
+     所以一个 ~1 µs 的 launch × 65 ≈ 0.1 ms 是可达量级（**上限仍有 ~0.3 ms 可赚，约 12%**）。
+     与 `F.rms_norm` 的关键区别：**必须在 fp16 里做最后那次乘**（或至少别把整行拉到 fp32 乘），
+     否则就是重演 §5.5 的 0.189 ms。
+   - ⚠️ 若自研 kernel 改了归约顺序 ⇒ 按规则要**重新测引用门**（新测量，不是放宽门）——
+     但若把"乘 weight"保持在 fp16、只融合 reduce+rsqrt+cast，数值上更接近 HF，
+     这需要先量 KL（`tools/bench_fused_norm.py` 的 K1 就是干这个的）。
 3. **KV cache 写 0.11 ms**（`index_copy_` + `cat`，32 次）：属于 HF 的 StaticCache 路径，
    要动得替换 cache 实现（与 `attn_decode` 的"长度从设备内存读"是同一类侵入）。
 4. **路由 topK 0.05 ms**：与 `EXP-p4-01` 的"路由开销"是同一件事在 grouped 路径上的**可见残余**
