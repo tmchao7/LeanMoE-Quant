@@ -46,7 +46,9 @@ from benchmarks.runner import (
 
 RESULTS = Path(__file__).resolve().parent.parent / "results"
 # cell id 里出现过的轴键（解析已有目录名用；顺序无所谓，输出顺序由 _matrix_axes 定）
-AXIS_KEYS = ("bit_width", "group_size", "dequant", "execution", "ctx")
+# ★ 新加轴时必须同时登记在这里：它是"骨架文件名 ↔ `build_exp_id`"的唯一真值来源测试
+#   的解析器；漏登记会让那条测试报"缺轴取值"而不是静默放过（这正是它该有的行为）。
+AXIS_KEYS = ("bit_width", "group_size", "dequant", "execution", "ctx", "attn")
 
 
 def _parse_cell_dir(dirname: str) -> tuple[str, dict[str, str]] | None:
@@ -104,6 +106,24 @@ def test_matrix_axes_are_declared_in_yaml_order():
     assert _matrix_axes("EXP-p0-02-baseline-fp16") == ["ctx"]
     # 矩阵里声明了、但没有轴的实验：id 不带后缀
     assert _matrix_axes("EXP-p4-01-moe-routing-overhead") == []
+    # EXP-p4c-01：attn 是**声明轴**（不是静态 config），顺序 = yaml 里 factors 的顺序
+    assert _matrix_axes("EXP-p4c-01-in-graph-attention") == ["bit_width", "attn", "ctx"]
+
+
+def test_attn_axis_is_declared_and_guarded():
+    """★ `EXP-p4c-01` 的 `attn` 轴：两个臂必须是**不同的 cell id**，且缺值必须报错。
+
+    第二条是防跑偏的关键：静默退回模型默认臂会写出一份"看起来是 kernel 证据"的 sdpa
+    结果（`_execution_for_exp` 的注释里记着同类事故：臂选错了，报错说的却是网络）。
+    """
+    base = "EXP-p4c-01-in-graph-attention"
+    sdpa = build_exp_id(base, {"bit_width": "w8a16", "attn": "sdpa", "ctx": 1024})
+    kernel = build_exp_id(base, {"bit_width": "w8a16", "attn": "kernel", "ctx": 1024})
+    assert sdpa != kernel
+    assert sdpa.endswith("__bit_width=w8a16_attn=sdpa_ctx=1024")
+    assert kernel.endswith("__bit_width=w8a16_attn=kernel_ctx=1024")
+    with pytest.raises(ValueError, match="attn"):
+        build_exp_id(base, {"bit_width": "w8a16", "ctx": 1024})
 
 
 def test_build_exp_id_keeps_legacy_format_for_matrix_unknown_experiments():
@@ -643,6 +663,29 @@ def test_quantized_grouped_odd_group_size_is_refused(capsys, monkeypatch):
     out = capsys.readouterr()
     assert rc == 2
     assert "偶数" in out.err or "门实测" in out.err
+
+
+def test_dry_run_surfaces_the_in_graph_attention_cells(capsys):
+    """新实验（EXP-p4c-01）的格子必须能被 `--dry-run` 看见，并带上引用门的状态。"""
+    rc = runner_main(
+        [
+            "--exp",
+            "EXP-p4c-01-in-graph-attention",
+            "--bit-width",
+            "w8a16",
+            "--attn",
+            "kernel",
+            "--ctx",
+            "1024",
+            "--dry-run",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    assert (
+        "would run: EXP-p4c-01-in-graph-attention__bit_width=w8a16_attn=kernel_ctx=1024" in out.out
+    )
+    assert "gate: PASS" in out.out, out.out
 
 
 def test_weight_bytes_actual_counts_static_experts():

@@ -258,6 +258,39 @@ experiments:
     metrics: ["per_token_p50", "per_token_p99", "dequant_share", "bw_attainment", "ncu_metrics"]
 
   # ---------- Phase 4b：★ E7 收益截断（本项目的头号结论） ----------
+  - id: EXP-p4c-01-in-graph-attention
+    stage: p4c
+    kind: perf
+    requires:
+    - cp_async
+    desc: 'E7 的后续（用户 2026-10-07 批准的新 EXP id）：把 attention core 换成自研
+      split-KV kernel，看能不能压掉 graph 步里「拿不掉的 55%」，从而提高量化的端到端收益。
+      配置固定为 cudagraph × moe=grouped；w8a16 格用 --dequant fused 跑（dequant 不是本实验
+      的轴，它是 p2-01/p4b 的既有结论，这里只固定成「已知最优臂」）'
+    hypothesis: '§2.8.7 的实测归因显示量化 graph 步里 fmha 占 33–65%、elementwise/copy 占
+      12–23%，而权重流只有 23–42%；换掉 attention core 应当压低前者，从而提高 w8a16 的
+      speedup（1.11 → 更高），且 fp16 臂也同向变快但幅度更小（它的权重流占比更高）'
+    refutation_signal: 'kernel 臂与 sdpa 臂的 speedup 差落在金丝雀带内（说明那个头寸不在
+      attention core），或 kernel 臂的 KL / 图重放门失败'
+    factors:
+      bit_width:
+      - fp16
+      - w8a16
+      attn:
+      - sdpa
+      - kernel
+    ctx:
+    - 1024
+    - 4096
+    config:
+      execution: cudagraph
+      moe: grouped
+    metrics:
+    - per_token_p50
+    - per_token_p99
+    - host_share
+    - bw_attainment
+    - kl
   - id: EXP-p4b-01-truncation
     stage: "p4b"
     kind: "perf"

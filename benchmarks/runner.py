@@ -2124,6 +2124,11 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     execution = _execution_for_exp(args.exp, args.execution)
+    # ★ attention 实现必须在**拼 cell id 之前**解析：`attn` 从 EXP-p4c-01 起是**声明轴**
+    #   （{sdpa, kernel}），cell id 里必须带上它，否则两个臂会写成同一个文件。
+    #   缺轴取值时 `build_exp_id` 会直接报错，**不静默退回默认臂** —— 那正是这里要的：
+    #   一个静默跑错臂的格子会写出一份"看起来是 kernel 证据"的 sdpa 结果。
+    attn_mode = args.attn if getattr(args, "attn", None) else _config_for_exp(args.exp, "attn")
     # ★ cell id 必须由**矩阵声明的轴**拼出（顺序 = yaml 里 factors 键的顺序，然后 ctx）。
     #   老代码手拼 `__ctx=%d`：EXP-p2-01 的格子是 `__bit_width=..._dequant=...`，
     #   于是会写出一个与骨架对不上的文件名 —— `is_done()` 永远判不了它。
@@ -2134,6 +2139,7 @@ def main(argv: list[str] | None = None) -> int:
             "bit_width": args.bit_width,
             "dequant": args.dequant,
             "execution": execution,
+            "attn": attn_mode,
         },
     )
     quantized = args.bit_width != "fp16"
@@ -2234,7 +2240,7 @@ def main(argv: list[str] | None = None) -> int:
         print("runner 失败: EXP-p0-03 只支持 --dtype float16", file=sys.stderr)
         return 2
 
-    attn_mode = args.attn if getattr(args, "attn", None) else _config_for_exp(args.exp, "attn")
+    # attn_mode 已在上面解析（cell id 需要它；见那里的注释）。
 
     # ★ 假设优先取**矩阵声明**（harness 写骨架时就是这么取的）。只有矩阵没写、
     #   且本实验是 fp16 基线时，才用下面这段内置文本 —— 否则 p2-01 的记录里
