@@ -121,6 +121,14 @@ uv run python -m tools.check_docs
 2. **先快照当前状态**：`nvidia-smi`（有没有别人的进程）、`git log -1`、跑一遍离线测试。
 3. `EXP-p2-01`：先写 `separate` 臂并拿到数字（它是 fused 的对照，必须同进程同条件），
    再写 fused kernel。**每加一格都在同一个进程里交错测。**
+
+   > ★ **离线接线已完成**（2026-10-06，本仓库当时的离线会话）：格子 id、
+   > `--bit-width/--dequant/--group-size`、三条拒绝（fused 未实现 / 无门实测 /
+   > 量化+cudagraph 未接线）、`GATE_CITATIONS` 与 `EXP-p1-04` 的逐字对齐、
+   > 量化 hook 与字节账 —— 全部实现并有离线测试（352 passed）。
+   > **还差的清单见 `experiments/EXP-p2-01-dequant-fusion.md` §4**（kernel、
+   > dequant_share、跑 6 格、记录）。矩阵的 bit_width 轴已加 `w8a16`
+   > ——它是 p1-04 之后唯一过门的配置，其余两档只能跑出 verdict=FAIL 的格子。
 4. `EXP-p4b-01`：用 §2 判定过的配置跑 8 格（+4 格标 failed）。
 5. 每格落 `results/<EXP-ID>/result.json` + `experiments/<EXP-ID>.md` + 一个 commit。
 6. 最后：两台机器的测试、`ruff`/`black`/`check_docs`、`rsync` 结果回 Mac、
