@@ -53,8 +53,8 @@ def run(
 ) -> dict[str, Any]:
     import torch
 
-    from lemoq.quant.linear import SchemeSpec
     from lemoq.quant.linear import QuantLinear as QL
+    from lemoq.quant.linear import SchemeSpec
 
     if not torch.cuda.is_available():
         raise SystemExit("需要 CUDA")
