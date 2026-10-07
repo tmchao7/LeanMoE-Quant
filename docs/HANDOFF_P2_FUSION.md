@@ -48,6 +48,16 @@ E7 结论要靠它。加格要在记录里写明（这是对计划矩阵的扩�
 4. **兜底（计划已授权）**：到 25 GPU 小时若没到 70%，就用现成融合 kernel
    （vLLM / torchao）当"已融合"臂，并把贡献转落到"字节预算分析 + E7 截断解释"。
 
+> ★ **2026-10-07 执行完毕（`experiments/EXP-p2-01-dequant-fusion.md` §6）**：
+> 自研 fused kernel 落地（4/8-bit、无 autotune、grid 为 host 常量 → P3 可 capture），
+> 6 格全跑、K1 的 1e-3 门 PASS、**兜底未触发**。结论是 **`refuted`**：fused 在
+> w8a16/w8a8 上比 separate 慢 5%（60/60 对、|Δ|≫MAD），在 w4a16 上快 3.6%（门 FAIL，
+> evidence only）。原因是**那条 eager 路径 host/launch 受限**（host_share 60.7–80.4%、
+> 每步 1.9–4.3 万 kernel、达成率 0.4–0.5%），不是带宽。第 3 项要求的"dequant 占比"
+> 已用同进程 A/B 实测（`attribution.dequant_share_pct`），**ncu 证据没做**（本轮够用，
+> 若要 kernel 级 dram 计数仍需 ncu）；"70% 带宽达成率"这个目标**未达成、也未适用** ——
+> 在 M=1 的 host-bound 区间里它测不出来，见 §6.4。
+
 ## 4. `EXP-p4b-01`（计划里的头号结论）
 
 > ★ **预注册已完成（2026-10-06 离线会话）**，权威清单见
@@ -68,8 +78,17 @@ E7 结论要靠它。加格要在记录里写明（这是对计划矩阵的扩�
 >   两种反量化语义混在一格里 —— 所以这个 0.82× **不能**归因给量化本身。
 > - **第 1 轮曾整轮作废**：共享卡上另一条工作线的 `pareto_offload.py` 占到 17.8 GB，
 >   金丝雀漂移 37.1%、`cudagraph×1024` 被 OOM 阻塞。协议是**记录不杀**，等它退出后重跑。
-> - **下一步（按依赖顺序）**：① **本条的 dense fused 臂**（拆开 attention 的混淆 ——
->   它现在是硬前提）；② P3（`quant_cfg` 接进 `run_cudagraph`）→ 才能判 E7。
+> - **★ ① dense fused 臂已完成（2026-10-07）**：`EXP-p2-01` 6 格跑完（金丝雀 0.61% →
+>   本轮有效），K1 的 1e-3 门 **PASS**。结果：**fused 比 separate 慢 5%**（w8a16/w8a8，
+>   60/60 对，|Δ|≫MAD），4-bit 反而快 3.6%（但门 FAIL、只作 evidence）—— 因为那条路径是
+>   host/launch 受限的（host_share 60.7–80.4%、1.9–4.3 万 kernel/步、达成率 0.4–0.5%）。
+>   隔离测里 fused 每调用快 1.21×（33.5 vs 40.6 µs），但其中 ~16 µs 是 triton launcher 地板。
+>   **E2 的 1.3–2× 在 eager 配置下否证**（不是 inconclusive）；§2.7 那句 "+2.02 ms = 物化流量"
+>   已被修正为 host/算子数成本。详见 `experiments/EXP-p2-01-dequant-fusion.md` §6。
+> - **下一步**：② P3（`quant_cfg` 接进 `run_cudagraph`，并同时接引用门 + 修正
+>   `build_payload_cudagraph` 的硬编码 `bit_width`）→ 才能判 E7。★ 依据本会话的结果，
+>   P3 的优先级**更高了**：eager 臂的税主要是 host/launch，只有 cudagraph 压掉它之后，
+>   fused kernel 的 GPU 优势才可能兑现。
 >
 > 下面这段是当时按 12 格写的规划，保留作背景：
 
@@ -182,8 +201,10 @@ uv run python -m tools.check_docs
 
 ## 10. 验收标准（做完自检）
 
-- [ ] `EXP-p2-01`：`fused` vs `separate` 在**同一进程、交错**下测得；报了 dequant 占比与
-      ncu 证据（或明确声明走了 §3.4 的兜底）；达成率对照**实测** 1561.9 GB/s。
+- [x] `EXP-p2-01`：`fused` vs `separate` 在**同一进程、交错**下测得（每臂 60 样本、报 MAD
+      与逐对胜负）；dequant 占比是**同进程 A/B 实测**（不是 ncu）；兜底未触发。
+      ⚠ 例外：ncu 的 dram 计数没做；"达成率 70%"在 host-bound 的 eager 格里测不出来，
+      已在 `EXP-p2-01` §6.4/§6.6 明确写出。
 - [ ] `EXP-p4b-01`：≥8 格（fp16/w8a16 × eager/cudagraph × ctx 1024/4096），
       每格报 p50/p99 + host 占比；`w8a8` 那 4 格如跑则明确标 correctness-failed。
 - [ ] 每格有 `result.json` + `experiments/<ID>.md`（假设写在结果之前）+ commit。

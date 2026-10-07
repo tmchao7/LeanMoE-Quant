@@ -325,6 +325,28 @@ fp16 权重），而不是"量化权重没收益"。expert 侧的新 kernel 方�
 这同时说明：**在 expert kernel 只有 36% 带宽达成率、attention 还在物化权重的情况下，
 "量化能不能兑现收益"这个问题现在无法回答** —— 而它正是 E2/E7 的核心问题。
 
+### ★ 上一条归因的**修正**（2026-10-07，`EXP-p2-01` 的 dense fused 臂落地后）
+
+上面 §2.7 把 +2.02 ms 归给"物化 fp16 权重的写+读流量"。`EXP-p2-01` 把物化**整条去掉**
+（fused 臂一趟只读 packed、在寄存器里解压）后，**单元格没有变快，反而慢了 5%**：
+
+| `EXP-p2-01`（`moe=hf`，同进程交错 60 对） | sep p50 | fus p50 | ratio fus/sep | Δ 中位 | MAD |
+|---|---|---|---|---|---|
+| `w8a16` | 192.06 ms | 201.79 ms | 1.0507 | −10.08 ms | 2.51 |
+| `w4a16` | 398.05 ms | 384.36 ms | 0.9656 | +13.43 ms | 1.81 |
+
+⇒ 那 +2.02 ms **不是（或不只是）DRAM 流量**，而是"每次 forward 多几个 torch 算子 +
+一次多余的 GEMM 调用"的 **host/launch 成本**：`EXP-p2-01` 的格子里 `host_share`
+60.7–80.4%、每步 1.9–4.3 万个 kernel、带宽达成率 0.4–0.5%，isolated 测里 fused 每调用
+33.5 µs 中有 ~16 µs 是 triton launcher 地板。**预测**（非测量）：把 attention 换成 fused
+后，p4b 的 grouped 格大约只能拿回 0.4–0.5 ms（≈ 2.02 ms 的 1/4）；要真测，得先给
+cell id 加 `moe` 轴，否则 grouped 重跑会覆盖已落盘的 hf 格。详见
+`experiments/EXP-p2-01-dequant-fusion.md` §6.4–§6.5。
+
+**对 P3/E7 的意义（收紧，不是放松）**：既然 eager 臂的税主要是 host/launch，那么
+`cudagraph`（p4b §2.6：fp16 上 host_share 67% → 1.4%）才是让 fused kernel 的
+GPU 优势（2.6 µs vs 28 µs 工作量）兑现的前提 —— 这也让 P3 的优先级更高。
+
 ### P3 的真实工作量（上卡前先看清，2026-10-07 排查）
 
 P3 **不只是**"把 `quant_cfg` 传给 `run_cudagraph`"。排查发现两处必须先改，否则会写出

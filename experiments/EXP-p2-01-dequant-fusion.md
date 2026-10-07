@@ -1,21 +1,22 @@
 # EXP-p2-01-dequant-fusion
 
-> **状态：`planned`（假设与门未动）—— 但优先级变了，理由是实测的。**
+> **状态：`done`（2026-10-07 上卡执行；verdict = `refuted`，见 §6）。**
 > ★ 2026-10-07：`EXP-p4b-01` 的 P1 落地后第一次量化臂实测是**负结果**（0.82×/0.80×），
 > 而机制分析（`EXP-p4b-01-truncation` 记录 §2.7 + `tools/bench_grouped_gemm_quant.py`）
 > 把原因定位到**反量化语义混用**：experts 走融合 kernel（隔离测**快 17%**），
 > attention 仍走 `QuantLinear` 的 **separate 臂**（每次 forward 反量化）。
-> 于是本条从"建议先做"变成 **拆开那个混淆的硬前提**：没有 fused dense 臂，
-> 量化格测不出"量化能不能兑现收益"，E7 的 0.82× 也无法归因。
-> 本记录**仍未执行**，不含任何本条的性能数字。
->
-> 离线已交付的部分与还差的部分分列在 §3/§4，谁来跑一目了然。
+> 于是本条从"建议先做"变成 **拆开那个混淆的硬前提** —— 本会话把 dense fused 臂落地了。
+> ★ **结论（一句话）**：K1 数值门 PASS、kernel 本身在隔离测里快 21%，但在**预注册的
+> eager 格**里 fused 比 separate **慢 5%**（w8a16/w8a8），因为那条路径是 host/launch 受限的
+> （host_share 71.7%、每步 19,029 个 kernel、gpu_busy 只有 57 ms / 199 ms）：
+> **融合省的字节，被每次调用的 Python/launch 开销吃掉了。** E2 的 1.3-2× 在本配置**否证**。
 
 - **ID**: `EXP-p2-01-dequant-fusion`
-- **Date**: 2026-10-06（假设与门冻结；**无结果**）
-- **Operator**: 尚未执行（需要 RTX 5090）
-- **Status**: `planned`
-- **原始数据**: 无（跑完后应有 `results/EXP-p2-01-dequant-fusion__bit_width=<x>_dequant=<y>/result.json` × 6）
+- **Date**: 2026-10-06（假设与门冻结）→ **2026-10-07（执行）**
+- **Operator**: 上卡会话（RTX 5090 32 GB）
+- **Status**: `done`（6 格全部有 `result.json`；2 格 gate PASS、4 格 gate FAIL 作 evidence）
+- **原始数据**: `results/EXP-p2-01-dequant-fusion__bit_width=<x>_dequant=<y>/result.json` × 6，
+  另存 `results/EXP-p2-01-run/`（每格日志、`p201_canaryA/B_result.json`、`contention.log` 占用快照）
 - **对照**: `EXP-p1-04-prompt-set-gate`（正确性门的实测来源）、`EXP-p2-02`/`p2-04`/`p2-05`
   （同一台机器的 fp16 延迟口径与交错计时协议）
 
@@ -95,39 +96,39 @@ tol_atol = 1e-3 ; tol_rtol = 1e-3 ; tol_slack = 1.5
 
 ## 3. 离线已交付（本记录的一部分，全部有测试）
 
-| # | 内容 | 验证方式 |
-|---|---|---|
-| 1 | cell id 由**矩阵声明的轴**拼出（`build_exp_id`），顺序 = yaml 里 factors 键的顺序，然后 ctx | `results/` 里**全部**带轴格子的 id 可被复原（测试逐个断言） |
-| 2 | 三条拒绝在**任何模型加载之前**失败：fused kernel 未实现 / 无门实测 / 量化+cudagraph 未接线 | 3 条 CLI 测试（无 GPU 机器上跑） |
-| 3 | `GATE_CITATIONS` 与 `EXP-p1-04` 工件逐字一致 | 工件对照测试（工件缺失时 skip） |
-| 4 | `quantize_for_cfg` + `weight_bytes_actual` 的 buffer 陷阱 + `byte_budget(quant=…)` 接线 | CPU tiny OLMoE：替换计数、前向可跑、packed/scale 在 buffer 里 |
-| 5 | CLI：`--bit-width / --dequant / --group-size` + dry-run 打印格子 id 与门状态 | dry-run 测试 ×3 |
-| 6 | 矩阵 `w8a16` 轴 + 计数 48→50 | `test_matrix.py` |
+> ★ 2026-10-07 更新：本表是**离线**交付；§4 的 5 条现在**全部完成**（kernel、`dequant_share`、
+> 6 格、记录、兜底未触发）。执行结果与机制写在 §6。
+
+| # | 内容 | 验证方式 | 现状 |
+|---|---|---|---|
+| 1 | cell id 由**矩阵声明的轴**拼出（`build_exp_id`），顺序 = yaml 里 factors 键的顺序，然后 ctx | `results/` 里**全部**带轴格子的 id 可被复原（测试逐个断言） | ✅ |
+| 2 | 加载前的拒绝：本机没有 triton/CUDA 时 fused 被拒 / 无门实测 / 量化+cudagraph 未接线 | 3 条 CLI 测试（无 GPU 机器上跑） | ✅（fused 的拒绝理由已从"kernel 未实现"改为"本机不可用"） |
+| 3 | `GATE_CITATIONS` 与 `EXP-p1-04` 工件逐字一致 | 工件对照测试（工件缺失时 skip） | ✅ |
+| 4 | `quantize_for_cfg` + `weight_bytes_actual` 的 buffer 陷阱 + `byte_budget(quant=…)` 接线 | CPU tiny OLMoE：替换计数、前向可跑、packed/scale 在 buffer 里 | ✅ |
+| 5 | CLI：`--bit-width / --dequant / --group-size` + dry-run 打印格子 id 与门状态 | dry-run 测试 ×3 | ✅ |
+| 6 | 矩阵 `w8a16` 轴 + 计数 48→50 | `test_matrix.py` | ✅ |
 
 ★ 陷阱记录：`QuantLinear` 把 packed/scale 存成 **buffer**，而 `weight_bytes_actual`
 只数 `model.parameters()` —— 不补上 buffer 会让量化格的驻留字节**少算 96%**
 （experts 占大头）。测试 `test_quantize_for_cfg_replaces_and_model_still_forwards`
 直接断言这一点，防止回退。
 
-## 4. 上卡前还差（顺序即执行顺序）
+## 4. 上卡前还差（顺序即执行顺序）—— **全部完成（2026-10-07）**
 
-1. **写 fused kernel**。按 `src/lemoq/kernels/__init__.py` 记录的决定，未编译的
-   Triton kernel **不在离线阶段写**（离线无法发现编译/语义错误，只会在计费机器上
-   制造调试时间）。落点：`src/lemoq/kernels/_dequant_triton.py`（仅 GPU 路径 import）
-   + `QuantLinear` 的 fused 分支（`dequant="fused"`）。用 `separate` 与 `fused` 的
-   数值相同性做 K1。
-2. **`dequant_share` 测量接入**（隔离微基准或 ncu），当前 payload 里是 `None`。
-3. 跑 6 格（`separate` 三格**不依赖 kernel**，可先跑）：
-
-   ```bash
-   python -m benchmarks.runner --exp EXP-p2-01-dequant-fusion \
-       --bit-width {w8a16,w8a8,w4a16} --dequant {separate,fused}
-   ```
-
-   `--dry-run` 可先核对格子 id 与门状态（已在 Mac 上验证 6 格 id 正确）。
-4. 每格：`results/<cell>/result.json` + 本记录补"结果"节 + commit（status=done）。
-5. 若到 25 GPU 小时 fused 仍未达实测带宽的 70%：走矩阵声明的 `fallback`
-   （用现成融合 kernel（vLLM/torchao）当"已融合"臂），并在本记录写明走了兜底。
+1. **写 fused kernel** ✅ —— `src/lemoq/kernels/_dequant_triton.py`（4/8-bit，无 autotune、
+   grid 为 host 常量 → P3 可 capture）。K1 数值门 **PASS**（§6.1）。
+   `QuantLinear` 的 fused 分支只对 **decode 单 token** 生效，prefill / 多 token 退回 separate
+   并**计数**（`_measurement.dequant.activity`）。
+2. **`dequant_share` 测量接入** ✅ —— 不再是 `None`：来自**同进程交错 A/B** 的
+   `(p50_separate − p50_fused) / p50_separate`，写进 `attribution.dequant_share_pct`
+   （gate PASS 的格子才有；FAIL 格按硬规则 2 置 None）。**不是 ncu 的 dram 计数**，payload 里
+   写了 `dequant_share_source` 说明口径。
+3. 跑 6 格 ✅ —— 命令与预注册一致（`--exp EXP-p2-01-dequant-fusion --bit-width {w8a16,w8a8,w4a16}
+   --dequant {separate,fused}`，ctx=1024 默认）。★ 注意：矩阵**没有为 p2-01 声明 `config.moe`**，
+   所以 6 格走的是 **hf** MoE 路径（experts 也被 `QuantLinear` 替换）—— 这决定了格子的绝对
+   时间（192-398 ms/token）与"哪些结论能外推"（§6.5）。
+4. 每格：`result.json` + 本记录补"结果"节 + commit ✅（§6；raw 另存 `results/EXP-p2-01-run/`）。
+5. 兜底（vLLM/torchao 当"已融合"臂）—— **未触发**，自研 kernel 的 K1 门一次通过。
 
 ## 5. 判据（跑完之后怎么判）
 
@@ -142,13 +143,144 @@ tol_atol = 1e-3 ; tol_rtol = 1e-3 ; tol_slack = 1.5
 **门槛不因结果改动**：K1 的 1e-3/1e-3/1.5、K2 的 0.01/0.05/0.95 全部来自
 `docs/METRICS.md` §1 与既有 kernel 的 PARITY_GATE。
 
-## Applicability（上机后必须按实测填全）
+## 6. 结果（2026-10-07，RTX 5090 32 GB，commit `e4a3803`）
+
+### 6.1 K1 数值门：**PASS**（kernel 与参考实现一致，容差未放宽）
+
+```bash
+# 服务器
+export PATH=/root/miniconda3/bin:$PATH
+python -m pytest tests/test_kernel_parity.py -q      # 6 passed, 1 skipped
+#   test_triton_fused_gemm_matches_reference  ← 本条的 K1 门
+```
+
+覆盖：8-bit / 4-bit（4-bit 走 nibble 寄存器展开，独立代码路径）、m=1（decode）与 m=4、
+fp16 scale（**部署口径**，`QuantLinear` 按字节账存 fp16）与 fp32 scale、
+`k=500` 不被 group_size 整除（尾部补零由 padded_in 表达）、group_size=64。
+判据 = `PARITY_GATE`（`atol/rtol 1e-3`），**一次通过，未放宽**。
+
+另做了一次**模块级**的端到端交叉核对（8-bit、四个 attention 形状、真实 `QuantLinear`）：
+`fused` 与 `separate` 的输出 `max_abs_err ≈ 9.8e-4`，相对 `max|y|` 为 **5.1e-4 … 6.0e-4**
+（差异只来自 fp32 累加顺序与 fp16 舍入）。
+
+### 6.2 测量协议（K3）与污染检查
+
+| 检查 | 实测 | 判定 |
+|---|---|---|
+| 计时前 `nvidia-smi --query-compute-apps` | 6 格前后**均为空**（`results/EXP-p2-01-run/contention.log`） | ✅ 无外人进程 |
+| 首尾金丝雀（`w8a16 × separate`，同格 `--force` 重跑） | p50 **190.8908 → 192.0597 ms**，相对差 **0.61%** ≪ 5% | ✅ **本轮有效** |
+| 金丝雀 p99 / 样本 | A: p99 200.77，min/max 189.19/204.42；B: p99 252.52，min/max **188.11/298.75**（1 个 ~299 ms 的 host 抖动） | 记录，不改判定（p50 与配对中位数稳健） |
+| 两臂计时方式 | **同进程、逐步 round-robin**（两臂交替走同一条 KV 流，按步号配对）；每臂 3 轮 × 20 步 = 60 样本 | ✅ K3.1 |
+| 首调 JIT 编译 | 单独记、**不计入稳态**：`separate` 格首调 fused=503.3 ms vs separate=202.8 ms（~300 ms 是 Triton 编译）；`fused` 格首调 fused=196.2 ms（编译已在前面的 warmup 相位完成） | ✅ `docs/METRICS.md` §2 |
+| 臂是否真的跑到 | `_measurement.dequant.activity`：`fused_calls=26,880`、`fallbacks={multi_token: 161,280}`（prefill 必然回退） | ✅ 不是"空对照" |
+
+### 6.3 六个格子（`moe=hf` —— 矩阵未为 p2-01 声明 `config.moe`，见 §6.5）
+
+`p50/p99` 单位 ms；`sep`/`fus` 是**同一次运行里**两臂的 p50（`interleaved_ab.arms`）；
+`Δ` 是逐对配对的中位数差（`sep − fus`，负 = fused 慢）；`wins` 是逐对胜负。
+
+| 格 | gate | p50 | p99 | sep p50 | fus p50 | ratio fus/sep | Δ 中位 | MAD | wins（60 对） | host% | kernel/步 | `[W]` |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `w8a16 × separate` | PASS | **192.06** | 252.52 | 192.06 | 201.79 | **1.0507** | −10.08 | 2.51 | sep 56 / fus 4 | 71.7 | 19,029 | 1.301 GB |
+| `w8a16 × fused` | PASS | **198.73** | 218.00 | 188.94 | 198.73 | **1.0518** | −9.11 | 1.52 | sep 60 / fus 0 | 71.7 | 19,029 | 1.301 GB |
+| `w8a8 × separate` | FAIL | _(305.37)_ | _(311.11)_ | 305.37 | 321.53 | 1.0529 | −16.30 | 1.98 | sep 60 / fus 0 | 80.4 | 24,405 | 1.301 GB |
+| `w8a8 × fused` | FAIL | _(318.55)_ | _(323.90)_ | 302.45 | 318.55 | 1.0532 | −16.27 | 1.43 | sep 60 / fus 0 | 80.3 | 24,405 | 1.301 GB |
+| `w4a16 × separate` | FAIL | _(398.05)_ | _(449.38)_ | 398.05 | 384.36 | **0.9656** | +13.43 | 1.81 | **fus 59** / sep 1 | 60.7 | 43,219 | 0.764 GB |
+| `w4a16 × fused` | FAIL | _(383.95)_ | _(417.26)_ | 397.66 | 383.95 | **0.9655** | +14.05 | 2.41 | **fus 58** / sep 2 | 61.0 | 43,219 | 0.764 GB |
+
+- 斜体 `_(…)_` = **gate FAIL 的格子**：按硬规则 2，`latency` 段为 `null`，实测值只在
+  `_measurement.gate_failed_evidence` 里（**不得**被引用为性能结论）。这是本次给 runner
+  加的机械执行点，`validate_result` 有对偶测试。
+- 其它共同量：TTFT p50 199.1/200.7（w8a16）、312.4/316.6（w8a8）、407.8/416.0（w4a16）；
+  `host_share` 60.7–80.4%；`gpu_busy` 57.2 ms（w8a16）、62.8（w8a8）、148.9（w4a16）；
+  `[T]` = 1.435 GB；达成率 **0.4–0.5%**（带宽地板 1561.9 GB/s）；VRAM 峰值 12.95 GiB（含
+  加载相位的 fp16 模型）；`bytes.budget_vs_actual_delta_pct = 456%`——这是**预期的**：
+  驻留的是全部 64 个专家，而 `[W]` 只算每 token 的 top-8（payload 里已有该注）。
+
+### 6.4 隔离测量：kernel 本身是快的，慢的是"每次调用的 host 开销"
+
+**(a) 模块级、同进程交错**（7 轮 round-robin、每轮 200 次调用、8-bit、attention 四投影之和
+→ 这里的数字是**每 token 每层**，×16 层就是每 token）：
+
+| 臂 | p50（ms/token/层） | MAD | ×16 层 |
+|---|---|---|---|
+| `fp16`（`F.linear`，未量化） | 0.0503 | 0.0007 | **0.805 ms** |
+| `fused`（本 kernel，默认配置） | 0.1338 | 0.0019 | **2.141 ms** |
+| `separate`（物化 fp16 权重 + `F.linear`） | 0.1624 | 0.0028 | **2.599 ms** |
+
+⇒ 隔离测里 **fused 比 separate 快 1.21×**（每调用 33.5 µs vs 40.6 µs）——但两者都远慢于
+fp16 的 12.6 µs。默认配置是声明空间的一个**子集**扫描（B4K512w4 并列最快 0.1338，
+其余 7 个配置 0.1344–0.1377，差 ≤3%）。**不是全网格 autotune**，别当 autotune 引用。
+
+**(b) Triton launcher 的地板**（干净卡、300 次 launch）：3 参数 **16.0 µs**、20 参数 **31.8 µs**
+（≈1 µs/参数）、`torch.add` 5.6 µs。所以 fused 的每次调用（33.5 µs）**基本就是 launcher**，
+kernel 本体（读 4 MB int8 + 写 8 KB ≈ 2.6 µs）被完全掩盖；而 separate 的 40.6 µs 里
+也主要是 Python/torch 算子链。为此本会话把 kernel 签名从 19 参数砍到 9 参数
+（连续契约，stride 由形状推出），fused 每 token/层从 0.1575 → 0.1338 ms。
+
+### 6.5 ★ 判定：E2 的 "1.3–2×" 在本配置 **否证**（不是 inconclusive）
+
+按 §5 的预注册判据：
 
 ```text
-适用于：  （待填：GPU 型号、实测带宽、驱动、dtype、batch=1、ctx=1024、
-          group_size=128、targets=attention+experts、torch/triton 版本）
+支持假设：ratio ∈ [1.3, 2.0]          → 实测 w8a16 = 1.0507 / 1.0518（**fused 更慢**）   ✗
+否证信号：差值 < 10%                   → 实测差 5.1%，且 |Δ|=9.1–10.1 ms > MAD 1.5–2.5 ms
+                                        （可分辨，所以这对差值是真信号，不是噪声）        ✓ 触发
+分不出  ：|差值| < MAD                 → 不适用（差值远大于 MAD）
+```
+
+**outcome = `refuted`**：在预注册的 eager 配置里，融合既没有 1.3–2×，也没有可测收益。
+`w4a16` 的 evidence 反而显示 fused **快 3.6%**（58–59/60 对），但它的门 FAIL、不得发表。
+
+机制（三条都有实测支撑，不靠推断）：
+
+1. **这 6 格全是 host/launch 受限**：`host_share` 60.7–80.4%、`gpu_busy` 只有 57–149 ms 而
+   单步 192–398 ms、每步 **19,029–43,219** 个 kernel、带宽达成率 0.4–0.5%。
+   ⇒ 在这种状态下，决定每步时间的是**每次 `QuantLinear` 调用的 Python/torch 开销**，
+   不是权重字节。
+2. **融合省的字节正好被这次调用开销吃掉**：fused 每调用 33.5 µs，separate 40.6 µs（隔离测），
+   但 fused 的 33.5 µs 里 ~16 µs 是 launcher 地板；单元格里两臂的 host 成本因此只差 5%
+   （方向还与隔离测相反 —— 隔离测时设备未被饱和，单元格里 host 已饱和）。
+3. **4-bit 例外解释了方向**：4-bit 的 separate 臂要走 nibble 解包算子链（`unpack_4bit`），
+   单元格里 kernel 数从 19,029 涨到 **43,219**、单步 398 ms；fused 把解包挪进 kernel，
+   于是**快 3.6%**。即"融合的收益取决于 separate 臂有多少 host 算子"，而不是取决于字节比。
+
+**对 `EXP-p4b-01` §2.7 那句 "+2.02 ms = attention 的 separate 臂" 的修正**：那 +2.02 ms
+**不是（或不只是）物化权重的 DRAM 流量**。本会话把物化**整条去掉**（fused 臂一趟只读 packed），
+单元格不但没有变快，还慢了 5%。所以 §2.7 的税主要是"每次 forward 多几个 torch 算子 + 一次
+多余 GEMM 调用"的**延迟/算子数**成本。
+→ 对 p4b 的 grouped 格（ctx=1024、w8a16、attention 64 次调用/步）**外推**：隔离测里
+fused 只拿回 separate 超出 fp16 的 27 µs/call 中的 7 µs，所以预计只能拿回 ~0.4–0.5 ms
+（≈ 那 2.02 ms 的 1/4）。**这是预测，不是测量** —— 要在 p4b 的 grouped 格上直接测，
+得先给 cell id 加 `moe` 轴（否则 grouped 的重跑会**覆盖**已落盘的 hf 格）。
+
+### 6.6 本条**没有**回答的问题（不许被读成结论）
+
+- **量化 + cudagraph 的收益**：本条只跑 eager 臂。cudagraph 会把 host/launch 开销压掉
+  （p4b §2.6：fp16 上 67% → 1.4%），届时 fused 的 kernel 优势（2.6 µs vs 28 µs 的 GPU 工作）
+  才可能兑现 —— 那是 **P3 / E7**，本轮**没有**测，故**不给 E7 判定**。
+- **grouped MoE 配置下的 attention 融合**：未测（§6.5 末尾）。
+- **带宽达成率**：本条 0.4–0.5% 只说明 hf+量化的这条路径离带宽墙极远，**不能**用来评价
+  kernel 的带宽效率（那个数在 §6.4 的隔离测里）。
+
+## Applicability（按实测填全）
+
+```text
+适用于：  RTX 5090 32 GB（sm_120、170 SM、驱动 595.71.05）、**实测**读带宽 1561.9 GB/s、
+          python 3.12.3 / torch 2.8.0+cu128 / triton 3.4.0 / transformers 4.57.6、
+          OLMoE-1B-7B-0924（bf16 ckpt → fp16）、单卡、batch=1、dtype=fp16、ctx=1024、
+          group_size=128、targets=(attention, experts)、MoE 实现 = hf（矩阵未给 p2-01 声明
+          config.moe）、量化格 4/8-bit；
+          K1 的 kernel 数值结论（4/8-bit、m=1、fp16 scale、g=64/128）对同一 (torch, triton, sm_120)
+          组合成立；换 triton 版本必须重跑 K1。
 不适用于：其它 group_size / ctx / targets（门没有实测，runner 会拒绝）；
-          batch>1；W8A8 激活路径的性能结论（该配置门 FAIL）；
-          量化 + cudagraph（接线未完成，runner 会拒绝）
-原因：    收益比绑定在这台卡的带宽与 launch 开销上；K2 的门只在 p1-04 的配置上实测过。
+          batch>1；量化 × cudagraph（**未接线**，runner 仍拒绝 —— 那是 P3）；
+          量化 × gather（无量化版）；
+          4-bit 的 grouped expert 路径（nibble 解包未实现）；
+          w8a8 / w4a16 的**性能结论**（两格门 FAIL，延迟只作 evidence）；
+          **grouped MoE 配置下的 attention 融合**（未测，见 §6.5）；
+          V100 (sm_70) / 其它架构 —— 没有任何数字可以搬过去。
+原因：    两臂的差值绑定在这台卡的 **launcher/host 开销**上（triton 3 参数 launch 16 µs、
+          20 参数 32 µs，见 §6.4b），而 hf+量化路径每步要发 1.9–4.3 万个 kernel：
+          host 侧一换机器/一换版本，符号都可能翻转。K2 的门只在 p1-04 的配置上实测过。
 ```
