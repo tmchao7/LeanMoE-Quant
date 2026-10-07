@@ -153,6 +153,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-new-tokens", type=int, default=32)
     ap.add_argument("--steps", type=int, default=20)
     ap.add_argument("--json", default=None)
+    ap.add_argument(
+        "--stacks",
+        action="store_true",
+        help="额外做一次**按 CPU 栈**的归因（copy/cast 类算子落在哪个 Python 调用点）—— "
+        "作用域归因在图语义上会作废（见记录 K1），栈归因是它的替代：算子级的 device time "
+        "由 kineto 关联，不依赖 record_function 区间。",
+    )
     args = ap.parse_args(argv)
 
     import torch  # noqa: PLC0415
@@ -266,6 +273,49 @@ def main(argv: list[str] | None = None) -> int:
 
     eager_total = _sum(kernel_rows)
     graph_total = _sum(graph_rows)
+    # ---- (3) 可选的**按 CPU 栈**归因：copy/cast 类算子的调用点 ----
+    stack_rows: list[dict[str, Any]] = []
+    if args.stacks:
+        from torch.profiler import ProfilerActivity, profile  # noqa: PLC0415
+
+        session.reset()
+        session.prefill()
+        torch.cuda.synchronize()
+        for _ in range(3):
+            session.decode_eager()
+        torch.cuda.synchronize()
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], with_stack=True
+        ) as prof_stack:
+            for _ in range(args.steps):
+                session.decode_eager()
+            torch.cuda.synchronize()
+        # ★ 只看"会产生拷贝/cast kernel"的算子；`group_by_stack_n` 把每个调用点单独列一行
+        pats = ("copy_", "contiguous", "_to_copy", "clone", "to(", "cast", "type_as", "float(")
+        for e in prof_stack.key_averages(group_by_stack_n=6):
+            key = str(e.key)
+            if not any(patt in key for patt in pats):
+                continue
+            if float(getattr(e, "device_time_total", 0.0) or 0.0) <= 0.0:
+                continue
+            stack = str(getattr(e, "stack", "") or "")
+            # 只留最后一帧里属于本仓库/transformers 的那些行，便于读
+            keep = [
+                ln.strip()
+                for ln in stack.split("\n")
+                if ("LeanMoE-Quant" in ln or "transformers" in ln) and ln.strip()
+            ]
+            stack_rows.append(
+                {
+                    "op": key,
+                    "count_per_step": e.count / float(args.steps),
+                    "device_ms_per_step": float(e.device_time_total) / args.steps / 1000.0,
+                    "cpu_ms_per_step": float(e.self_cpu_time_total) / args.steps / 1000.0,
+                    "call_site": keep[-3:],
+                }
+            )
+        stack_rows.sort(key=lambda r: -r["device_ms_per_step"])
+
     payload = {
         "tool": "tools/profile_graph_scopes.py",
         "config": quant_cfg,
@@ -300,6 +350,7 @@ def main(argv: list[str] | None = None) -> int:
             "kernels": graph_rows,
         },
         "capture": cap,
+        "stack_attribution": stack_rows,
     }
     # 分桶（graph 口径）
     buckets: dict[str, float] = {}
@@ -341,6 +392,19 @@ def main(argv: list[str] | None = None) -> int:
         print("    %-18s %8.4f ms  %5.1f%%" % (k, v, 100 * v / graph_total))
     print("\nK1 前 8 kernel 重合 %d/8 | eager top: %s" % (overlap, top_eager[:3]))
     print("                          graph top: %s" % (top_graph[:3],))
+
+    if stack_rows:
+        print("\n[按 CPU 栈归因] 会产生拷贝/cast 的算子（前 12，按 device time）:")
+        for r in stack_rows[:12]:
+            print(
+                "    %-28s %8.4f ms  ×%-6.1f  %s"
+                % (
+                    r["op"][:28],
+                    r["device_ms_per_step"],
+                    r["count_per_step"],
+                    " | ".join(r["call_site"])[-110:],
+                )
+            )
 
     if args.json:
         os.makedirs(os.path.dirname(os.path.abspath(args.json)), exist_ok=True)
