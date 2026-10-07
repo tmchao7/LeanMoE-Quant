@@ -50,6 +50,13 @@ E7 结论要靠它。加格要在记录里写明（这是对计划矩阵的扩�
 
 ## 4. `EXP-p4b-01`（计划里的头号结论）
 
+> ★ **预注册已完成（2026-10-06 离线会话）**，权威清单见
+> `experiments/EXP-p4b-01-truncation.md`：矩阵现为 **16 格**（加了 `w8a16` 轴 +
+> `config.moe: grouped`），其 §3 是**依赖链 P0–P3**。关键事实：**量化臂被 P1 阻塞**
+> （`replace_moe_blocks` 只吃 fp16 融合权重，hf 又不能 capture），所以**今天可跑的只有
+> fp16 的 4 格**；量化 × 非 hf 的组合 runner 已实现第四条拒绝。
+> 下面这段是当时按 12 格写的规划，保留作背景：
+
 12 格 = `bit_width × execution × ctx`。按 §2 的实际可用性：
 - 必跑：`fp16`、`w8a16` × `{eager, cudagraph}` × `ctx ∈ {1024, 4096}` = **8 格**
 - 追加（标 correctness-failed，只报延迟不报收益）：`w8a8` × 同上 = 4 格
