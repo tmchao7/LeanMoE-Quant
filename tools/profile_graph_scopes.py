@@ -54,8 +54,8 @@ SCOPE_MODULES = (
     "o_proj",
     "post_attention_layernorm",
     "mlp",
-    "self_attn",
 )
+# ★ 不挂 `self_attn`：它**套住** q/k/v/o，四条子作用域的 device_time 会与它重复计算。
 
 
 def _wrap_scopes(model: Any, torch: Any) -> list[str]:
@@ -159,7 +159,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     from benchmarks.cudagraph import StaticCacheDecodeSession  # noqa: PLC0415
-    from benchmarks.runner import _load_model, quantize_for_cfg  # noqa: PLC0415
+    from benchmarks.runner import (  # noqa: PLC0415
+        _load_model,
+        quant_spec_for_cfg,
+        quantize_for_cfg,
+    )
     from lemoq.kernels.moe_static import replace_moe_blocks  # noqa: PLC0415
 
     quantized = args.bit_width != "fp16"
@@ -174,7 +178,12 @@ def main(argv: list[str] | None = None) -> int:
     }
     load_attn = None if args.attn == "kernel" else args.attn
     model, _dtype = _load_model(args.model, "float16", "cuda", attn=load_attn)
-    moe_replaced = replace_moe_blocks(model, impl="grouped")
+    # ★ 专家**必须**按同一个 qspec 量化：`replace_moe_blocks` 不传 quant 就保持 fp16，
+    #   于是量到的是 `_gate_up_act_kernel`（fp16, 0.78 ms）而不是 `_gate_up_act_kernel_q`
+    #   （0.44 ms）—— 第一版就是这么错的：图总时间 2.770 与单元格的 2.348 差 0.42 ms，
+    #   正好是"专家没量化"的差。下面加了一条 self-check 专门盯这件事。
+    qspec = quant_spec_for_cfg(quant_cfg) if quantized else None
+    moe_replaced = replace_moe_blocks(model, impl="grouped", quant=qspec)
     torch.cuda.synchronize()
     qreport = quantize_for_cfg(model, quant_cfg) if quantized else None
     torch.cuda.synchronize()
@@ -207,7 +216,16 @@ def main(argv: list[str] | None = None) -> int:
     eager = _probe(torch, session, steps=args.steps, eager=True)
     eager_rows = _rows(eager["profiler"], steps=args.steps)
     # 作用域事件：名字就是我们打的 label（"L.q_proj" / "T.lm_head"）
-    scope_rows = [r for r in eager_rows if r["name"].startswith(("L.", "T."))]
+    # ★ `record_function` 的 `self_device_time_total` 恒为 0（设备时间是挂在**区间**上的），
+    #   所以作用域必须用 `device_time_total`；kernel 行继续用 self time。
+    scope_rows = []
+    for e in eager["profiler"].key_averages():
+        key = e.key
+        if not key.startswith(("L.", "T.")):
+            continue
+        tot = float(getattr(e, "device_time_total", 0.0) or 0.0)
+        scope_rows.append({"name": key, "self_ms_per_step": tot / args.steps / 1000.0})
+    scope_rows.sort(key=lambda r: -r["self_ms_per_step"])
     kernel_rows = [r for r in eager_rows if not r["name"].startswith(("L.", "T."))]
 
     # ---- (2) graph 重放：完整 kernel 表（与单元格同口径）----
@@ -217,6 +235,21 @@ def main(argv: list[str] | None = None) -> int:
     cap = session.capture(warmup=5)
     graph = _probe(torch, session, steps=args.steps, eager=False)
     graph_rows = _rows(graph["profiler"], steps=args.steps)
+
+    # ---- self-check：量化格的专家必须是量化 kernel（否则量到的是另一个配置）----
+    names = {r["name"] for r in graph_rows}
+    checks = {
+        "quantized_moe_kernels_present": (
+            any("_gate_up_act_kernel_q" in n for n in names) if quantized else True
+        ),
+        "fp16_moe_kernel_absent_in_quantized_run": (
+            not any(n.startswith("_gate_up_act_kernel") for n in names) if quantized else True
+        ),
+    }
+    if not all(checks.values()):
+        print("!! self-check 失败：%s" % checks, file=sys.stderr)
+        print("   → 量到的是另一个配置（专家没量化？），本工具的结论不成立", file=sys.stderr)
+        return 3
 
     # K1：两条路径的 kernel 名集合必须高度重合（前 8 名一致）
     top_eager = [r["name"] for r in kernel_rows[:8]]
@@ -248,6 +281,7 @@ def main(argv: list[str] | None = None) -> int:
             "scopes_wrapped": sorted(set(wrapped)),
         },
         "k1_top8_kernel_overlap": overlap,
+        "self_check": checks,
         "eager": {
             "gpu_ms_per_step_total": eager_total,
             "kernels_per_step": sum(r["count_per_step"] for r in kernel_rows),
