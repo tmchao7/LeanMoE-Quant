@@ -114,18 +114,33 @@ def unavailable_reason() -> str | None:
     return "triton 不可用（%s）" % (_TRITON_IMPORT_ERROR or "unknown")
 
 
+# 解析结果缓存：`dequant_gemm_fused` 在 decode 里**每次前向都会被调用**（OLMoE 上每
+# token 上千次），每次都重算 config 是在热点路径上烧 μs。key 里带上全局默认值，
+# 所以扫描时改 `DEQUANT_GEMM_CONFIGS` 不会读到陈旧条目。
+_CFG_CACHE: dict[Any, dict[str, int]] = {}
+
+
 def _resolve_config(config: dict[str, Any] | None) -> dict[str, int]:
+    override = None if not config else (config.get("dequant_gemm") or config)
+    key = (
+        tuple(sorted(DEQUANT_GEMM_CONFIGS["dequant_gemm"].items())),
+        None if override is None else tuple(sorted(override.items())),
+    )
+    cached = _CFG_CACHE.get(key)
+    if cached is not None:
+        return cached
     cfg = dict(DEQUANT_GEMM_CONFIGS["dequant_gemm"])
-    if config:
-        override = config.get("dequant_gemm") or config
+    if override:
         cfg.update({k: int(v) for k, v in override.items()})
-    for key in ("BLOCK_N", "BLOCK_K", "num_warps", "num_stages"):
-        if key not in cfg:
-            raise ValueError("dequant_gemm 配置缺少 %s" % key)
+    for name in ("BLOCK_N", "BLOCK_K", "num_warps", "num_stages"):
+        if name not in cfg:
+            raise ValueError("dequant_gemm 配置缺少 %s" % name)
     if cfg["BLOCK_N"] < 1 or cfg["BLOCK_K"] < 16:
         raise ValueError("非法 dequant_gemm 配置：%r" % cfg)
     if cfg["BLOCK_K"] % 2 != 0:
         raise ValueError("BLOCK_K 必须是偶数（4-bit 每两个 k 共用一个 uint8）：%r" % cfg)
+    cfg = {k: int(v) for k, v in cfg.items()}
+    _CFG_CACHE[key] = cfg
     return cfg
 
 
@@ -153,6 +168,9 @@ def dequant_gemm_fused(
 
     返回 (M, N)；`out_dtype=None` 时是 fp32（与参考实现一致），否则按 `out_dtype`。
     边界一律**显式报错**，不静默算错。
+
+    ★ 契约：x / qweight / scale / zero **必须连续**（非连续会静默算错，所以显式报错）——
+      这样 kernel 签名里一个 stride 都不用传，实测每次 launch 省约 10 µs。
     """
     if not _HAS_TRITON:
         raise RuntimeError(
@@ -206,33 +224,28 @@ def dequant_gemm_fused(
     if out_dtype not in (torch.float32, torch.float16):
         raise NotImplementedError("out_dtype 只支持 fp32/fp16，得到 %s" % out_dtype)
 
-    x_c = x.contiguous()
-    q_c = qweight.contiguous()
-    s_c = scale.contiguous()
-    z_arg = s_c if zero is None else zero.contiguous()
+    # ★ 契约：全部连续。**不是偷懒** —— 实测（5090 + triton 3.4）launcher 每个额外参数
+    #   约 1 µs（3 参数 16 µs，20 参数 32 µs），而 M=1 的 decode 每次前向都要过一遍
+    #   launcher。把 10 个 stride 从签名里去掉，是这条路径上最直接的一刀。
+    #   `.contiguous()` 在已经连续时是常数开销（返回自身），但仍要显式检查：
+    #   非连续输入会**静默算错**，必须响亮失败。
+    for name, tensor in (("x", x), ("qweight", qweight), ("scale", scale), ("zero", zero)):
+        if tensor is not None and not tensor.is_contiguous():
+            raise ValueError("%s 必须是连续的（fused kernel 用形状推 stride）" % name)
 
+    z_arg = scale if zero is None else zero
     y = torch.empty((M, N), dtype=out_dtype, device=x.device)
     grid = (triton.cdiv(N, cfg["BLOCK_N"]),)
     _dequant_gemm_kernel[grid](
-        x_c,
-        q_c,
-        s_c,
+        x,
+        qweight,
+        scale,
         z_arg,
         y,
         M,
         N,
         K,
         padded_in,
-        x_c.stride(0),
-        x_c.stride(1),
-        q_c.stride(0),
-        q_c.stride(1),
-        s_c.stride(0),
-        s_c.stride(1),
-        z_arg.stride(0),
-        z_arg.stride(1),
-        y.stride(0),
-        y.stride(1),
         GROUP_SIZE=int(group_size),
         BITS=bits,
         SYMMETRIC=bool(symmetric),
@@ -264,25 +277,15 @@ if _HAS_TRITON:
 
     @triton.jit
     def _dequant_gemm_kernel(
-        x_ptr,  # (M, K)          fp16/fp32
-        q_ptr,  # (N, P)          int8 (BITS=8) / uint8 (BITS=4)
-        s_ptr,  # (N, n_groups)   scale
+        x_ptr,  # (M, K)          fp16/fp32，连续
+        q_ptr,  # (N, P)          int8 (BITS=8) / uint8 (BITS=4)，连续
+        s_ptr,  # (N, n_groups)   scale，连续
         z_ptr,  # (N, n_groups)   zero（SYMMETRIC 时不读，传 s_ptr 占位）
-        y_ptr,  # (M, N)          输出
+        y_ptr,  # (M, N)          输出，连续
         M,
         N,
         K,
         PADDED_K,
-        stride_xm,
-        stride_xk,
-        stride_qn,
-        stride_qk,
-        stride_sn,
-        stride_sg,
-        stride_zn,
-        stride_zg,
-        stride_ym,
-        stride_yn,
         GROUP_SIZE: tl.constexpr,
         BITS: tl.constexpr,
         SYMMETRIC: tl.constexpr,
@@ -292,12 +295,15 @@ if _HAS_TRITON:
     ):
         """`y[m, n] = sum_k x[m, k] * dequant(q[n, k])`（per-group scale，沿 k）。
 
+        ★ 契约：五个张量**全部连续**，所以 stride 全部由形状推出（见 host 侧注释：
+        launcher 每参数 ~1 µs，而这条路径每次都过 launcher）。
         ★ 为什么不用 `tl.dot`：fp32 的 `tl.dot` 默认 tf32，分辨力低于 1e-3 的 K1 门。
         M=1 时是访存受限，逐元素 fp32 乘加不会成为瓶颈（模块 docstring 有完整理由）。
         """
         pid_n = tl.program_id(0)
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         mask_n = offs_n < N
+        n_groups = PADDED_K // GROUP_SIZE
 
         for m in range(0, M):
             acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
@@ -306,7 +312,7 @@ if _HAS_TRITON:
                 mask_g = ks < PADDED_K  # padded 区域（codes 恒为 0）的边界
                 if BITS == 8:
                     codes = tl.load(
-                        q_ptr + offs_n[:, None] * stride_qn + ks[None, :] * stride_qk,
+                        q_ptr + offs_n[:, None] * PADDED_K + ks[None, :],
                         mask=mask_n[:, None] & mask_g[None, :],
                         other=0,
                     ).to(tl.float32)
@@ -316,7 +322,7 @@ if _HAS_TRITON:
                     kb = k0 // 2 + offs_j
                     mask_b = kb < (PADDED_K // 2)
                     packed = tl.load(
-                        q_ptr + offs_n[:, None] * stride_qn + kb[None, :] * stride_qk,
+                        q_ptr + offs_n[:, None] * (PADDED_K // 2) + kb[None, :],
                         mask=mask_n[:, None] & mask_b[None, :],
                         other=0,
                     ).to(tl.int32)
@@ -329,7 +335,7 @@ if _HAS_TRITON:
 
                 g = ks // GROUP_SIZE
                 sc = tl.load(
-                    s_ptr + offs_n[:, None] * stride_sn + g[None, :] * stride_sg,
+                    s_ptr + offs_n[:, None] * n_groups + g[None, :],
                     mask=mask_n[:, None] & mask_g[None, :],
                     other=0.0,
                 ).to(tl.float32)
@@ -337,7 +343,7 @@ if _HAS_TRITON:
                     w = codes * sc
                 else:
                     zz = tl.load(
-                        z_ptr + offs_n[:, None] * stride_zn + g[None, :] * stride_zg,
+                        z_ptr + offs_n[:, None] * n_groups + g[None, :],
                         mask=mask_n[:, None] & mask_g[None, :],
                         other=0.0,
                     ).to(tl.float32)
@@ -345,14 +351,10 @@ if _HAS_TRITON:
 
                 # x 在 padded 区域是 0（掩码用未补齐的 K）—— 与 separate 臂的
                 # `_dequant_tile` 把权重尾部切成 [:, :in_features] 等价。
-                xv = tl.load(x_ptr + m * stride_xm + ks * stride_xk, mask=ks < K, other=0.0).to(
-                    tl.float32
-                )
+                xv = tl.load(x_ptr + m * K + ks, mask=ks < K, other=0.0).to(tl.float32)
                 acc += tl.sum(w * xv[None, :], axis=1)
 
             if OUT_FP16:
-                tl.store(
-                    y_ptr + m * stride_ym + offs_n * stride_yn, acc.to(tl.float16), mask=mask_n
-                )
+                tl.store(y_ptr + m * N + offs_n, acc.to(tl.float16), mask=mask_n)
             else:
-                tl.store(y_ptr + m * stride_ym + offs_n * stride_yn, acc, mask=mask_n)
+                tl.store(y_ptr + m * N + offs_n, acc, mask=mask_n)
