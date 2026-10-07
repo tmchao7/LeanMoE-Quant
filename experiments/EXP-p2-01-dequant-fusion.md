@@ -208,6 +208,20 @@ fp16 scale（**部署口径**，`QuantLinear` 按字节账存 fp16）与 fp32 sc
 | `fused`（本 kernel，默认配置） | 0.1338 | 0.0019 | **2.141 ms** |
 | `separate`（物化 fp16 权重 + `F.linear`） | 0.1624 | 0.0028 | **2.599 ms** |
 
+★ **v2 重测（2026-10-07 晚，P2d 轮）**：投影 kernel 在 `7d1f92b` 改进后重跑本实验 6 格，
+同进程交错 A/B 的 `fused/separate` 比：
+
+| bit_width | v1 比 | **v2 比** | v1 → v2 |
+|---|---|---|---|
+| w8a16 | 1.0518 | **1.0442** | 判定不变 |
+| w8a8 | 1.0532 | **1.0523** | 判定不变 |
+| w4a16 | 0.9655 | **0.9681** | 判定不变 |
+
+⇒ **E2 的判定一个字都不用改**，而且这本身是一条证据：新 kernel 在**图内**让投影快 1.58×
+（`EXP-p4c-01` §5.6），但在这个 **host 受限的 eager 臂**里完全看不见（host 61–81%）。
+同一件事在 `EXP-p4b-01` 的图内臂里是可见的（fused `speedup_cudagraph` 1.1071 → 1.1703）。
+v1 的 6 个 `result.json` 归档在 `results/EXP-p2-01-run/v1_archive/`。
+
 ★ **口径提醒（2026-10-07 补）**：这张表的 fused/separate 两行**都被 Triton launcher 主导**
 （同节 (b) 自己测出 launcher 地板 16–32 µs）。图里没有 launcher，`EXP-p4c-01` §5.4 的 profiler
 给的是 fused kernel **8.2 µs/次**；`EXP-p4c-01` §5.6 又把 kernel 本身从 8.14 改到 **5.15 µs/次**

@@ -11,9 +11,10 @@ settled — do not re-derive them and do not re-run their cells:
   matrix predicted: in the eager cells the fused arm is **5% slower** (`host_share` 71.7%,
   ~19k kernels/step). Isolated the fused kernel is 1.21× cheaper per call — Python/launch eats it.
 - **E7 (`EXP-p4b-01`) — judged.** The truncation is real and **only the fused arm cashes it in**:
-  the same `w8a16` config goes `speedup_eager` **0.76 → speedup_cudagraph 1.11** (ctx=1024;
-  0.79 → 1.05 at 4096) while `host_share` drops 77.5% → 1.2%. The ceiling is measured: the weight
-  stream is only 42% (1024) / 23% (4096) of a graph step ⇒ even a perfect weight path ≤ ~1.74× / ~1.30×.
+  the same `w8a16` config goes `speedup_eager` **~0.78 → speedup_cudagraph 1.170** (ctx=1024;
+  → 1.084 at 4096) while `host_share` drops 77.5% → 1.6%; the separate arm does not move
+  (0.7674 / 0.8530) even after the kernel fix. Ceiling is measured: the weight stream is only
+  42% (1024) / 23% (4096) of a graph step ⇒ even a perfect weight path ≤ ~1.74× / ~1.30×.
 
 - **`EXP-p4c-01` — supported (the other big non-weight block was the ATTENTION IMPLEMENTATION).**
   Swapping HF sdpa for this repo's split-KV core *inside the graph* cuts the step 1.36–2.44×;
@@ -26,8 +27,10 @@ settled — do not re-derive them and do not re-run their cells:
   the default config is optimal, so the 5.4 µs/call gap was structural: the scale was gathered
   per element while one value covers 128 of them. Loading it per group + broadcasting gives
   **8.14 → 5.15 µs/call (523 → 826 GB/s)**; the model's projection bucket fell 0.5245 → 0.3254 ms.
-  ★ `EXP-p4b-01`'s and `EXP-p2-01`'s absolute ms are **pre-fix** (both records say so); verdicts
-  unchanged, magnitudes pending a re-run (archive first, §2 rule 9).
+  ★ The pre-fix cells were then **re-measured** (P2d, 2026-10-07): E7's fused `speedup_cudagraph`
+  1.1071 → **1.1703** (1024) / 1.0512 → **1.0839** (4096); in the **eager** arm the same fix is
+  invisible (A/B ratio 1.0093 → 1.0091) — the improvement only cashes in inside the graph.
+  v1 artifacts are archived under `results/<EXP>-run/v1_archive/` and labelled in the records.
 
 - **E4 (`EXP-p4-01`) — supported.** Routing/packing is the largest bucket in the hf/gather baseline
   (4.478 ms = **44.2%** of GPU busy) and **quantization-invariant** (4.478 / 4.512 / 4.526 / 4.555 ms
@@ -122,7 +125,8 @@ that the science was not done — read the record first.
 | P1 | ✅ **done 2026-10-07**: E4 → routing/pack = **44.2%** of GPU busy and constant within 1.7% across fp16→w4a16 | the plan's `minimal_credible` scope is now **6/6** | `experiments/EXP-p4-01-moe-routing-overhead.md` | no |
 | P2 | ✅ **done 2026-10-07** (re-measured after the kernel fix): in-graph attention + projection-kernel fix → speedup **1.169 / 1.250** (1024) and 1.084 / 1.214 (4096); best cell **1.70× / 2.77×** vs fp16 × sdpa | the user approved a new id (`EXP-p4c-01`), see §3 | `experiments/EXP-p4c-01-in-graph-attention.md` | no |
 | P2b | **The next bottleneck is the elementwise/copy tail** (~35% of the step, ~330 tiny kernels) | §5.4 of `EXP-p4c-01`; the projection half of this row is ✅ done (§5.6, kernel `7d1f92b`) | a record classifying the tail by source (residual adds / RMSNorm casts / routing index writes / `direct_copy`) + a fusion decision | **YES — no matrix entry exists**; ask before adding an `EXP-` id (or an axis) |
-| P2d | Re-measure the **pre-fix** cells once someone wants to quote their magnitudes: `EXP-p4b-01`'s w8a16 cudagraph cells and `EXP-p2-01`'s fused/separate arms; then optionally fuse q/k/v into one launch (3→1) | the kernel fix (`7d1f92b`) made their recorded absolute ms stale — verdicts are unaffected, magnitudes are conservative | re-run with the canary protocol, **archive v1 first** (`results/<EXP>-run/v1_archive/`), label v1/v2 in the record | **YES — it re-runs cells that are already `done`** (§6) |
+| P2d | ✅ **done 2026-10-07** (9 + 2 cells, canary −0.006%, occupancy clean): E7 fused `speedup_cudagraph` **1.1071 → 1.1703** (1024) / **1.0512 → 1.0839** (4096); E2's eager ratios unchanged (1.0442 / 1.0523 / 0.9681) — the fix is graph-only | the kernel fix made the recorded absolute ms stale | v1 archived under `results/<EXP>-run/v1_archive/`, v1/v2 labelled in both records | no |
+| P2e | Optional: fuse q/k/v into **one** launch (3→1) — the projection kernel is now 5.15 µs/call vs a 2.72 µs byte floor, so ~2.4 µs/call of launch/ramp is left | follows P2b's elementwise verdict; needs a shape decision (the three projections must share `in_features`) | isolated in-graph A/B (the P2d-style tool) before any cell run | no, if it stays inside `EXP-p4c-01`'s declared config; ask if it needs a new id |
 | P2c | Widen the routing classifier (torch `topk`/`sort`/`index_select`/`gather`/`scatter`) so the **grouped** path's routing cost can be quoted | `EXP-p4-01` §5.3: the classifier's 0.0% on the grouped path is a **blind spot**, not a measurement | new rules + tests; the number must be produced in its own round | **YES — it changes the meaning of the `routing_share_pct` field** |
 | P3 | Breadth: E5 (`EXP-p4-02`), E6 (`EXP-p5-01`), E8 (`EXP-p8-01`, needs the V100), E1's group axis under the corrected prompt set, dense curves, batch sweep (E3 — today it has **no** experiment), FP8/MXFP4 (`EXP-p3-01/02`), repairing the W4A16 gate | each closes a declared hypothesis or lever; several need a matrix entry that does not exist | per matrix entry; E8 only after the same protocol passes on the V100 | partial: new matrix entries need approval |
 | P4 | Publication: ncu evidence, E7 charts, final README/PLAN pass | closes Phase 2's last deliverable and Phase 7 | ncu metrics per `lemoq.kernels.NCU_METRICS`; charts regenerated from `result.json` | no |
