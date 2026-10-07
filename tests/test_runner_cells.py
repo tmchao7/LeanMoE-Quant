@@ -318,7 +318,15 @@ def test_quantized_config_without_gate_citation_is_refused(capsys):
     assert "门实测" in out.err
 
 
-def test_quantized_cudagraph_is_refused(capsys):
+def test_quantized_cudagraph_is_no_longer_refused_before_loading(capsys, monkeypatch):
+    """P3（2026-10-07）：量化 × cudagraph 的"未接线"拒绝已删除。
+
+    ★ 断言必须与机器无关：把 CUDA 判成不可用，这样"走到哪一道门"是可复现的
+    （否则在有 GPU 的服务器上这个测试会真的去加载 13.4 GB 模型）。
+    """
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     rc = runner_main(
         [
             "--exp",
@@ -333,7 +341,45 @@ def test_quantized_cudagraph_is_refused(capsys):
     )
     out = capsys.readouterr()
     assert rc == 2
-    assert "cudagraph" in out.err
+    assert "requires CUDA" in out.err, out.err
+    assert "尚未接线" not in out.err, "P3 的接线拒绝应当已经删除"
+
+
+def test_dry_run_surfaces_a_quantized_cudagraph_cell_with_its_cited_gate(capsys):
+    """dry-run 必须答得出"这一格叫什么、门是什么状态" —— 量化 × cudagraph 也是。"""
+    rc = runner_main(
+        [
+            "--exp",
+            "EXP-p4b-01-truncation",
+            "--bit-width",
+            "w8a16",
+            "--execution",
+            "cudagraph",
+            "--ctx",
+            "1024",
+            "--dequant",
+            "separate",
+            "--dry-run",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    assert (
+        "would run: EXP-p4b-01-truncation__bit_width=w8a16_execution=cudagraph_ctx=1024" in out.out
+    )
+    assert "gate: PASS" in out.out, out.out
+    assert "execution=cudagraph" in out.out
+
+
+def test_run_cudagraph_accepts_the_quant_cfg_hook():
+    """P3 的接线点：`run_cudagraph` 必须真的收 `quant_cfg`（不是靠文档声称）。"""
+    import inspect
+
+    from benchmarks.runner import run_cudagraph
+
+    sig = inspect.signature(run_cudagraph)
+    assert "quant_cfg" in sig.parameters
+    assert sig.parameters["quant_cfg"].default is None
 
 
 # ---------------------------------------------------------------------------
@@ -653,3 +699,198 @@ def test_quantize_for_cfg_replaces_and_model_still_forwards(tiny_olmoe):
     with torch.no_grad():
         out = tiny_olmoe(torch.tensor([[1, 2, 3, 4]]))
     assert out.logits.shape == (1, 4, 256), "量化后的模型必须还能前向"
+
+
+# ---------------------------------------------------------------------------
+# P3：量化 × cudagraph 的 payload（**纯函数**，离线可测）
+#
+# 这两件事原来都是错的，且都会写出**违反硬规则 2** 的记录：
+#   1. `config.bit_width` 硬编码 "fp16" → 量化格以 fp16 的名义落盘；
+#   2. 门只用图回放门 → w8a8 会被跳过的引用门放行。
+# ---------------------------------------------------------------------------
+def _cudagraph_res(*, kl=0.0, top1=1.0, p50=4.0, weight_bytes_actual=6_600_000_000):
+    """`build_cudagraph_payload` 需要的最小 res（数值全是自造，只为走代码路径）。"""
+    from benchmarks.bytes import ModelSpec
+    from benchmarks.timing import summarize
+
+    steps = summarize([p50] * 20)
+    spec = ModelSpec(
+        name="OLMoE-test",
+        layers=16,
+        hidden=2048,
+        num_attention_heads=16,
+        num_key_value_heads=16,
+        head_dim=128,
+        num_experts=64,
+        top_k=8,
+        expert_ffn_dim=1024,
+        vocab_size=50304,
+        tie_word_embeddings=False,
+    )
+    budget = {
+        "W": {"total_bytes": 6_000_000_000, "items": []},
+        "T": {"total_bytes": 6_400_000_000},
+        "KV": {"read_bytes": 100},
+    }
+    return {
+        "spec": spec,
+        "steps": steps,
+        "ttft": {"p50": 60.0, "p99": 61.0, "samples": [60.0] * 5},
+        "gap": {
+            "gpu_p50_ms": 3.9,
+            "gpu_busy_ms": 3.8,
+            "host_p50_ms": 0.1,
+            "host_share_pct": 2.0,
+            "kernels_per_call": 900,
+            "host_share_pct_residual": 1.0,
+            "caveats": None,
+        },
+        "vram": {
+            "weights_gib": 6.6,
+            "kv_gib": 0.1,
+            "activations_gib": 0.2,
+            "workspace_gib": 0.3,
+            "peak_total_gib": 7.2,
+            "method": "m",
+            "note": "n",
+        },
+        "breakdown": {
+            "gpu_total_ms_per_step": 3.8,
+            "kernels_per_step": 900,
+            "bucket_ms": {"cudagraph_replay": 3.8},
+            "bucket_share_pct": {"cudagraph_replay": 100.0},
+            "top_kernels": [],
+        },
+        "budget": budget,
+        "weight": {"total_bytes": 6_000_000_000},
+        "attainment": {
+            "floor_w_ms": 3.8,
+            "floor_t_ms": 4.1,
+            "quant_attainment_pct": 95.0,
+            "bw_attainment_pct": 100.0,
+            "denominator_note": "n",
+        },
+        "measured_bw_gbps": 1561.9,
+        "weight_bytes_actual": weight_bytes_actual,
+        "correctness": {
+            "kl": kl,
+            "top1_agreement": top1,
+            "seed_token_match": True,
+            "token_sequence_match": True,
+            "eager_seed_token": 1,
+            "graph_seed_token": 1,
+            "eager_output_tokens": [1, 2],
+            "graph_output_tokens": [1, 2],
+            "informational_vs_hf_dynamic_cache": {"kl": 1.7e-4, "top1_agreement": 1.0},
+        },
+        "capture": {"capture_success": True},
+        "moe": "grouped",
+        "attn": "sdpa",
+        "moe_blocks_replaced": 16,
+        "dequant_arm": None,
+        "dequant_activity": None,
+        "quantize_report": None,
+    }
+
+
+def _cg_cfg(bit_width="fp16", dequant="none"):
+    return {
+        "bit_width": bit_width,
+        "dequant": dequant,
+        "group_size": 128 if bit_width != "fp16" else None,
+        "execution": "cudagraph",
+        "moe": "grouped",
+        "attn": "sdpa",
+        "ctx": 1024,
+        "batch": 1,
+        "max_new_tokens": 32,
+        "warmup": 5,
+        "timed": 20,
+        "dtype": "float16",
+        "fusion": "none",
+    }
+
+
+def test_cudagraph_payload_fp16_keeps_its_historical_shape():
+    """fp16 的 cudagraph 格口径**逐字不变**：kl/top-1 就是图回放那对数字。"""
+    from benchmarks.runner import build_cudagraph_payload
+    from benchmarks.schema import validate_result
+
+    res = _cudagraph_res(kl=0.0, top1=1.0)
+    payload = build_cudagraph_payload(
+        "EXP-p0-03-baseline-cudagraph__ctx=1024",
+        res,
+        _cg_cfg("fp16"),
+        {"statement": "s", "refutation_signal": "r"},
+    )
+    assert payload["config"]["bit_width"] == "fp16"
+    assert payload["correctness"]["kl"] == 0.0
+    assert payload["correctness"]["gate"] == "PASS"
+    assert payload["latency"]["per_token_p50_ms"] == 4.0
+    assert validate_result(payload) == []
+
+
+def test_cudagraph_payload_takes_bit_width_and_the_cited_gate_from_cfg():
+    """★ P3 的核心修复：量化格的 `bit_width` 来自 cfg，门 = 引用门 ∧ 图回放门。"""
+    from benchmarks.runner import build_cudagraph_payload
+    from benchmarks.schema import validate_result
+
+    res = _cudagraph_res(kl=0.0, top1=1.0)
+    res["dequant_arm"] = "fused"
+    res["quantize_report"] = {
+        "spec": {"dequant": "fused"},
+        "replaced_per_target": {"attention": 64},
+    }
+    res["dequant_activity"] = {"n_quant_linear": 64, "fused_calls": 3840, "fallbacks": {}}
+    payload = build_cudagraph_payload(
+        "EXP-p4b-01-truncation__bit_width=w8a16_execution=cudagraph_ctx=1024",
+        res,
+        _cg_cfg("w8a16", "fused"),
+        {"statement": "s", "refutation_signal": "r"},
+    )
+    assert payload["config"]["bit_width"] == "w8a16", "硬编码 fp16 的坑必须已修"
+    assert payload["config"]["dequant"] == "fused"
+    assert payload["config"]["group_size"] == 128
+    # KL 是**引用** p1-04 的实测值，不是图回放那对数字
+    assert payload["correctness"]["kl"] == GATE_CITATIONS[("w8a16", 128, 1024)]["kl"]
+    assert payload["correctness"]["gate"] == "PASS"
+    assert payload["correctness"]["consistency"]["passed"] is True
+    assert payload["correctness"]["graph_replay"]["kl"] == 0.0
+    assert payload["latency"]["per_token_p50_ms"] == 4.0
+    assert payload["_measurement"]["dequant"]["arm_recorded"] == "fused"
+    assert validate_result(payload) == []
+
+
+def test_cudagraph_payload_does_not_let_a_failed_citation_through():
+    """w8a8 的引用门 FAIL → gate 必须 FAIL、latency 全 null（硬规则 2），即使图是忠实的。"""
+    from benchmarks.runner import build_cudagraph_payload
+    from benchmarks.schema import validate_result
+
+    res = _cudagraph_res(kl=0.0, top1=1.0)
+    payload = build_cudagraph_payload(
+        "EXP-p4b-01-truncation__bit_width=w8a8_execution=cudagraph_ctx=1024",
+        res,
+        _cg_cfg("w8a8", "separate"),
+        {"statement": "s", "refutation_signal": "r"},
+    )
+    assert payload["correctness"]["gate"] == "FAIL"
+    assert payload["verdict"]["verdict"] == "FAIL"
+    assert payload["latency"]["per_token_p50_ms"] is None
+    assert payload["_measurement"]["gate_failed_evidence"]["per_token_p50_ms"] == 4.0
+    assert validate_result(payload) == []
+
+
+def test_cudagraph_payload_fails_when_the_graph_is_not_faithful():
+    """图回放门本身也要算数：图与 eager 不一致时，量化格同样 FAIL（合取的另一半）。"""
+    from benchmarks.runner import build_cudagraph_payload
+
+    res = _cudagraph_res(kl=0.5, top1=0.5)  # 图 vs eager 不忠实
+    payload = build_cudagraph_payload(
+        "EXP-p4b-01-truncation__bit_width=w8a16_execution=cudagraph_ctx=1024",
+        res,
+        _cg_cfg("w8a16", "separate"),
+        {"statement": "s", "refutation_signal": "r"},
+    )
+    assert payload["correctness"]["gate"] == "FAIL"
+    assert payload["correctness"]["consistency"]["passed"] is False
+    assert payload["latency"]["per_token_p50_ms"] is None

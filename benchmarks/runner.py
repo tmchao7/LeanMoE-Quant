@@ -738,11 +738,18 @@ def _graph_res(
     vram: dict[str, Any],
     tr: Any,
     measured_bw_gbps: float | None,
+    qreport: Any = None,
 ) -> dict[str, Any]:
+    """这个格的 res 字典。★ `qreport` 决定字节账走 fp16 还是**量化后**的分母。
+
+    量化格若用 fp16 的 `[W]`/`[T]` 算达成率，分母会大一倍 —— 那不是"保守"，
+    是错的口径（`docs/METRICS.md` §3.2）。所以 `quant` 必须透传到两个预算函数。
+    """
     spec = _model_spec(model.config, model_id)
     steps = gap["stats"]["wall"]
-    budget = byte_budget(spec, ctx=ctx, batch=batch)
-    weights = weight_budget(spec)
+    quant = _quant_spec_arg(qreport)
+    budget = byte_budget(spec, ctx=ctx, batch=batch, quant=quant)
+    weights = weight_budget(spec, quant=quant)
     attainment: dict[str, Any] = {
         "floor_w_ms": None,
         "floor_t_ms": None,
@@ -771,7 +778,7 @@ def _graph_res(
     }
     return {
         "spec": spec,
-        "weight_bytes_actual": _weight_bytes_actual(model),
+        "weight_bytes_actual": _weight_bytes_actual(model, qreport),
         "breakdown": breakdown,
         "moe_block": None,
         "ttft": {"p50": None, "p99": None, "samples": []},
@@ -785,6 +792,19 @@ def _graph_res(
         "capture": dict(session.capture_info),
         "tracker": tr,
     }
+
+
+def _quant_spec_arg(qreport: Any) -> Any:
+    """`QuantizeReport.spec`（一个 dict）-> `bytes.QuantSpec`；没有量化时 None。"""
+    if qreport is None:
+        return None
+    spec = qreport.spec
+    return QuantSpec(
+        bits=spec.get("weight_bits"),
+        group_size=spec.get("group_size"),
+        targets=tuple(spec.get("targets") or ()),
+        keep_lm_head_fp16=bool(spec.get("keep_lm_head_fp16", True)),
+    )
 
 
 def _measure_static_prefill(session: StaticCacheDecodeSession, *, warmup: int, timed: int):
@@ -821,8 +841,9 @@ def run_cudagraph(
     device: str = "cuda",
     moe: str = "hf",
     attn: str | None = None,
+    quant_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Run the fp16 StaticCache + one-token CUDA Graph path.
+    """Run the StaticCache + one-token CUDA Graph path.
 
     `moe` 选 decode 的 MoE 实现（三种，对应三个不同的假设）：
 
@@ -830,6 +851,17 @@ def run_cudagraph(
         "gather"  固定形状 gather + bmm（moe_static；**旧名 static**，EXP-p0-04 的矩阵
                   与 --static-moe 别名都写 static，main 会归一到 gather）—— EXP-p0-04
         "grouped" Triton grouped GEMV，无 gather 拷贝（moe_grouped）—— EXP-p2-02
+
+    `quant_cfg` 非 None 时在同一进程里就地量化（P3）。顺序**不能反**，且都在 capture 之前：
+
+        replace_moe_blocks(impl=moe, quant=qspec)   # experts：在融合张量上量化（P1）
+        quantize_for_cfg(model, quant_cfg)          # attention：QuantLinear（separate/fused）
+
+    ★ 为什么必须在 capture 之前：替换会释放原 experts 并新建 packed 张量；量化会新建
+      buffer。任何一次张量新建若发生在图内，都会破坏已捕获的指针。
+
+    ★ 两臂（separate / fused）都能 capture：fused kernel 无 autotune、grid 是 host 常量；
+      首调 JIT 编译发生在 `capture()` 自己的 warmup 相位（在专用 stream 上、capture 之前）。
 
     prefill 与 `moe` 无关：永远走逐专家循环（理由见 `moe_static.static_moe_forward`）。
     """
@@ -847,6 +879,8 @@ def run_cudagraph(
         raise ValueError("the CUDA Graph arm supports batch=1 and ctx >= 1 only")
     CudaGraphConfig(ctx=ctx, max_new_tokens=max_new_tokens, batch=batch).validate_timing(timed)
 
+    qspec = quant_spec_for_cfg(quant_cfg) if quant_cfg else None
+
     tr = VramTracker()
     tr.mark("after_torch_import")
     # ★ `attn="kernel"` 不是 HF 的一个实现名，是我们自己的替换：绝不能把它传给
@@ -858,6 +892,7 @@ def run_cudagraph(
     tr.mark("after_weights")
 
     moe_replaced = 0
+    qreport = None
     kernel_warm: dict[str, Any] | None = None
     attn_warm: dict[str, Any] | None = None
     attn_replaced = 0
@@ -866,12 +901,16 @@ def run_cudagraph(
         # 若在图内发生就会破坏已捕获的指针。
         from lemoq.kernels.moe_static import replace_moe_blocks
 
-        moe_replaced = replace_moe_blocks(model, impl=moe)
+        # ★ P1/P3：量化 × grouped 时 experts 在替换**内部**被量化（融合张量上），
+        #   所以 spec 要传下去；fp16 臂传 None，那条路径逐字不变。
+        moe_replaced = replace_moe_blocks(model, impl=moe, quant=qspec)
         torch.cuda.synchronize()
         tr.mark("after_static_moe")
-        if moe == "grouped":
+        if moe == "grouped" and qspec is None:
             # ★ Triton 的首次调用会 JIT 编译。在 capture 期间做这件事会报错，
             #   而且报错信息通常指向别处。所以这里显式 warm 一次。
+            #   （量化路径不需要：量化 grouped kernel 在 capture 的 warmup 相位里
+            #     自己完成首调编译，见 quant_launch_plan 的静态形状约定。）
             from lemoq.kernels.moe_grouped import warm as warm_kernels
 
             block = model.model.layers[0].mlp
@@ -882,6 +921,14 @@ def run_cudagraph(
             )
             torch.cuda.synchronize()
             tr.mark("after_grouped_warm")
+
+    if qspec is not None:
+        # attention（experts 已在 replace_moe_blocks 里量化掉，这里找不到它们）
+        qreport = quantize_for_cfg(model, quant_cfg)
+        if moe != "hf":
+            _record_fused_expert_quantization(model, qreport)
+        torch.cuda.synchronize()
+        tr.mark("after_quantize")
 
     if attn == "kernel":
         # 同样的两步，同样的理由：先替换（图外），再 warm（图外），然后才 capture。
@@ -993,6 +1040,7 @@ def run_cudagraph(
         vram=vram,
         tr=tr,
         measured_bw_gbps=bw,
+        qreport=qreport,
     )
     res["capture"] = capture
     res["correctness"] = correctness
@@ -1001,6 +1049,15 @@ def run_cudagraph(
     res["attn"] = attn or str(getattr(model.config, "_attn_implementation", "unknown"))
     res["kernel_warm"] = kernel_warm
     res["moe_blocks_replaced"] = int(moe_replaced)
+    res["quantize_report"] = None if qreport is None else qreport.to_dict()
+    if qreport is not None:
+        # ★ P3 的证据：这一格**实际**走的 dequant 臂。capture 之后 replay 不再经过
+        #   Python，所以这些计数来自 capture 之前的相位（prefill / warmup / eager 参照）
+        #   —— 它们证明"被捕获的那段前向里用的是哪条臂"，而不是给 replay 计数。
+        from lemoq.quant.linear import dequant_activity  # noqa: PLC0415
+
+        res["dequant_activity"] = dequant_activity(model)
+        res["dequant_arm"] = str(qspec.dequant)
     res["attn_kernel"] = {
         "warm": attn_warm,
         "cores_replaced": int(attn_replaced),
@@ -1737,10 +1794,15 @@ def build_cudagraph_payload(
     }
     payload["hardware"] = _hardware_from_probe(probe)
     payload["runtime"] = _runtime()
+    # ★ P3：量化 × cudagraph 的 `bit_width` **必须来自 cfg**。原实现硬编码 "fp16"，
+    #   于是量化格会以 fp16 的名义落盘（并且跳过引用门）—— 那违反硬规则 2，
+    #   见 EXP-p4b-01-truncation 记录 §2.7 的「P3 的真实工作量」。
+    bit_width = str(cfg.get("bit_width") or "fp16")
+    quantized = bit_width != "fp16"
     payload["config"] = {
-        "bit_width": "fp16",
-        "group_size": None,
-        "dequant": "none",
+        "bit_width": bit_width,
+        "group_size": cfg.get("group_size") if quantized else None,
+        "dequant": (cfg.get("dequant") if quantized else "none"),
         "fusion": "none",
         "execution": "cudagraph",
         "moe": res.get("moe", "hf"),
@@ -1754,13 +1816,10 @@ def build_cudagraph_payload(
         "timed": cfg.get("timed"),
     }
     correctness = res["correctness"]
-    payload["correctness"] = {
+    graph_pass = graph_correctness_passed(correctness)
+    graph_block = {
         "kl": correctness["kl"],
         "top1_agreement": correctness["top1_agreement"],
-        "ppl_fp16": None,
-        "ppl_this": None,
-        "ppl_delta": None,
-        "gate": "PASS" if graph_correctness_passed(correctness) else "FAIL",
         "thresholds": {
             "kl_max_fp16_graph": 1e-5,
             "top1_min_fp16_graph": 1.0,
@@ -1770,15 +1829,60 @@ def build_cudagraph_payload(
                 "informational_vs_hf_dynamic_cache，它不作为门槛。"
             ),
         },
-        # ★ 这些字段原来被白名单丢掉了。门通过时它们是唯一的证据链：
-        #   没有 token 序列与 informational KL，事后无法复核"图到底忠不忠实"。
+        "passed": bool(graph_pass),
         "seed_token_match": correctness.get("seed_token_match"),
         "token_sequence_match": correctness.get("token_sequence_match"),
         "eager_seed_token": correctness.get("eager_seed_token"),
         "graph_seed_token": correctness.get("graph_seed_token"),
+        "eager_output_tokens": correctness.get("eager_output_tokens"),
         "graph_output_tokens": correctness.get("graph_output_tokens"),
-        "informational_vs_hf_dynamic_cache": correctness.get("informational_vs_hf_dynamic_cache"),
     }
+    if quantized:
+        # ★ 量化格的正确性门 = **引用门（p1-04 的 KL/top-1）∧ 图回放门**（合取）。
+        #   与 eager 量化格同一条口径（`correctness_for_cell`）：KL 是**引用**的实测值，
+        #   图回放忠实性进 `consistency`。原实现只用图回放门 —— 那会放行 w8a8。
+        consistency = {
+            "passed": bool(graph_pass),
+            "checks": [dict(graph_block, name="graph_replay_is_faithful")],
+            "note": (
+                "本条把守的是「被 capture 的那段前向是否忠实于同路径 eager」；"
+                "引用门（KL/top-1）另计，两者合取才是 gate。"
+            ),
+        }
+        payload["correctness"] = correctness_for_cell(cfg, consistency_passed=bool(graph_pass))
+        payload["correctness"]["consistency"] = consistency
+        payload["correctness"]["graph_replay"] = graph_block
+        payload["correctness"]["informational_vs_hf_dynamic_cache"] = correctness.get(
+            "informational_vs_hf_dynamic_cache"
+        )
+    else:
+        payload["correctness"] = {
+            "kl": correctness["kl"],
+            "top1_agreement": correctness["top1_agreement"],
+            "ppl_fp16": None,
+            "ppl_this": None,
+            "ppl_delta": None,
+            "gate": "PASS" if graph_pass else "FAIL",
+            "thresholds": {
+                "kl_max_fp16_graph": 1e-5,
+                "top1_min_fp16_graph": 1.0,
+                "note": (
+                    "与**同路径 eager**（同 StaticCache、同 4D mask、同 MoE，只是不进图）"
+                    "比较 —— 这才是'图回放是否忠实'。跨 cache / 跨实现的差异另见 "
+                    "informational_vs_hf_dynamic_cache，它不作为门槛。"
+                ),
+            },
+            # ★ 这些字段原来被白名单丢掉了。门通过时它们是唯一的证据链：
+            #   没有 token 序列与 informational KL，事后无法复核"图到底忠不忠实"。
+            "seed_token_match": correctness.get("seed_token_match"),
+            "token_sequence_match": correctness.get("token_sequence_match"),
+            "eager_seed_token": correctness.get("eager_seed_token"),
+            "graph_seed_token": correctness.get("graph_seed_token"),
+            "graph_output_tokens": correctness.get("graph_output_tokens"),
+            "informational_vs_hf_dynamic_cache": correctness.get(
+                "informational_vs_hf_dynamic_cache"
+            ),
+        }
     budget = res["budget"]
     payload["bytes"] = {
         "W_total_bytes": budget["W"]["total_bytes"],
@@ -1802,13 +1906,23 @@ def build_cudagraph_payload(
         "tok_per_s": round(1000.0 / steps["p50"], 2) if steps["p50"] else None,
         "samples": {"ttft_ms": ttft["samples"], "per_token_ms": steps["samples"]},
     }
+    # ★ 硬规则 2 同样管 cudagraph 臂：gate FAIL 的量化格（w8a8/w4a16）照跑，
+    #   但延迟只能进 `_measurement.gate_failed_evidence`，`latency` 段全 null。
     payload["attribution"] = {
         "gpu_p50_ms": gap.get("gpu_p50_ms"),
         "gpu_busy_ms": gap.get("gpu_busy_ms"),
         "host_p50_ms": gap.get("host_p50_ms"),
         "host_share_pct": gap.get("host_share_pct"),
         "host_share_pct_residual": None,
+        # ★ cudagraph 臂**没有** dequant 占比：图里没有 Python，separate/fused 的差
+        #   要靠"两张图交错重放"才测得出（那是另一次实验）。写 None 而不是 0 ——
+        #   0 会被读成"反量化在 graph 里不花时间"，那是没测过的话。
         "dequant_share_pct": None,
+        "dequant_share_source": (
+            None
+            if not quantized
+            else "未测（graph 臂的 per-call Python 开销为 0，A/B 需要两张图交错重放）"
+        ),
         "routing_share_pct": None,
         "kernels_per_call": gap.get("kernels_per_call"),
     }
@@ -1826,7 +1940,13 @@ def build_cudagraph_payload(
         "bucket_share_pct": bd.get("bucket_share_pct", {}),
         "top_kernels": bd.get("top_kernels", []),
         "moe_block": None,
-        "conclusion": "This result isolates one captured CUDA Graph replay; it does not measure quantization.",
+        "conclusion": (
+            "这张图只包含一次固定形状的 decode 前向；量化要在这里兑现，靠的是"
+            "权重字节（[W]）下降。★ 图里没有 Python —— 这正是 E7 要问的"
+            "「把 host 开销拿掉之后量化还剩多少收益」。"
+            if quantized
+            else "This result isolates one captured CUDA Graph replay; it does not measure quantization."
+        ),
     }
     payload["attainment"] = res["attainment"]
     payload["vram"] = {
@@ -1837,25 +1957,79 @@ def build_cudagraph_payload(
         "peak_total_gib": vram.get("peak_total_gib"),
         "method": vram.get("method"),
     }
-    graph_pass = graph_correctness_passed(correctness)
+    gate_pass = payload["correctness"]["gate"] == "PASS"
+    payload["latency"], _cg_failed_evidence = latency_section_for_gate(
+        gate_pass, payload["latency"]
+    )
+    payload["_measurement"] = {}
+    if _cg_failed_evidence is not None:
+        payload["_measurement"]["gate_failed_evidence"] = _cg_failed_evidence
+    if quantized:
+        _arm = res.get("dequant_arm") or cfg.get("dequant")
+        _notes = (
+            "量化格（%s group=%s dequant=%s，实际走的臂 = %s）× **cudagraph**。"
+            "KL/top-1 引用 EXP-p1-04 的同配置实测；本格把守的两件事是"
+            "（a）引用门 PASS、（b）图回放忠实于**同路径 eager**。"
+            % (bit_width, cfg.get("group_size"), cfg.get("dequant"), _arm)
+        )
+        if not gate_pass:
+            _notes += (
+                " ★ 正确性门 FAIL：本格延迟**只允许**作为'图回放/融合不改变正确性判定'"
+                "的证据，不得作为性能结论（硬规则 2）；实测值在 "
+                "_measurement.gate_failed_evidence。"
+            )
+        _applies = "%s group=%s dequant=%s × cudagraph、单卡、batch=1、ctx=%s、%s" % (
+            bit_width,
+            cfg.get("group_size"),
+            cfg.get("dequant"),
+            cfg.get("ctx"),
+            payload["hardware"].get("compute_capability"),
+        )
+        _not_applies = (
+            "其它 group_size / ctx / targets（门没有实测）、batch>1、其它架构、"
+            "PagedAttention；dequant 占比未测（graph 臂需要两张图交错）"
+        )
+    else:
+        _notes = "fp16 CUDA Graph feasibility and correctness gate; no quantization conclusion."
+        _applies = "fp16、单卡、batch=1、ctx=%s、%s" % (
+            cfg.get("ctx"),
+            payload["hardware"].get("compute_capability"),
+        )
+        _not_applies = "quantized execution、PagedAttention、ctx>4096、other GPUs"
     payload["verdict"] = {
-        "verdict": "PASS" if graph_pass and consistency["passed"] else "FAIL",
-        "outcome": "supported" if graph_pass and consistency["passed"] else "refuted",
-        "notes": "fp16 CUDA Graph feasibility and correctness gate; no quantization conclusion.",
+        "verdict": "PASS" if gate_pass else "FAIL",
+        "outcome": "supported" if gate_pass else "refuted",
+        "notes": _notes,
     }
     payload["applicability"] = {
-        "applies_to": "fp16、单卡、batch=1、ctx=%s、%s"
-        % (cfg.get("ctx"), payload["hardware"].get("compute_capability")),
-        "does_not_apply_to": "quantized execution、PagedAttention、ctx>4096、other GPUs",
+        "applies_to": _applies,
+        "does_not_apply_to": _not_applies,
         "why": "StaticCache and graph addresses/shapes are fixed to this feasibility gate.",
     }
-    payload["_measurement"] = {
-        "timing_method": "perf_counter wall over CUDA Graph replay; CUDA event and profiler self-device time",
-        "ctx_window": "eager StaticCache prefill at ctx=%s, then fixed q_len=1 graph replays"
-        % cfg.get("ctx"),
-        "host_gap_caveats": gap.get("caveats"),
-        "vram_split_note": vram.get("note"),
-    }
+    payload["_measurement"].update(
+        {
+            "timing_method": (
+                "perf_counter wall over CUDA Graph replay; CUDA event and profiler "
+                "self-device time"
+            ),
+            "ctx_window": (
+                "eager StaticCache prefill at ctx=%s, then fixed q_len=1 graph replays"
+                % cfg.get("ctx")
+            ),
+            "host_gap_caveats": gap.get("caveats"),
+            "vram_split_note": vram.get("note"),
+        }
+    )
+    if quantized and (res.get("dequant_activity") or res.get("quantize_report")):
+        # ★ 这一格实际走了哪条 dequant 臂：计数来自 capture **之前**的相位
+        #   （prefill / warmup / eager 参照），replay 不再经过 Python —— 它证明的是
+        #   "被捕获的那段前向用的是哪条臂"，不是给 replay 计数。
+        payload["_measurement"]["dequant"] = {
+            "arm_recorded": res.get("dequant_arm"),
+            "activity": res.get("dequant_activity"),
+            "quantize_report": res.get("quantize_report"),
+            "note": "计数只覆盖 capture 之前 + eager 参照相位；graph replay 不经过 Python。",
+        }
     payload["_cudagraph"] = {
         "capture": res.get("capture"),
         "correctness": correctness,
@@ -2014,15 +2188,11 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        if quantized and execution == "cudagraph":
-            print(
-                "runner 拒绝: 量化 × cudagraph 尚未接线（P3）。★ P1 已经落地 —— "
-                "量化 × grouped 的路径存在且形状静态（可 capture），缺的只是把 quant_cfg "
-                "接进 run_cudagraph。在那之前量化格只能跑 eager 臂，见 "
-                "EXP-p4b-01-truncation 记录 §3。",
-                file=sys.stderr,
-            )
-            return 2
+        # ★ 2026-10-07：量化 × cudagraph 的"未接线"拒绝已删除（P3 落地）。
+        #   量化在 capture **之前**就地完成（`run_cudagraph(quant_cfg=…)`），所以图里
+        #   只有权重表示与 kernel 选择的差别 —— 这正是 E7 要量的事情。
+        #   仍然不存在的组合由下面的四条（gather / 4-bit grouped / 无门实测 /
+        #   fused 本机不可用）在**加载模型之前**拒绝。
         # ★ P1 已落地：量化 × grouped **存在**（moe_grouped_quant：在 fused 张量上量化，
         #   kernel 内解包）。仍然不存在的只有两条，且都必须在加载模型之前拒绝：
         #     (a) 量化 × gather —— gather 路径吃 fp16 融合张量，没有量化版；
@@ -2166,6 +2336,16 @@ def main(argv: list[str] | None = None) -> int:
                 dtype_name=args.dtype,
                 moe=moe_mode,
                 attn=attn_mode,
+                quant_cfg=(
+                    {
+                        "bit_width": args.bit_width,
+                        "group_size": args.group_size,
+                        "ctx": args.ctx,
+                        "dequant": args.dequant,
+                    }
+                    if quantized
+                    else None
+                ),
             )
         else:
             res = run_baseline(
