@@ -8,20 +8,22 @@ Phases 0, 1 (accuracy gate), 2 (kernels) and 4b (E7) are **executed**. Two headl
 settled — do not re-derive them and do not re-run their cells:
 
 - **E2 (`EXP-p2-01`) — `refuted`.** Fusing the dequant into the GEMV is *not* the 1.3–2× the
-  matrix predicted: in the pre-registered eager cells the fused arm is **5% slower** than the
-  separate arm, because that path is host/launch-bound (`host_share` 71.7%, ~19k kernels/step).
-  Isolated, the fused kernel is 1.21× cheaper per call — the kernel win is real, Python/launch eats it.
+  matrix predicted: in the eager cells the fused arm is **5% slower** (`host_share` 71.7%,
+  ~19k kernels/step). Isolated the fused kernel is 1.21× cheaper per call — Python/launch eats it.
 - **E7 (`EXP-p4b-01`) — judged.** The truncation is real and **only the fused arm cashes it in**:
   the same `w8a16` config goes `speedup_eager` **0.76 → speedup_cudagraph 1.11** (ctx=1024;
   0.79 → 1.05 at 4096) while `host_share` drops 77.5% → 1.2%. The ceiling is measured: the weight
   stream is only 42% (1024) / 23% (4096) of a graph step ⇒ even a perfect weight path ≤ ~1.74× / ~1.30×.
 
-- **`EXP-p4c-01` — supported (the other big non-weight block was the *attention implementation*).**
-  Swapping HF sdpa for this repo's split-KV core inside the captured graph cuts the step by
-  1.36–2.44× and **raises the quantized speedup**: 1.109 → **1.153** (ctx=1024) and 1.053 → **1.131**
-  (ctx=4096). Best cell `w8a16 × kernel` = **1.57× / 2.57×** vs the fp16 × sdpa baseline.
-  Mechanism: the removed attention cost is **bit-width-independent** (@4096 both arms save ~4.1 ms),
-  i.e. a constant that helps the smaller (quantized) total relatively more.
+- **`EXP-p4c-01` — supported (the other big non-weight block was the ATTENTION IMPLEMENTATION).**
+  Swapping HF sdpa for this repo's split-KV core *inside the graph* cuts the step 1.36–2.44× and
+  **raises the quantized speedup**: 1.109 → **1.153** (1024) / 1.053 → **1.131** (4096); best cell
+  `w8a16 × kernel` = **1.57× / 2.57×** vs fp16 × sdpa. Mechanism: the removed attention cost is
+  bit-width-independent (both arms save ~4.1 ms @4096) — a constant that helps the smaller total.
+
+- **E4 (`EXP-p4-01`) — supported.** Routing/packing is the largest bucket in the hf/gather baseline
+  (4.478 ms = **44.2%** of GPU busy) and **quantization-invariant** (4.478 / 4.512 / 4.526 / 4.555 ms
+  for fp16 → w4a16) — the cap the plan predicted. The grouped path already removed it; see P2b.
 
 Read, in this order: **`configs/experiments.yaml`** (the only source of hypotheses and cells),
 the **record** of the experiment you are about to touch (`experiments/<EXP-ID>.md`), then
@@ -90,7 +92,7 @@ in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`
 | E2 dequant fusion, 6 cells, 8-bit **and** 4-bit | done — **`refuted`** | `experiments/EXP-p2-01-dequant-fusion.md` |
 | P3 wiring + E7, 16/16 cells | done — **judged** | `experiments/EXP-p4b-01-truncation.md` |
 | In-graph attention × quantization, 8 cells | done — **supported** (1.57× / 2.57× combined) | `experiments/EXP-p4c-01-in-graph-attention.md` |
-| E4 routing overhead (`EXP-p4-01`) | **not run** — the only unrun item of the plan's `minimal_credible` scope | `configs/experiments.yaml`, `PLAN.md` §5/§7 |
+| E4 routing overhead | done — **supported**: 44.2% of GPU busy, and **quantization-invariant** (4.478/4.512/4.526/4.555 ms for fp16/w8a16/w8a8/w4a16) | `experiments/EXP-p4-01-moe-routing-overhead.md` |
 | E5 expert sensitivity, E6 KV INT8, E8 cross-bandwidth, FP8/MXFP4, dense curves, batch sweep | **not run** | `configs/experiments.yaml`, `PLAN.md` §7 |
 | ncu evidence (a Phase 2 deliverable) | **not done** | `PLAN.md` §5 |
 
@@ -109,9 +111,10 @@ that the science was not done — read the record first.
 | # | Task | Why now | Acceptance | Needs user? |
 | --- | --- | --- | --- | --- |
 | P0 | ✅ **done 2026-10-07** (see §5): README status, `PLAN.md` pointer, p4b `Status`, p1-02/03/04 artifact notes, `constraints.txt` freeze | those files contradicted the records | four gates green, both machines on one commit | no |
-| P1 | `EXP-p4-01` — **E4 routing overhead** (`routing_share`, `per_token_p50`) | the plan's `minimal_credible` scope has exactly one unrun item, and E4 is one of its two "differentiation cores" | `result.json` + record giving the routing/pack share for fp16 and quantized, eager and cudagraph; if the share is **<5%**, write the matrix's `refutation_signal` ("ceiling hypothesis does not hold") | no |
+| P1 | ✅ **done 2026-10-07**: E4 → routing/pack = **44.2%** of GPU busy and constant within 1.7% across fp16→w4a16 | the plan's `minimal_credible` scope is now **6/6** | `experiments/EXP-p4-01-moe-routing-overhead.md` | no |
 | P2 | ✅ **done 2026-10-07**: in-graph attention → speedup 1.11 → **1.15** (1024) / 1.05 → **1.13** (4096); best cell **1.57× / 2.57×** vs fp16 × sdpa | the user approved a new id (`EXP-p4c-01`), see §3 | `experiments/EXP-p4c-01-in-graph-attention.md` | no |
-| P2b | **The next bottleneck is the elementwise/copy tail** (~35% of the step, ~330 tiny kernels); runner-up: the 64 `_dequant_gemm_kernel` projection launches (~5.4 µs of launch overhead each) | §5.4 of `EXP-p4c-01` measured it after the attention swap | a record with the tail classified by source (residual adds / RMSNorm casts / routing index writes / `direct_copy`) + a fusion decision | **YES — no matrix entry exists** for either; ask before adding an `EXP-` id (or an axis) |
+| P2b | **The next bottleneck is the elementwise/copy tail** (~35% of the step, ~330 tiny kernels); runner-up: the 64 `_dequant_gemm_kernel` projection launches (~5.4 µs of launch overhead each) | §5.4 of `EXP-p4c-01` measured it after the attention swap; it is the largest non-weight bucket left | a record with the tail classified by source + a fusion decision | **YES — no matrix entry exists**; ask before adding an `EXP-` id (or an axis) |
+| P2c | Widen the routing classifier (torch `topk`/`sort`/`index_select`/`gather`/`scatter`) so the **grouped** path's routing cost can be quoted | `EXP-p4-01` §5.3: the classifier's 0.0% on the grouped path is a **blind spot**, not a measurement | new rules + tests; the number must be produced in its own round | **YES — it changes the meaning of the `routing_share_pct` field** |
 | P3 | Breadth: E5 (`EXP-p4-02`), E6 (`EXP-p5-01`), E8 (`EXP-p8-01`, needs the V100), E1's group axis under the corrected prompt set, dense curves, batch sweep (E3 — today it has **no** experiment), FP8/MXFP4 (`EXP-p3-01/02`), repairing the W4A16 gate | each closes a declared hypothesis or lever; several need a matrix entry that does not exist | per matrix entry; E8 only after the same protocol passes on the V100 | partial: new matrix entries need approval |
 | P4 | Publication: ncu evidence, E7 charts, final README/PLAN pass | closes Phase 2's last deliverable and Phase 7 | ncu metrics per `lemoq.kernels.NCU_METRICS`; charts regenerated from `result.json` | no |
 
@@ -157,9 +160,8 @@ Run all four before every commit, on the machine you are editing:
 ruff check . && black --check . && pytest -m "not gpu" -q && python -m tools.check_docs
 ```
 
-The bar is **0 failed** — not a count (counts drift as tests are added). A handful of skips is
-normal (GPU, missing machine-local artifacts, optional deps). Then: push, `git pull --no-rebase`
-on the other machine, re-run the suite there, and rsync `results/` back to the Mac.
+The bar is **0 failed** (a few skips are normal). Then push, `git pull --no-rebase` on the other
+machine, re-run there, and rsync `results/` back to the Mac.
 
 ### Never relax or bypass
 
