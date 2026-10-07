@@ -49,8 +49,8 @@ for _p in (ROOT, os.path.join(ROOT, "src")):
         sys.path.insert(0, _p)
 
 
-def _fused_norm_forward(self: Any, hidden_states: Any) -> Any:
-    """`OlmoeRMSNorm.forward` 的替换：一次原生融合 kernel（内部 fp32 累加）。"""
+def _torch_norm_forward(self: Any, hidden_states: Any) -> Any:
+    """`OlmoeRMSNorm.forward` → `F.rms_norm`（torch 原生融合 kernel）。"""
     import torch.nn.functional as F  # noqa: PLC0415
 
     return F.rms_norm(
@@ -61,24 +61,43 @@ def _fused_norm_forward(self: Any, hidden_states: Any) -> Any:
     )
 
 
-def replace_rms_norms(model: Any) -> int:
-    """实例级替换每个 `OlmoeRMSNorm.forward`（可逆：原方法存在 `_lemoq_original_norm`）。"""
+def _triton_norm_forward(self: Any, hidden_states: Any) -> Any:
+    """`OlmoeRMSNorm.forward` → 本仓库自研融合 kernel（`lemoq.kernels.rmsnorm`）。
+
+    ★ 与 `F.rms_norm` 的决定性区别：本 kernel **先舍入到 fp16、再在 fp16 里乘 weight**，
+      与 HF 的舍入点一致；`F.rms_norm` 在 fp32 里乘完再舍入，于是多出一次整行 fp32 乘
+      （实测 0.189 ms / 65 次，正是它慢 5% 的原因 —— 见 `EXP-p4c-02` §5.5）。
+    """
+    from lemoq.kernels.rmsnorm import rms_norm_fused  # noqa: PLC0415
+
+    return rms_norm_fused(
+        hidden_states,
+        self.weight,
+        float(self.variance_epsilon),
+        out_dtype=hidden_states.dtype,
+    )
+
+
+_IMPLS = {"hf": None, "torch": _torch_norm_forward, "triton": _triton_norm_forward}
+
+
+def set_norm_impl(model: Any, impl: str) -> int:
+    """把每个 `OlmoeRMSNorm.forward` 切到 `impl`（`hf` = 用原方法）。返回命中数。
+
+    ★ 可反复切换：原方法只在第一次记录（`_lemoq_original_norm`），所以
+      "hf → torch → triton" 这种累进捕获是可推理的 —— 每条臂捕获时用的是当时的实现。
+    """
+    if impl not in _IMPLS:
+        raise KeyError("未知实现 %r；可用 %s" % (impl, sorted(_IMPLS)))
+    fn = _IMPLS[impl]
     n = 0
     for module in model.modules():
-        if type(module).__name__ == "OlmoeRMSNorm" and not hasattr(module, "_lemoq_original_norm"):
+        if type(module).__name__ != "OlmoeRMSNorm":
+            continue
+        if not hasattr(module, "_lemoq_original_norm"):
             module._lemoq_original_norm = module.forward
-            module.forward = types.MethodType(_fused_norm_forward, module)
-            n += 1
-    return n
-
-
-def restore_rms_norms(model: Any) -> int:
-    n = 0
-    for module in model.modules():
-        if hasattr(module, "_lemoq_original_norm"):
-            module.forward = module._lemoq_original_norm
-            del module._lemoq_original_norm
-            n += 1
+        module.forward = module._lemoq_original_norm if fn is None else types.MethodType(fn, module)
+        n += 1
     return n
 
 
@@ -100,6 +119,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ctx", type=int, default=1024)
     ap.add_argument("--max-new-tokens", type=int, default=32)
     ap.add_argument("--rounds", type=int, default=15)
+    ap.add_argument(
+        "--impls",
+        nargs="*",
+        default=["hf", "torch", "triton"],
+        help="要对比的 norm 实现，第一条必须是 hf（参照）",
+    )
     ap.add_argument("--json", default=None)
     ap.add_argument(
         "--profile",
@@ -160,35 +185,37 @@ def main(argv: list[str] | None = None) -> int:
         torch.cuda.synchronize()
 
     ids = torch.full((1, args.ctx), 1, dtype=torch.long, device="cuda")
+    impls = list(args.impls)
+    if not impls or impls[0] != "hf":
+        print("--impls 的第一条必须是 hf（它是参照）", file=sys.stderr)
+        return 2
 
-    def _arm() -> dict[str, Any]:
-        """★ 每条臂必须有自己的 session：`StaticCacheDecodeSession` 里存着它自己的那张图，
-        共用一个 session 会把 A 臂重放成 B 的图（第一版就是这么错的）。"""
+    def _arm(name: str) -> dict[str, Any]:
+        """★ 每条臂必须有自己的 session：`StaticCacheDecodeSession` 里存着自己那张图，
+        共用一个 session 会把 A 臂重放成 B 的图（第一版就是这么错的）。
+        捕获前先切到该臂的实现 —— 图记录的是内核，之后的切换不影响已捕获的图。"""
+        if name != "hf":
+            if set_norm_impl(model, name) == 0:
+                print("没有找到 OlmoeRMSNorm —— 模型结构变了，拒绝给结论", file=sys.stderr)
+                raise SystemExit(3)
         sess = StaticCacheDecodeSession(
             model, ids, ctx=args.ctx, max_new_tokens=args.max_new_tokens, device="cuda"
         )
         torch.cuda.synchronize()
         sess.prefill()
         torch.cuda.synchronize()
-        return {"session": sess, "capture": sess.capture(warmup=5)}
+        return {"session": sess, "capture": sess.capture(warmup=5), "impl": name}
 
-    # ---- 臂 A：HF 原实现（先捕获 —— 图记录的是内核，之后的实例替换不影响它）----
-    arm_a = _arm()
-
-    # ---- 臂 B：融合 norm（实例级替换后**新建 session** 再捕获）----
-    replaced = replace_rms_norms(model)
-    if replaced == 0:
-        print("没有找到 OlmoeRMSNorm —— 模型结构变了，拒绝给结论", file=sys.stderr)
-        return 3
-    arm_b = _arm()
-
-    # ---- 逐轮交错重放（每臂先 reset 到同一位置，收集逐步 logits）----
-    sessions = {"hf_rmsnorm": arm_a["session"], "fused_rms_norm": arm_b["session"]}
-    logits: dict[str, list[Any]] = {"hf_rmsnorm": [], "fused_rms_norm": []}
-    for name, sess in sessions.items():
+    arms: dict[str, Any] = {}
+    for impl in impls:
+        arms["hf_rmsnorm" if impl == "hf" else impl + "_rms_norm"] = _arm(impl)
+    sessions = {k: v["session"] for k, v in arms.items()}
+    logits: dict[str, list[Any]] = {k: [] for k in sessions}
+    for sess in sessions.values():
         sess.reset()
         sess.prefill()
     torch.cuda.synchronize()
+
     samples: dict[str, list[float]] = {k: [] for k in sessions}
     for r in range(args.rounds):
         for name, sess in sessions.items():
@@ -203,22 +230,27 @@ def main(argv: list[str] | None = None) -> int:
     for r in range(args.rounds):
         winners[min(sessions, key=lambda n: samples[n][r])] += 1
 
-    # ★ 每一步都各自 reset/prefill 过，位置同步推进，所以逐步 logits 可比
-    cmp = compare_logits(logits["hf_rmsnorm"], logits["fused_rms_norm"])
     stats = {k: _summarize(v) for k, v in samples.items()}
-    speedup = stats["hf_rmsnorm"]["p50_ms"] / stats["fused_rms_norm"]["p50_ms"]
+    ref = "hf_rmsnorm"
+    # ★ 每条臂都各自 reset/prefill 过，位置同步推进 ⇒ 逐步 logits 可比
+    correctness = {k: compare_logits(logits[ref], logits[k]) for k in sessions if k != ref}
+    speedup = {k: stats[ref]["p50_ms"] / stats[k]["p50_ms"] for k in sessions if k != ref}
     payload = {
         "tool": "tools/bench_fused_norm.py",
         "config": quant_cfg,
         "shape": {"ctx": args.ctx, "max_new_tokens": args.max_new_tokens, "rounds": args.rounds},
-        "norms_replaced": replaced,
         "arms": stats,
         "wins": winners,
-        "speedup_fused_over_hf": speedup,
-        "correctness_vs_hf": cmp,
-        "capture": {"hf": arm_a["capture"], "fused": arm_b["capture"]},
-        "k1_kl_below_1e-3": bool(cmp["kl"] < 1e-3),
-        "k1_top1_at_least_0.99": bool(cmp["top1_agreement"] >= 0.99),
+        "speedup_vs_hf": speedup,
+        "correctness_vs_hf": correctness,
+        "capture": {k: v["capture"] for k, v in arms.items()},
+        "k1": {
+            k: {
+                "kl_below_1e-3": bool(c["kl"] < 1e-3),
+                "top1_at_least_0.99": bool(c["top1_agreement"] >= 0.99),
+            }
+            for k, c in correctness.items()
+        },
     }
     if args.profile:
         from torch.profiler import ProfilerActivity, profile  # noqa: PLC0415
@@ -270,25 +302,34 @@ def main(argv: list[str] | None = None) -> int:
                     % (r["ms_per_step"], r["count_per_step"], r["name"][:74])
                 )
 
-    print("\n%-16s %10s %10s %8s" % ("arm", "p50(ms)", "min(ms)", "wins"))
+    print("\n%-16s %10s %10s %8s %10s" % ("arm", "p50(ms)", "min(ms)", "wins", "vs hf"))
     for name in sessions:
+        sp = speedup.get(name)
         print(
-            "%-16s %10.4f %10.4f %8d"
-            % (name, stats[name]["p50_ms"], stats[name]["min_ms"], winners[name])
+            "%-16s %10.4f %10.4f %8d %10s"
+            % (
+                name,
+                stats[name]["p50_ms"],
+                stats[name]["min_ms"],
+                winners[name],
+                ("%.4fx" % sp) if sp else "—",
+            )
         )
-    print(
-        "\n融合臂 vs HF：**%.4fx**（%.4f → %.4f ms）"
-        % (speedup, stats["hf_rmsnorm"]["p50_ms"], stats["fused_rms_norm"]["p50_ms"])
-    )
-    print(
-        "数值：KL=%.3e（K1 <1e-3: %s）| top-1 一致=%.4f（K1 ≥0.99: %s）"
-        % (
-            cmp["kl"],
-            payload["k1_kl_below_1e-3"],
-            cmp["top1_agreement"],
-            payload["k1_top1_at_least_0.99"],
+    print("")
+    for name, c in correctness.items():
+        k1 = payload["k1"][name]
+        print(
+            "%-16s KL=%.3e（<1e-3: %s）| top-1=%.4f（≥0.99: %s）| 速度 %.4fx | D(>3%%): %s"
+            % (
+                name,
+                c["kl"],
+                k1["kl_below_1e-3"],
+                c["top1_agreement"],
+                k1["top1_at_least_0.99"],
+                speedup[name],
+                speedup[name] > 1.03,
+            )
         )
-    )
     if args.json:
         os.makedirs(os.path.dirname(os.path.abspath(args.json)), exist_ok=True)
         with open(args.json, "w", encoding="utf-8") as fh:
