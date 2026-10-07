@@ -306,17 +306,134 @@ def quant_spec_for_cfg(cfg: dict[str, Any]) -> Any:
     targets 必须显式写 `("attention", "experts")`：`SchemeSpec.from_flags` 的默认值
     多一个 `router`，而 EXP-p1-04 的门是**不含 router** 测的 —— 用默认值就等于
     换了一个没过门的配置（p1-01 实测：只量 router 就能让 W8 的 KL 动 14-74%）。
+
+    `dequant` 是 `EXP-p2-01` 的轴。★ 历史兼容：老格子（p0/p4b 的量化格）没有传
+    `--dequant`，落盘的是 `"none"`，而它们实际跑的**就是** separate 臂。`"none"`
+    在这里归一成 `"separate"`（不改变行为），cfg 里写下来的 dequant 保持逐字不变。
     """
     bit_width = cfg.get("bit_width") or "fp16"
     if bit_width == "fp16":
         return None
     from lemoq.quant.linear import SchemeSpec  # noqa: PLC0415
 
+    dequant = str(cfg.get("dequant") or "separate")
+    if dequant == "none":
+        dequant = "separate"
     return SchemeSpec.from_flags(
         str(bit_width),
         int(cfg.get("group_size") or 128),
         targets=("attention", "experts"),
+        dequant=dequant,
     )
+
+
+def fused_unavailable_reason() -> str | None:
+    """fused 臂在这台机器上不可用的可读原因；可用时 None。
+
+    ★ 这是 runner 的**加载前拒绝**要问的问题：一台没有 triton/CUDA 的机器上，
+    `--dequant fused` 必须在加载 13.4 GB 模型之前失败。测试用 monkeypatch 覆盖它。
+    """
+    try:
+        from lemoq.kernels._dequant_triton import unavailable_reason  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        return "kernel 模块 import 失败（%s）" % type(exc).__name__
+    return unavailable_reason()
+
+
+def _dequant_arms(model: Any, qspec: Any) -> tuple[str | None, ...]:
+    """本格要测的 dequant 臂。量化格 → `("separate", "fused")`（同进程交错）。
+
+    ★ 即使这一格属于 separate 臂，也要**两臂都测**：K3.1 的判据是两臂的**差**，
+      单臂顺序跑的数字不采信（机器状态会漂移）。fp16 格没有 dequant 语义 → `(None,)`。
+    """
+    if qspec is None:
+        return (None,)
+    from lemoq.quant.linear import supported_dequant_modes  # noqa: PLC0415
+
+    modes = supported_dequant_modes(model)
+    if "fused" not in modes:
+        if qspec.dequant == "fused":
+            raise RuntimeError(
+                "这一格要求 fused，但本机 fused 臂不可用 —— 静默退回 separate 会让结果"
+                "记成一次并不存在的融合测量"
+            )
+        return ("separate",)
+    return ("separate", "fused")
+
+
+# 同进程 round-robin 的轮数（每轮每臂各 `max(timed,20)` 步）。
+DEQUANT_AB_ROUNDS = 3
+
+
+def _median(xs: list[float]) -> float:
+    from benchmarks.timing import percentile  # noqa: PLC0415
+
+    return percentile(sorted(float(x) for x in xs), 50)
+
+
+def _interleaved_ab_stats(
+    per_arm: dict[str, list[float]],
+    arms: tuple[str, ...],
+    *,
+    first_call_ms: dict[str, float],
+    rounds: int,
+) -> dict[str, Any]:
+    """两臂交错测量的统计（`docs/METRICS.md` §2 的口径 + MAD）。
+
+    ★ 配对是**按步号**的：两臂交替走同一条 KV 流（第 2i 步给第一臂、2i+1 步给第二臂），
+      所以第 i 对看到的 KV 长度只差 1 个 token —— 上下文增长与顺序效应都被平掉，
+      可以直接做配对差。单臂顺序跑会把这部分漂移算成方案差异。
+    """
+    stats = {
+        a: {
+            "n": len(per_arm[a]),
+            "p50_ms": round(_median(per_arm[a]), 4),
+            "min_ms": round(min(per_arm[a]), 4),
+            "max_ms": round(max(per_arm[a]), 4),
+        }
+        for a in arms
+    }
+    out: dict[str, Any] = {
+        "protocol": (
+            "同进程、逐步 round-robin（两臂交替，共享同一条 KV 流）；每条臂 %d 轮 × "
+            ">=20 步。单臂顺序跑的数字不采信（机器漂移会被算成方案差异）。" % rounds
+        ),
+        "rounds": rounds,
+        "arms": stats,
+        "first_call_ms_excluded": first_call_ms,
+        "caveat": "可分辨的最小差异约等于 MAD；比 MAD 小的差值不得当成结论",
+    }
+    if len(arms) == 2:
+        first, second = arms
+        n = min(len(per_arm[first]), len(per_arm[second]))
+        diffs = [per_arm[first][i] - per_arm[second][i] for i in range(n)]
+        median_delta = _median(diffs)
+        mad = _median([abs(d - median_delta) for d in diffs])
+        p_first, p_second = stats[first]["p50_ms"], stats[second]["p50_ms"]
+        out["paired"] = {
+            "n_pairs": n,
+            "median_delta_ms": round(median_delta, 4),
+            "mad_ms": round(mad, 4),
+            "wins": {
+                "%s_faster" % second: sum(1 for d in diffs if d > 0),
+                "%s_faster" % first: sum(1 for d in diffs if d < 0),
+            },
+            "note": "delta = p50(%s) - p50(%s)，逐对相减" % (first, second),
+        }
+        out["ratio_fused_over_separate"] = (
+            round(stats["fused"]["p50_ms"] / stats["separate"]["p50_ms"], 4)
+            if "fused" in stats and "separate" in stats and stats["separate"]["p50_ms"]
+            else None
+        )
+        out["speedup_separate_over_fused"] = (
+            round(p_first / p_second, 4) if first == "separate" and p_second else None
+        )
+        out["dequant_share_pct"] = (
+            round(100.0 * (p_first - p_second) / p_first, 2)
+            if first == "separate" and p_first
+            else None
+        )
+    return out
 
 
 def quantize_for_cfg(model: Any, cfg: dict[str, Any]) -> Any:
@@ -1000,14 +1117,70 @@ def run_baseline(
         for _ in range(3):  # 打满 allocator 峰值
             nxt, past = _decode_step(model, nxt, past, device, dtype)
 
-    step_ms: list[float] = []
-    for _ in range(max(timed, 20)):
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        nxt, past = _decode_step(model, nxt, past, device, dtype)
-        torch.cuda.synchronize()
-        step_ms.append((time.perf_counter() - t0) * 1000.0)
-    steps = summarize(step_ms)
+    def _timed_block(samples: list[float], n: int) -> None:
+        """Wall-clock 单步计时（每步 synchronize），与既有的 fp16 口径逐字一致。"""
+        nonlocal nxt, past
+        for _ in range(n):
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            nxt, past = _decode_step(model, nxt, past, device, dtype)
+            torch.cuda.synchronize()
+            samples.append((time.perf_counter() - t0) * 1000.0)
+
+    # ---- 量化格：两臂**同进程交错**（EXP-p2-01 的 K3.1）----
+    # ★ 为什么不能一条臂跑完再跑另一条：机器状态会漂移，漂移会被算成方案差异。
+    #   这里两臂交替走**同一条 KV 流**（按步号取模），配对差可直接用。
+    #   fp16 格 arms == (None,)，整段行为与历史**逐字不变**。
+    dequant_ab: dict[str, Any] | None = None
+    dequant_activity: dict[str, Any] | None = None
+    arms = _dequant_arms(model, qspec)
+    if len(arms) > 1:
+        from lemoq.quant.linear import QuantLinear, reset_dequant_counters  # noqa: PLC0415
+        from lemoq.quant.linear import dequant_activity as _activity  # noqa: PLC0415
+
+        qmodules = [m for m in model.modules() if isinstance(m, QuantLinear)]
+
+        def _set_arm(arm: str) -> None:
+            for m in qmodules:
+                m.dequant_mode = arm
+
+        # 首调（Triton JIT 编译）必须与稳态分开记：几秒的编译混进 p50 就是造假。
+        first_call_ms: dict[str, float] = {}
+        for arm in arms:
+            _set_arm(arm)
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            nxt, past = _decode_step(model, nxt, past, device, dtype)
+            torch.cuda.synchronize()
+            first_call_ms[arm] = round((time.perf_counter() - t0) * 1000.0, 3)
+
+        per_arm: dict[str, list[float]] = {a: [] for a in arms}
+        reset_dequant_counters(model)
+        block = max(int(timed), 20)
+        for _ in range(DEQUANT_AB_ROUNDS):
+            for i in range(block * len(arms)):
+                arm = arms[i % len(arms)]
+                _set_arm(arm)
+                _timed_block(per_arm[arm], 1)
+
+        dequant_activity = _activity(model)
+        # ★ 硬检查：fused 臂一步都没进 kernel 的话，这个"对照"根本不是融合对照。
+        #   宁可响亮失败，也不写一个会被误读成"融合无收益"的结果。
+        if "fused" in arms and int(dequant_activity["fused_calls"]) == 0:
+            raise RuntimeError(
+                "fused 臂 fused_calls=0（fallbacks=%r）—— 这一步没有走 kernel，"
+                "拒绝把 separate-vs-separate 记成融合对照" % (dequant_activity["fallbacks"],)
+            )
+        dequant_ab = _interleaved_ab_stats(
+            per_arm, ("separate", "fused"), first_call_ms=first_call_ms, rounds=DEQUANT_AB_ROUNDS
+        )
+        steps = summarize(per_arm[qspec.dequant])
+        arm_used = qspec.dequant
+    else:
+        step_ms: list[float] = []
+        _timed_block(step_ms, max(timed, 20))
+        steps = summarize(step_ms)
+        arm_used = arms[0]
 
     # ---- host / kernel 拆分（固定状态下重复同一步） ----
     gap = measure_host_gap(
@@ -1072,6 +1245,12 @@ def run_baseline(
         "moe_block": moe,
         "ttft": ttft,
         "steps": steps,
+        # `EXP-p2-01` 的证据：这一格**实际**走的反量化臂 + 同进程交错的 A/B。
+        # fp16 格两者都是 None（没有 dequant 语义）。
+        "dequant_arm": arm_used,
+        "dequant_activity": dequant_activity,
+        "dequant_ab": dequant_ab,
+        "dequant_share_pct": (dequant_ab or {}).get("dequant_share_pct") if dequant_ab else None,
         "gap": gap,
         "vram": vram,
         "budget": budget,
@@ -1266,6 +1445,38 @@ def _consistency_gate(res: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 组装 result.json
 # ---------------------------------------------------------------------------
+def latency_section_for_gate(
+    gate_passed: bool, measured: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """硬规则 2 的机械执行点：`gate == FAIL` 的格子不得在 `latency` 段报性能数字。
+
+    返回 `(latency 段, gate_failed_evidence 或 None)`。
+
+    ★ 为什么不是"FAIL 格干脆不跑"：`w8a8` / `w4a16` 的格子是"融合/执行方式**没有**改变
+      正确性判定"的 evidence，必须跑（`EXP-p2-01` 记录 §4 第 3 条）。但它们的延迟
+      **不得**被引用为性能结论 —— 所以原始值不删除（删掉就变成"没测过"），而是移到
+      `_measurement.gate_failed_evidence`，`latency` 段全 null。
+      `benchmarks/schema.py` 的校验器就是这个判定的回归测试。
+    """
+    if gate_passed:
+        return measured, None
+    null_latency = {
+        "ttft_p50_ms": None,
+        "ttft_p99_ms": None,
+        "per_token_p50_ms": None,
+        "per_token_p99_ms": None,
+        "tok_per_s": None,
+        "samples": {},
+    }
+    evidence = dict(measured)
+    evidence["note"] = (
+        "★ 这一格的正确性门 FAIL（见 correctness.gate）：以上是**实测原始值**，"
+        "按硬规则 2 **不得**被引用为性能结论，latency 段因此为 null。"
+        "它存在的意义只有一条 —— 作为'融合/执行方式不改变正确性判定'的证据。"
+    )
+    return null_latency, evidence
+
+
 def build_payload(
     exp_id: str, res: dict[str, Any], cfg: dict[str, Any], hypothesis: dict[str, str]
 ) -> dict[str, Any]:
@@ -1322,6 +1533,11 @@ def build_payload(
         cfg, consistency_passed=bool(consistency["passed"])
     )
     payload["correctness"]["consistency"] = consistency
+    # ★ 硬规则 2 的机械执行点：schema 只允许 **gate == PASS** 的格子往 `latency` 里写
+    #   性能数字。gate FAIL 的格子（w8a8 / w4a16）**照跑**（它们是"融合没有改变正确性
+    #   判定"的 evidence），但实测延迟只能进 `_measurement.gate_failed_evidence`，
+    #   不得出现在 latency 段 —— 否则 `validate_result` 会直接报"违反项目硬规则 2"。
+    gate_pass = payload["correctness"]["gate"] == "PASS"
 
     budget = res["budget"]
     payload["bytes"] = {
@@ -1349,7 +1565,7 @@ def build_payload(
         ),
     }
 
-    payload["latency"] = {
+    latency_block = {
         "ttft_p50_ms": round(ttft["p50"], 4),
         "ttft_p99_ms": round(ttft["p99"], 4),
         "per_token_p50_ms": round(steps["p50"], 4),
@@ -1357,6 +1573,9 @@ def build_payload(
         "tok_per_s": round(1000.0 / steps["p50"], 2) if steps["p50"] else None,
         "samples": {"ttft_ms": ttft["samples"], "per_token_ms": steps["samples"]},
     }
+    payload["latency"], _gate_failed_evidence = latency_section_for_gate(gate_pass, latency_block)
+    if _gate_failed_evidence is not None:
+        payload["_measurement"] = {"gate_failed_evidence": _gate_failed_evidence}
 
     bd = res.get("breakdown") or {}
     bucket = bd.get("bucket_ms") or {}
@@ -1368,9 +1587,16 @@ def build_payload(
         "host_share_pct": gap.get("host_share_pct"),
         "kernels_per_call": gap.get("kernels_per_call"),
         "host_share_pct_residual": gap.get("host_share_pct_residual"),
-        # separate 臂的 dequant 占比要靠隔离微基准，尚未接入（EXP-p2-01 的待办）；
-        # fused 臂要等 kernel。两者在接入前都必须是 None —— 写 0 会假装"没有反量化"。
-        "dequant_share_pct": None,
+        # ★ EXP-p2-01 的 dequant 占比：现在**是实测的** —— 来自同进程交错 A/B 的
+        #   (p50_separate − p50_fused) / p50_separate，即"物化 fp16 权重"吃掉的那部分
+        #   单步时间。gate FAIL 的格子不给（同上：那是性能量）。
+        "dequant_share_pct": (res.get("dequant_share_pct") if gate_pass else None),
+        "dequant_share_source": (
+            "同进程 round-robin A/B（separate vs fused 的 p50 差 / separate p50）；"
+            "不是 ncu 的 dram 计数"
+            if res.get("dequant_ab")
+            else None
+        ),
         "routing_share_pct": (
             round(100.0 * bucket.get("routing_pack", 0.0) / gpu_total, 1) if gpu_total else None
         ),
@@ -1412,7 +1638,7 @@ def build_payload(
         "method": vram.get("method"),
     }
 
-    _gate_pass = payload["correctness"]["gate"] == "PASS"
+    _gate_pass = gate_pass
     if (cfg.get("bit_width") or "fp16") == "fp16":
         _notes = (
             "第一条系统级基线，不构成任何量化结论；它建立的是测量管线与绝对数字。"
@@ -1425,15 +1651,19 @@ def build_payload(
         )
         _not_applies = "量化配置（见 EXP-p1-*）、batch>1、其它架构"
     else:
+        _arm = res.get("dequant_arm") or cfg.get("dequant")
         _notes = (
-            "量化格（%s group=%s dequant=%s）。KL 引用 EXP-p1-04 的同配置实测；"
-            "本格测的是性能（separate 臂 = QuantLinear 每次 forward 物化 fp16 权重）。"
-            % (cfg.get("bit_width"), cfg.get("group_size"), cfg.get("dequant"))
+            "量化格（%s group=%s dequant=%s，实际走的臂 = %s）。KL 引用 EXP-p1-04 的"
+            "同配置实测；本格测的是性能。`separate` 臂 = QuantLinear 每次 forward 物化"
+            "fp16 权重；`fused` 臂 = decode 单 token 在 kernel 内解包（prefill/多 token"
+            "退回 separate，分派计数见 _measurement.dequant）。"
+            % (cfg.get("bit_width"), cfg.get("group_size"), cfg.get("dequant"), _arm)
         )
         if not _gate_pass:
             _notes += (
                 " ★ 正确性门 FAIL：本格的延迟**只允许**被引用为'融合/执行方式不改变"
-                "正确性判定'的证据，不得作为性能结论（硬规则 2）。"
+                "正确性判定'的证据，不得作为性能结论（硬规则 2）；实测值在 "
+                "_measurement.gate_failed_evidence。"
             )
         else:
             _notes += " 性能结论只对引用的这个配置成立，不能外推到其它 group_size/ctx。"
@@ -1455,13 +1685,27 @@ def build_payload(
         "does_not_apply_to": _not_applies,
         "why": "所有数字都绑定在实测带宽 %s GB/s 与该卡的 launch 开销上" % res["measured_bw_gbps"],
     }
-    payload["_measurement"] = {
-        "timing_method": "perf_counter wall, synchronized per step (includes launch overhead)",
-        "ctx_window": "prefill at ctx=%s, then %s decode steps (KV grows by that many tokens)"
-        % (cfg.get("ctx"), cfg.get("max_new_tokens")),
-        "host_gap_caveats": gap.get("caveats"),
-        "vram_split_note": vram.get("note"),
-    }
+    # gate FAIL 的格子已经写过 `_measurement`（证据块），不能在这里被覆盖掉。
+    measurement = payload.setdefault("_measurement", {})
+    measurement.update(
+        {
+            "timing_method": "perf_counter wall, synchronized per step (includes launch overhead)",
+            "ctx_window": (
+                "prefill at ctx=%s, then %s decode steps (KV grows by that many tokens)"
+                % (cfg.get("ctx"), cfg.get("max_new_tokens"))
+            ),
+            "host_gap_caveats": gap.get("caveats"),
+            "vram_split_note": vram.get("note"),
+        }
+    )
+    if res.get("dequant_ab") or res.get("dequant_activity"):
+        # ★ EXP-p2-01 的证据块：这一格**实际**走了哪条反量化臂（计数），以及同进程
+        #   交错 A/B 的原始统计。没有它，"融合有没有收益"无法与"根本没跑到 kernel"区分。
+        measurement["dequant"] = {
+            "arm_recorded": res.get("dequant_arm"),
+            "activity": res.get("dequant_activity"),
+            "interleaved_ab": res.get("dequant_ab"),
+        }
     return payload
 
 
@@ -1689,7 +1933,10 @@ def main(argv: list[str] | None = None) -> int:
         "--dequant",
         default="none",
         choices=["none", "separate", "fused"],
-        help="反量化方式（EXP-p2-01 的 dequant 轴）。fused 的 kernel 未实现，真跑会被拒绝。",
+        help=(
+            "反量化方式（EXP-p2-01 的 dequant 轴）。fused = decode 单 token 走融合 kernel"
+            "（需要 triton + CUDA，否则加载前拒绝）；prefill / 多 token 退回 separate 并计数。"
+        ),
     )
     ap.add_argument(
         "--group-size",
@@ -1737,15 +1984,28 @@ def main(argv: list[str] | None = None) -> int:
     moe_mode = {"static": "gather"}.get(moe_mode, moe_mode)
 
     if not args.dry_run:
-        # 四条拒绝都发生在**任何模型加载之前** —— 干净失败，且离线（无 GPU）可测。
+        # 每条拒绝都发生在**任何模型加载之前** —— 干净失败，且离线（无 GPU）可测。
+        # ★ `--dequant fused` 的"kernel 尚未实现"拒绝已于 2026-10-07 删除：
+        #   `lemoq.kernels._dequant_triton` 已落地（P2-01 的 fused 臂）。现在拒绝它的
+        #   唯一理由是**这台机器跑不了**（没有 triton / 没有 CUDA）—— Mac 上仍然拒绝，
+        #   而不是加载 13.4 GB 模型之后才炸。
         if args.dequant == "fused":
-            print(
-                "runner 拒绝: --dequant fused 的融合 kernel 尚未实现"
-                "（src/lemoq/kernels/__init__.py 记录了为什么离线不写它）；"
-                "EXP-p2-01 的 fused 格保持 planned。",
-                file=sys.stderr,
-            )
-            return 2
+            if not quantized:
+                print(
+                    "runner 拒绝: --dequant fused 只在量化格（bit_width != fp16）有意义，"
+                    "fp16 没有反量化语义。",
+                    file=sys.stderr,
+                )
+                return 2
+            _fused_reason = fused_unavailable_reason()
+            if _fused_reason is not None:
+                print(
+                    "runner 拒绝: --dequant fused 需要 triton + CUDA（%s）。"
+                    "本机只能跑 separate 臂 —— 见 src/lemoq/kernels/_dequant_triton.py。"
+                    % _fused_reason,
+                    file=sys.stderr,
+                )
+                return 2
         if quantized and citation is None:
             print(
                 "runner 拒绝: %s / group=%d / ctx=%d 没有 EXP-p1-04 的门实测，"
@@ -1766,7 +2026,9 @@ def main(argv: list[str] | None = None) -> int:
         # ★ P1 已落地：量化 × grouped **存在**（moe_grouped_quant：在 fused 张量上量化，
         #   kernel 内解包）。仍然不存在的只有两条，且都必须在加载模型之前拒绝：
         #     (a) 量化 × gather —— gather 路径吃 fp16 融合张量，没有量化版；
-        #     (b) 4-bit —— fused expert 的 nibble 解包尚未实现。
+        #     (b) 4-bit —— fused **expert** 的 nibble 解包尚未实现（注意：dense 侧的
+        #         `_dequant_triton` 已经支持 4-bit，所以 `--dequant fused` + w4a16 在
+        #         **hf** 路径上是能跑的；被拒的是量化 expert 的 grouped 路径）。
         if quantized and moe_mode == "gather":
             print(
                 "runner 拒绝: 量化 × gather 的组合不存在 —— gather 路径直接索引 fp16 融合"
@@ -1915,7 +2177,14 @@ def main(argv: list[str] | None = None) -> int:
                 timed=args.timed,
                 dtype_name=args.dtype,
                 quant_cfg=(
-                    {"bit_width": args.bit_width, "group_size": args.group_size, "ctx": args.ctx}
+                    {
+                        "bit_width": args.bit_width,
+                        "group_size": args.group_size,
+                        "ctx": args.ctx,
+                        # ★ dequant 必须传进去：它决定 QuantLinear 的 fused 分支，
+                        #   也决定 payload 里写的"这一格实际走哪条臂"。
+                        "dequant": args.dequant,
+                    }
                     if quantized
                     else None
                 ),

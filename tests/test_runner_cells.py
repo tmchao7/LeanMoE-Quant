@@ -1,17 +1,19 @@
 """test_runner_cells — runner 的量化格接线（**全部离线可测**）。
 
-这一组测试钉住 `EXP-p2-01` / `EXP-p4b-01` 上卡前必须正确的四件事：
+这一组测试钉住 `EXP-p2-01` / `EXP-p4b-01` 上卡前必须正确的几件事：
 
     1. cell id 必须由**矩阵声明的轴**拼出，且与 `results/` 里已有的骨架逐字相同
        —— 手拼 `__ctx=%d` 会写出对不上的文件名，`is_done()` 永远判不了；
-    2. 三条**拒绝**（fused kernel 未实现 / 没有门实测 / 量化+cudagraph 未接线）
-       必须在任何模型加载之前失败，这样无 GPU 机器上也能验证；
+    2. **拒绝**必须在任何模型加载之前失败，这样无 GPU 机器上也能验证：
+       fused 臂在本机不可用（没有 triton/CUDA）/ 没有门实测 / 量化+cudagraph 未接线；
     3. `GATE_CITATIONS` 的数值必须与 `EXP-p1-04` 的落盘工件一致（代码与实测对齐）；
     4. 量化 hook 在 CPU tiny OLMoE 上可跑：QuantLinear 的 packed/scale 是 **buffer**，
-       而 `weight_bytes_actual` 只数 parameters —— 这是量化格字节账的头号陷阱。
+       而 `weight_bytes_actual` 只数 parameters —— 这是量化格字节账的头号陷阱；
+    5. **硬规则 2 的机械执行点**：`gate == FAIL` 的格子照跑，但 `latency` 段必须全 null
+       （实测原始值进 `_measurement.gate_failed_evidence`）。
 
-不测什么：延迟数字（GPU）、融合 kernel（`src/lemoq/kernels/__init__.py` 记录了
-"离线不写未编译 kernel"的决定，fused 臂在 kernel 落地前由 runner 拒绝）。
+不测什么：延迟数字（GPU）。fused kernel 的**数值**门是
+`tests/test_kernel_parity.py::test_triton_fused_gemm_matches_reference`（`-m gpu`）。
 """
 
 from __future__ import annotations
@@ -208,14 +210,93 @@ def test_dry_run_answers_even_when_the_cell_is_already_done(capsys, tmp_path):
     assert "moe=grouped" in out.out
 
 
-def test_fused_dequant_is_refused_without_a_kernel(capsys):
-    """real run（非 dry-run）必须在加载前拒绝 fused —— kernel 还不存在。"""
+def test_fused_dequant_is_refused_where_the_kernel_cannot_run(capsys, monkeypatch):
+    """real run（非 dry-run）必须在**加载模型之前**拒绝 fused —— 这台机器跑不了它。
+
+    ★ 2026-10-07 起 kernel 已落地（`src/lemoq/kernels/_dequant_triton.py`），
+      所以拒绝的理由从"kernel 未实现"变成"本机没有 triton/CUDA"。测试 monkeypatch
+      可用性判断，这样在有 GPU 的服务器上也是同一份断言（否则它会真去加载模型）。
+    """
+    import benchmarks.runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "fused_unavailable_reason", lambda: "triton 不可用（测试注入）")
     rc = runner_main(
         ["--exp", "EXP-p2-01-dequant-fusion", "--bit-width", "w8a16", "--dequant", "fused"]
     )
     out = capsys.readouterr()
     assert rc == 2
-    assert "拒绝" in out.err and "fused" in out.err
+    assert "拒绝" in out.err and "fused" in out.err and "测试注入" in out.err
+
+
+def test_fused_dequant_on_fp16_is_refused(capsys, monkeypatch):
+    """fp16 没有反量化语义：`--dequant fused --bit-width fp16` 是配置错误，不是实验格。"""
+    import benchmarks.runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "fused_unavailable_reason", lambda: None)
+    rc = runner_main(
+        ["--exp", "EXP-p2-01-dequant-fusion", "--bit-width", "fp16", "--dequant", "fused"]
+    )
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "只在量化格" in out.err
+
+
+def test_fused_availability_check_is_none_when_the_kernel_is_usable(monkeypatch):
+    """`fused_unavailable_reason()` 可用时必须返回 None（runner 的拒绝依赖它）。"""
+    import benchmarks.runner as runner_mod
+    import lemoq.kernels._dequant_triton as k
+
+    monkeypatch.setattr(k, "unavailable_reason", lambda: None)
+    assert runner_mod.fused_unavailable_reason() is None
+
+
+def test_latency_section_nulls_performance_when_the_gate_failed():
+    """硬规则 2：gate FAIL 的格子不得在 latency 段报性能数字（schema 校验器的对偶）。"""
+    from benchmarks.runner import latency_section_for_gate
+
+    measured = {
+        "ttft_p50_ms": 1.0,
+        "ttft_p99_ms": 2.0,
+        "per_token_p50_ms": 3.0,
+        "per_token_p99_ms": 4.0,
+        "tok_per_s": 5.0,
+        "samples": {"per_token_ms": [3.0]},
+    }
+    # PASS：原样保留
+    latency, evidence = latency_section_for_gate(True, measured)
+    assert latency["per_token_p50_ms"] == 3.0 and evidence is None
+    # FAIL：latency 全 null，原始值进证据块（不是删掉 —— 删掉等于"没测过"）
+    latency, evidence = latency_section_for_gate(False, measured)
+    assert latency["per_token_p50_ms"] is None and latency["tok_per_s"] is None
+    assert latency["samples"] == {}
+    assert evidence["per_token_p50_ms"] == 3.0 and "硬规则 2" in evidence["note"]
+
+
+def test_schema_rejects_the_payload_shape_this_policy_prevents():
+    """把上面那条策略与 `validate_result` 对上：报性能 + gate FAIL 会被判违规。"""
+    from benchmarks.schema import empty_result, validate_result
+
+    payload = empty_result("EXP-p2-01-dequant-fusion__bit_width=w4a16_dequant=fused")
+    payload["correctness"]["gate"] = "FAIL"
+    payload["latency"]["per_token_p50_ms"] = 3.0
+    assert any("硬规则 2" in p for p in validate_result(payload))
+    # 策略产出的形状必须通过校验
+    from benchmarks.runner import latency_section_for_gate
+
+    payload["latency"] = latency_section_for_gate(
+        False, dict(payload["latency"], per_token_p50_ms=3.0)
+    )[0]
+    assert validate_result(payload) == []
+
+
+def test_quant_spec_maps_dequant_axis_and_keeps_legacy_none(capsys):
+    """`--dequant` 进 spec；老的 `dequant="none"`（p0/p4b 的量化格）等价于 separate。"""
+    fused = quant_spec_for_cfg({"bit_width": "w4a16", "group_size": 128, "dequant": "fused"})
+    assert fused.dequant == "fused" and fused.weight_bits == 4
+    legacy = quant_spec_for_cfg({"bit_width": "w8a16", "group_size": 128, "dequant": "none"})
+    assert legacy.dequant == "separate"
+    missing = quant_spec_for_cfg({"bit_width": "w8a16", "group_size": 128})
+    assert missing.dequant == "separate"
 
 
 def test_quantized_config_without_gate_citation_is_refused(capsys):
