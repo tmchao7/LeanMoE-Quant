@@ -124,7 +124,7 @@ def test_triton_quantized_grouped_matches_oracle():
     from lemoq.kernels.moe_static import FusedExperts
 
     torch.manual_seed(0)
-    n_experts, ffn, hidden, top_k = 4, 256, 512, 2
+    n_experts, ffn, hidden = 4, 256, 512
     fused = FusedExperts(
         gate_up=torch.randn(n_experts, 2 * ffn, hidden) * 0.05,
         down=torch.randn(n_experts, hidden, ffn) * 0.05,
