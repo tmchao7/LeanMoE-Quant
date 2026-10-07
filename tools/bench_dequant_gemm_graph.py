@@ -218,13 +218,21 @@ def main(argv: list[str] | None = None) -> int:
         graph.replay()
         torch.cuda.synchronize()
         out = torch.cat(ys, dim=1).clone()
-        # K1：与默认 config 逐位相同
-        same = bool(torch.equal(out, ref))
-        max_diff = float((out.float() - ref.float()).abs().max().item())
+        # K1：与默认 config 比 **PARITY_GATE**（不是逐位 —— 换 BLOCK_K 会重排 fp32 累加）
+        from lemoq.kernels.reference import tolerance_report  # noqa: PLC0415
+
+        rep = tolerance_report(ref, out)
         graphs[name] = graph
         outs[name] = out
-        results[name] = {"bitwise_equal_to_default": same, "max_abs_diff": max_diff}
-        print("  %-14s captured | 逐位等于默认=%s | max|Δ|=%.3e" % (name, same, max_diff))
+        results[name] = {
+            "bitwise_equal_to_default": bool(torch.equal(out, ref)),
+            "parity_gate_pass": rep["allclose_atol_1e-3"],
+            "max_abs_err": rep["max_abs_err"],
+        }
+        print(
+            "  %-14s captured | 逐位相同=%-5s | PARITY_GATE(1e-3)=%-5s | max|Δ|=%.3e"
+            % (name, bool(torch.equal(out, ref)), rep["allclose_atol_1e-3"], rep["max_abs_err"])
+        )
 
     if not graphs:
         print("没有任何 config 捕获成功", file=sys.stderr)

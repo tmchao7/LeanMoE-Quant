@@ -120,11 +120,12 @@ def unavailable_reason() -> str | None:
 _CFG_CACHE: dict[Any, dict[str, int]] = {}
 
 
-def _resolve_config(config: dict[str, Any] | None) -> dict[str, int]:
+def _resolve_config(config: dict[str, Any] | None, group_size: int = 128) -> dict[str, int]:
     override = None if not config else (config.get("dequant_gemm") or config)
     key = (
         tuple(sorted(DEQUANT_GEMM_CONFIGS["dequant_gemm"].items())),
         None if override is None else tuple(sorted(override.items())),
+        int(group_size),
     )
     cached = _CFG_CACHE.get(key)
     if cached is not None:
@@ -139,6 +140,13 @@ def _resolve_config(config: dict[str, Any] | None) -> dict[str, int]:
         raise ValueError("非法 dequant_gemm 配置：%r" % cfg)
     if cfg["BLOCK_K"] % 2 != 0:
         raise ValueError("BLOCK_K 必须是偶数（4-bit 每两个 k 共用一个 uint8）：%r" % cfg)
+    # ★ scale 的装载方式要求"一个 k 块要么含整数个组、要么落在一个组内"（见 kernel 注释）。
+    #   不满足就响亮报错 —— 静默退回逐元素 gather 会让性能悄悄掉一半。
+    if cfg["BLOCK_K"] % int(group_size) != 0 and int(group_size) % cfg["BLOCK_K"] != 0:
+        raise ValueError(
+            "dequant_gemm 配置非法：BLOCK_K=%d 与 group_size=%d 必须有一个整除另一个"
+            "（否则一个 k 块会跨组边界、scale 不能按组广播）" % (cfg["BLOCK_K"], group_size)
+        )
     cfg = {k: int(v) for k, v in cfg.items()}
     _CFG_CACHE[key] = cfg
     return cfg
@@ -180,7 +188,7 @@ def dequant_gemm_fused(
         )
     import torch  # noqa: PLC0415
 
-    cfg = _resolve_config(config)
+    cfg = _resolve_config(config, int(group_size))
     if x.dim() != 2:
         raise ValueError("x 必须是 (M, K) 二维，得到 %r" % (tuple(x.shape),))
     if qweight.dim() != 2:
@@ -332,20 +340,57 @@ if _HAS_TRITON:
                     # join + reshape 按 (byte, which) 展平成 k 序：k = 2j + which
                     codes = tl.reshape(tl.join(lo, hi), (BLOCK_N, BLOCK_K)).to(tl.float32)
 
-                g = ks // GROUP_SIZE
-                sc = tl.load(
-                    s_ptr + offs_n[:, None] * n_groups + g[None, :],
-                    mask=mask_n[:, None] & mask_g[None, :],
-                    other=0.0,
-                ).to(tl.float32)
+                # ★ scale 一次只装**每组的那个数**（(BLOCK_N, n_in_block)），再广播到
+                #   (BLOCK_N, BLOCK_K)。老写法 `g = ks // GROUP_SIZE` 逐元素 gather：
+                #   一个 k 块里 128 个元素共用同一个值，却发了 128 次 gather
+                #   （BLOCK_K=256 / BLOCK_N=4 / 2 warps 时约 128 条 gather/线程/k 块）。
+                #   这是 EXP-p4c-01 §5.4 里 attention 投影那 0.52 ms 的主因：
+                #   8.14 µs/次 vs 4.26 MB 的字节地板 2.7 µs。
+                #   ★ 分支条件是 constexpr（GROUP_SIZE/BLOCK_K 都是 constexpr），
+                #     所以图安全、签名不变（launcher 参数数不变）。
+                if BLOCK_K % GROUP_SIZE == 0:
+                    n_in_block: tl.constexpr = BLOCK_K // GROUP_SIZE
+                    gs = k0 // GROUP_SIZE + tl.arange(0, n_in_block)
+                    gmask = mask_n[:, None] & (gs[None, :] < n_groups)
+                    sc_t = tl.load(
+                        s_ptr + offs_n[:, None] * n_groups + gs[None, :],
+                        mask=gmask,
+                        other=0.0,
+                    ).to(tl.float32)
+                    sc = tl.reshape(
+                        tl.broadcast_to(sc_t[:, :, None], (BLOCK_N, n_in_block, GROUP_SIZE)),
+                        (BLOCK_N, BLOCK_K),
+                    )
+                else:
+                    # 整块落在**一个**组内（host 侧已保证 GROUP_SIZE % BLOCK_K == 0）
+                    g_one = k0 // GROUP_SIZE
+                    sc1 = tl.load(s_ptr + offs_n * n_groups + g_one, mask=mask_n, other=0.0).to(
+                        tl.float32
+                    )
+                    sc = tl.broadcast_to(sc1[:, None], (BLOCK_N, BLOCK_K))
                 if SYMMETRIC:
                     w = codes * sc
                 else:
-                    zz = tl.load(
-                        z_ptr + offs_n[:, None] * n_groups + g[None, :],
-                        mask=mask_n[:, None] & mask_g[None, :],
-                        other=0.0,
-                    ).to(tl.float32)
+                    if BLOCK_K % GROUP_SIZE == 0:
+                        n_in_block2: tl.constexpr = BLOCK_K // GROUP_SIZE
+                        gs2 = k0 // GROUP_SIZE + tl.arange(0, n_in_block2)
+                        gmask2 = mask_n[:, None] & (gs2[None, :] < n_groups)
+                        z_t = tl.load(
+                            z_ptr + offs_n[:, None] * n_groups + gs2[None, :],
+                            mask=gmask2,
+                            other=0.0,
+                        ).to(tl.float32)
+                        zz = tl.reshape(
+                            tl.broadcast_to(z_t[:, :, None], (BLOCK_N, n_in_block2, GROUP_SIZE)),
+                            (BLOCK_N, BLOCK_K),
+                        )
+                    else:
+                        z1 = tl.load(
+                            z_ptr + offs_n * n_groups + (k0 // GROUP_SIZE),
+                            mask=mask_n,
+                            other=0.0,
+                        ).to(tl.float32)
+                        zz = tl.broadcast_to(z1[:, None], (BLOCK_N, BLOCK_K))
                     w = (codes - zz) * sc
 
                 # x 在 padded 区域是 0（掩码用未补齐的 K）—— 与 separate 臂的
