@@ -176,6 +176,38 @@ def test_dry_run_p4b_cell_id_matches_skeleton(capsys):
     assert "moe=grouped" in out.out
 
 
+def test_dry_run_answers_even_when_the_cell_is_already_done(capsys, tmp_path):
+    """`--dry-run` 是只读查询，**不受 `is_done` 短路**。
+
+    `results/` 是机器本地的（gitignored）：同一格在 GPU 机器上跑过之后，dry-run 若被
+    短路成 `skip (done)`，测试与人就都问不到"这一格叫什么、门什么状态"。
+    这条在服务器上**实测红过**（本地 Mac 的 results/ 干净，所以看不到）。
+    """
+    cell = "EXP-p4b-01-truncation__bit_width=fp16_execution=eager_ctx=1024"
+    d = tmp_path / cell
+    d.mkdir()
+    (d / "result.json").write_text(json.dumps({"status": "done"}), encoding="utf-8")
+    rc = runner_main(
+        [
+            "--exp",
+            "EXP-p4b-01-truncation",
+            "--bit-width",
+            "fp16",
+            "--execution",
+            "eager",
+            "--ctx",
+            "1024",
+            "--results-dir",
+            str(tmp_path),
+            "--dry-run",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "would run: %s" % cell in out.out, "dry-run 被 is_done 短路了"
+    assert "moe=grouped" in out.out
+
+
 def test_fused_dequant_is_refused_without_a_kernel(capsys):
     """real run（非 dry-run）必须在加载前拒绝 fused —— kernel 还不存在。"""
     rc = runner_main(

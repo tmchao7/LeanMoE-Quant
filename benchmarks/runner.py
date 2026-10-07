@@ -1716,7 +1716,12 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
-    if is_done(exp_id, args.results_dir) and not args.force:
+    # ★ `--dry-run` **不受 `is_done` 短路**：它是只读查询（不加载模型、不写文件），
+    #   必须永远答得出"这一格叫什么、门是什么状态"。`results/` 是**机器本地**的
+    #   （gitignored）：同一格在 GPU 机器上跑过之后，dry-run 若被短路成
+    #   `skip (done)`，测试和人就都问不到它了 —— `test_dry_run_p4b_cell_id_matches_skeleton`
+    #   在 workspace 干净的 Mac 上过、在刚跑过该格的服务器上红，就是这个原因（实测红过）。
+    if not args.dry_run and is_done(exp_id, args.results_dir) and not args.force:
         print("skip (done): %s" % exp_id)
         return 0
 
