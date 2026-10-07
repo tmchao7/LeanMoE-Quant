@@ -240,7 +240,11 @@ def main(argv: list[str] | None = None) -> int:
         "setup": {
             "moe_blocks_replaced": moe_replaced,
             "attention_cores_replaced": attn_replaced,
-            "quantized_targets": (qreport or {}).get("replaced_per_target"),
+            # ★ `quantize_for_cfg` 返回的是 `QuantizeReport` 数据类（不是 dict）——
+            #   第一版这里写成 `.get(...)`，上机立刻 AttributeError。
+            "quantized_targets": (
+                (qreport.to_dict().get("replaced_per_target") if qreport is not None else None)
+            ),
             "scopes_wrapped": sorted(set(wrapped)),
         },
         "k1_top8_kernel_overlap": overlap,
