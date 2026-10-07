@@ -117,12 +117,14 @@ def test_sm120_expands_to_expected_total(matrix):
     #   理由与 p0-04 那次 ctx 扩轴完全相同：ctx 是**声明的轴**，不同 ctx = 不同 prompt
     #   = 不同轨迹 = KL 是新测量；p4b-01/p2-01 的量化格要在两个 ctx 上跑。
     #   实测结论写在 EXP-p1-04 记录的「ctx=4096 复测」节。
+    # 再 63 变 64：新增 EXP-p4c-02-elementwise-tail（kind=analysis，**无轴** ⇒ 1 格）。
+    #   它是归因实验：产物是 modules/kernel 归因表，不是新的性能格；不重跑任何已落盘格子。
     # 再 55 变 63：新增 EXP-p4c-01-in-graph-attention（bit_width 2 × attn 2 × ctx 2 = 8 格）。
     #   ★ 它是**新实验**而不是 p4b 的另一个臂：p4b 的假设是"截断是否存在"，本条的假设是
     #     "把 attention core 换掉能不能把剩下那 55% 的非权重工作压下去、从而提高量化收益" ——
     #     两个假设、两个 refutation signal。用新 id（用户在 2026-10-07 明确批准）而不是给
     #     p4b 加 `attn` 轴，就是为了不动已经收口的 16 格工件。
-    assert len(real) == 63
+    assert len(real) == 64
 
 
 def test_exp_ids_are_unique(matrix):

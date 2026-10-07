@@ -258,6 +258,21 @@ experiments:
     metrics: ["per_token_p50", "per_token_p99", "dequant_share", "bw_attainment", "ncu_metrics"]
 
   # ---------- Phase 4b：★ E7 收益截断（本项目的头号结论） ----------
+  - id: EXP-p4c-02-elementwise-tail
+    stage: p4c
+    kind: analysis
+    desc: 'EXP-p4c-01 §5.4 的后续（用户 2026-10-07 批准新 id）：量化 graph 步里那个
+      ~0.88 ms / ~330 个 kernel 的 elementwise/copy 长尾到底是什么。★ 这是**归因**实验
+      （kind=analysis）：产物是逐作用的模块归因表 + 完整 kernel 表（tools/profile_graph_scopes.py），
+      不是新的性能格 —— 所以**没有轴**，也不重跑任何已落盘格子。'
+    hypothesis: '长尾来自可以命名的模块级算子链：(a) RMSNorm 的 mean/reduce 与 cast，
+      (b) 残差相加与 fp16/fp32 往返，(c) KV cache 写入 / RoPE，(d) MoE 的 top-k 索引。
+      若成立 ⇒ 修法是"把算子链融进已有 kernel 或消除中间张量"；若不成立（长尾平、不可归属）⇒
+      这个方向应当放弃并写进记录。'
+    refutation_signal: '归因表里没有任何一个作用域 >10%（时间落不到具体模块）⇒ 无法据此下手，
+      该方向作废；或某个**单一 kernel** >40% ⇒ 它不是"长尾"而是单点，假设表述被否证。'
+    metrics: ['elementwise_share', 'kernels_per_step', 'per_token_p50', 'host_share']
+
   - id: EXP-p4c-01-in-graph-attention
     stage: p4c
     kind: perf
