@@ -168,19 +168,58 @@ def test_quant_launch_plan_rejects_block_k_not_dividing_group_size():
         quant_launch_plan(quant, top_k=2, config={"gate_up_act": {"BLOCK_K": 64, "SPLIT_K": 1}})
 
 
-def test_quant_launch_plan_rejects_4bit():
+def test_quant_launch_plan_supports_4bit_and_uses_unpacked_shapes():
+    """4-bit（nibble）必须给出与 8-bit **相同的 plan 形状** —— packed 少一半不能改 grid。"""
+    _block, fused, quant8 = _fused_and_quantized(group_size=32)
+    quant4 = quantize_fused_experts(fused, bits=4, group_size=32)
+    plan8 = quant_launch_plan(quant8, top_k=2, for_kernel=False)
+    plan4 = quant_launch_plan(quant4, top_k=2, for_kernel=False)
+    for key in ("hidden", "ffn"):
+        assert plan4[key] == plan8[key], key
+    assert quant4.packed_gate_up.shape[-1] * 2 == quant8.packed_gate_up.shape[-1]
+    assert quant4.hidden == quant8.hidden and quant4.ffn == quant8.ffn
+
+
+def test_quant_launch_plan_rejects_odd_group_size_for_4bit():
+    """nibble 成对打包：group_size 必须偶数，否则一对 code 会跨组边界。"""
     _block, _fused, quant = _fused_and_quantized()
-    quant.bits = 4
-    with pytest.raises(NotImplementedError):
+    quant.bits, quant.group_size = 4, 63
+    with pytest.raises(NotImplementedError, match="偶数"):
         quant_launch_plan(quant, top_k=2)
 
 
-def test_quantize_fused_experts_rejects_4bit_and_bad_group():
+def test_quantize_fused_experts_rejects_other_bits_and_bad_group():
     _block, fused, _quant = _fused_and_quantized()
     with pytest.raises(NotImplementedError):
-        quantize_fused_experts(fused, bits=4, group_size=32)
+        quantize_fused_experts(fused, bits=3, group_size=32)
     with pytest.raises(NotImplementedError):
         quantize_fused_experts(fused, bits=8, group_size=7)  # 64 不能被 7 整除
+
+
+def test_4bit_quantization_halves_the_bytes_and_still_oracles():
+    """4-bit 的 packed 是 uint8（两 code 一字节），字节数减半，且 oracle 仍确定性可跑。"""
+    import torch
+
+    _block, fused, quant8 = _fused_and_quantized(group_size=32)
+    quant4 = quantize_fused_experts(fused, bits=4, group_size=32)
+    assert quant4.packed_gate_up.dtype == torch.uint8
+    assert quant4.packed_down.dtype == torch.uint8
+    packed_ratio = quant4.packed_gate_up.numel() / quant8.packed_gate_up.numel()
+    assert packed_ratio == pytest.approx(0.5), packed_ratio
+    # 反量化回 fp16 的形状必须与 fp16 版一致
+    deq = dequantize_fused_experts(quant4, dtype=torch.float16)
+    assert tuple(deq.gate_up.shape) == tuple(fused.gate_up.shape)
+    assert tuple(deq.down.shape) == tuple(fused.down.shape)
+    # 逐专家反量化（prefill 路径）不能把全部专家物化，形状也要对
+    one = quant4.dequant_gate_up_expert(1, dtype=torch.float16)
+    assert tuple(one.shape) == tuple(fused.gate_up.shape[1:])
+
+    x = torch.randn(int(fused.gate_up.shape[2])) * 0.5
+    ids = torch.tensor([0, 2])
+    top_w = torch.tensor([0.7, 0.3])
+    a = grouped_moe_forward_quant(x, quant4, ids, top_w, backend="oracle")
+    b = grouped_moe_forward_quant(x, quant4, ids, top_w, backend="oracle")
+    assert torch.isfinite(a).all() and torch.equal(a, b)
 
 
 def test_quantized_gather_is_rejected_at_the_api_level():
@@ -232,3 +271,46 @@ def test_quantized_prefill_path_uses_per_expert_dequant():
         out = model(ids)
     assert tuple(out.logits.shape) == (1, 8, 256)
     assert torch.isfinite(out.logits).all()
+
+
+def test_quantized_fuse_matches_per_expert_quantization_4bit():
+    """★ 4-bit 的**语义正确性**：融合不改变任何一行的量化结果（与 8-bit 同一条判据）。
+
+    这是 4-bit 路径能被引用的前提：如果"先融合再量化"与"逐专家量化"在 4-bit 下不同，
+    那 p1-04 的门（按逐专家测的）就管不到这条 kernel。判据是**逐位相同**，
+    包括 nibble 的打包结果。
+    """
+    from lemoq.quant import pack as qpack
+
+    group_size = 32
+    block, _fused, _quant8 = _fused_and_quantized(group_size)
+    fused = fuse_experts(block.experts)
+    quant = quantize_fused_experts(fused, bits=4, group_size=group_size)
+    ffn = quant.ffn
+
+    for e_idx, expert in enumerate(block.experts):
+        cases = (
+            (
+                "gate",
+                expert.gate_proj.weight,
+                quant.packed_gate_up[e_idx, :ffn, :],
+                quant.scale_gate_up[e_idx, :ffn, :],
+            ),
+            (
+                "up",
+                expert.up_proj.weight,
+                quant.packed_gate_up[e_idx, ffn:, :],
+                quant.scale_gate_up[e_idx, ffn:, :],
+            ),
+            ("down", expert.down_proj.weight, quant.packed_down[e_idx], quant.scale_down[e_idx]),
+        )
+        for name, weight, packed, scale in cases:
+            ref = qrtn.quantize_rtn(weight.detach().float(), bits=4, group_size=group_size)
+            ref_codes = ref["codes_padded"].reshape(weight.shape)
+            # ★ nibble 打包约定（pack.py）：低半字节在前；解包后必须逐位等于 int4 codes
+            assert torch.equal(
+                qpack.unpack_4bit(packed, signed=True).to(torch.int32), ref_codes
+            ), "expert %d 的 %s 4-bit codes 与逐专家量化不一致" % (e_idx, name)
+            assert torch.equal(
+                scale, ref["scale"].half()
+            ), "expert %d 的 %s scale 与逐专家量化不一致" % (e_idx, name)

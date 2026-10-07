@@ -598,8 +598,12 @@ def test_quantized_over_non_hf_moe_is_refused(capsys):
     assert rc_fp16 == 0
 
 
-def test_quantized_grouped_4bit_is_refused(capsys):
-    """量化 grouped 只实现 8-bit：4-bit 的 nibble 解包未实现 → 加载前拒绝。"""
+def test_quantized_grouped_4bit_is_now_allowed_as_evidence(capsys):
+    """★ 2026-10-07：4-bit 的 nibble 解包落地 → 量化 grouped 不再只做 8-bit。
+
+    但 `w4a16 / g128` 的**引用门 FAIL**（KL 0.0933 > 0.05）：它照跑，只是
+    `verdict=FAIL`、延迟只进 `_measurement.gate_failed_evidence`。dry-run 必须能看见这一格。
+    """
     rc = runner_main(
         [
             "--exp",
@@ -610,11 +614,35 @@ def test_quantized_grouped_4bit_is_refused(capsys):
             "eager",
             "--ctx",
             "1024",
+            "--dry-run",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "would run: EXP-p4b-01-truncation__bit_width=w4a16_execution=eager_ctx=1024" in out.out
+    assert "gate: FAIL" in out.out
+
+
+def test_quantized_grouped_odd_group_size_is_refused(capsys, monkeypatch):
+    """nibble 成对打包要求 group_size 偶数 —— 这条加载前拒绝仍然在。"""
+    rc = runner_main(
+        [
+            "--exp",
+            "EXP-p4b-01-truncation",
+            "--bit-width",
+            "w8a16",
+            "--group-size",
+            "127",
+            "--execution",
+            "eager",
+            "--ctx",
+            "1024",
+            "--force",
         ]
     )
     out = capsys.readouterr()
     assert rc == 2
-    assert "4-bit" in out.err or "8-bit" in out.err
+    assert "偶数" in out.err or "门实测" in out.err
 
 
 def test_weight_bytes_actual_counts_static_experts():

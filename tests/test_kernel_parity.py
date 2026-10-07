@@ -189,8 +189,6 @@ def test_triton_quantized_grouped_matches_oracle():
         gate_up=torch.randn(n_experts, 2 * ffn, hidden) * 0.05,
         down=torch.randn(n_experts, hidden, ffn) * 0.05,
     )
-    quantized = quantize_fused_experts(fused, bits=8, group_size=128).to("cuda")
-
     x = torch.randn(hidden, dtype=torch.float16, device="cuda") * 0.5
     ids = torch.tensor([0, 2], dtype=torch.int64, device="cuda")
     weights = torch.tensor([0.7, 0.3], dtype=torch.float16, device="cuda")
@@ -199,11 +197,14 @@ def test_triton_quantized_grouped_matches_oracle():
     # 所以显式用 SPLIT_K=2 —— 顺便覆盖 out_reduce kernel。
     config = {"down_sum": {"SPLIT_K": 2}}
 
-    got = grouped_moe_forward_quant(x, quantized, ids, weights, config=config, backend="triton")
-    ref = grouped_moe_forward_quant(x, quantized, ids, weights, config=config, backend="oracle")
-
-    report = tolerance_report(ref.float(), got.float())
-    assert report["allclose_atol_1e-3"], report
+    # ★ 8-bit 与 4-bit 都要过：4-bit 走的是**另一条代码路径**（`_expand_int4` 的
+    #   nibble 展开），K1 门对它同样不放宽。
+    for bits in (8, 4):
+        quantized = quantize_fused_experts(fused, bits=bits, group_size=128).to("cuda")
+        got = grouped_moe_forward_quant(x, quantized, ids, weights, config=config, backend="triton")
+        ref = grouped_moe_forward_quant(x, quantized, ids, weights, config=config, backend="oracle")
+        report = tolerance_report(ref.float(), got.float())
+        assert report["allclose_atol_1e-3"], {"bits": bits, "report": report}
 
 
 @pytest.mark.gpu

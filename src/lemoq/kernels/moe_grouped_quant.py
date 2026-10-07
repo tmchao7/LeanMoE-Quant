@@ -30,8 +30,11 @@ oracle 就在本模块（`*_reference`），不需要 triton，可在 CPU 上跑
 
 ## 支持的位宽
 
-目前只支持 **8-bit**（`w8a16` = 唯一过门的量化配置，`w8a8` 同权重侧）。
-4-bit 需要 nibble 解包，尚未实现 —— 这里**显式报错**，不静默用别的位宽算。
+**8-bit 与 4-bit**（2026-10-07 起）。4-bit 的 nibble 在 kernel 里展开
+（`pack.py` 的约定：低半字节在前），与 dense 侧 `_dequant_triton` 用同一个把戏
+（`tl.join` + `tl.reshape`）。★ 4-bit 的意义**只到 evidence 层**：`w4a16 / g128`
+的引用门 FAIL（5 窗口 mean KL 0.0933 > 0.05），所以它的延迟按硬规则 2 不得作为
+性能结论 —— 跑它是为了把 p4b 声明的 w4a16 行补成实测（记录 §2.9）。
 """
 
 from __future__ import annotations
@@ -70,8 +73,9 @@ def _torch():
 class QuantFusedExperts:
     """量化后的 expert 权重：packed codes + per-group scale，形状与 fp16 版一一对应。
 
-        packed_gate_up (E, 2F, H) int8        scale_gate_up (E, 2F, H//g) fp16
-        packed_down    (E, H, F)  int8        scale_down    (E, H, F//g) fp16
+        packed_gate_up (E, 2F, H) int8 [8-bit] / (E, 2F, H//2) uint8 [4-bit]
+        packed_down    (E, H, F)  int8 [8-bit] / (E, H, F//2)  uint8 [4-bit]
+        scale_gate_up (E, 2F, H//g) fp16      scale_down (E, H, F//g) fp16
 
     组沿**最后一维**（kernel 的 K 维），与 `lemoq.quant.rtn` / `bytes._quantized_bytes`
     的口径一致。是 dataclass 而不是自定义类，是为了让
@@ -95,7 +99,12 @@ class QuantFusedExperts:
 
     @property
     def hidden(self) -> int:
-        return int(self.packed_gate_up.shape[2])
+        """**未打包**的 hidden（4-bit 时 packed 的最后一维是 H//2）。"""
+        return self._unpacked_last(self.packed_gate_up)
+
+    def _unpacked_last(self, packed: Any) -> int:
+        """packed 张量最后一维对应的未打包宽度：8-bit ×1、4-bit ×2。"""
+        return int(packed.shape[-1]) * (8 // int(self.bits))
 
     def nbytes(self) -> int:
         total = 0
@@ -117,7 +126,7 @@ class QuantFusedExperts:
             device, dtype = None, device
         if dtype is not None:
             raise ValueError(
-                "QuantFusedExperts 不支持 dtype 转换（packed 必须 int8、scale 必须 fp16）："
+                "QuantFusedExperts 不支持 dtype 转换（packed 必须 int8/uint8、scale 必须 fp16）："
                 "得到 dtype=%r。要改精度请重新量化。" % (dtype,)
             )
         if device is None:
@@ -136,19 +145,27 @@ class QuantFusedExperts:
     def _dequant_2d(self, codes: Any, scale: Any, out_rows: int, in_features: int, dtype):
         torch = _torch()
         ng = in_features // self.group_size
+        if int(self.bits) == 4:
+            # ★ packed 的最后一维是 in/2 个 uint8；先解包成 int8 的 codes。
+            #   符号约定与 `dequantize_rtn` 一致（对称量化 → int4）。
+            from lemoq.quant import pack as qpack  # noqa: PLC0415
+
+            codes = qpack.unpack_4bit(codes, signed=True).to(torch.int32)
         c = codes.reshape(out_rows, in_features).to(torch.float32)
         s = scale.reshape(out_rows, ng, 1).to(torch.float32)
         w = (c.reshape(out_rows, ng, self.group_size) * s).reshape(out_rows, in_features)
         return w.to(dtype) if dtype is not None else w
 
     def dequant_gate_up(self, dtype: Any = None) -> Any:
-        e, rows, hidden = self.packed_gate_up.shape
+        e, rows = int(self.packed_gate_up.shape[0]), int(self.packed_gate_up.shape[1])
+        hidden = self.hidden
         return self._dequant_2d(
             self.packed_gate_up, self.scale_gate_up, e * rows, hidden, dtype
         ).reshape(e, rows, hidden)
 
     def dequant_down(self, dtype: Any = None) -> Any:
-        e, rows, ffn = self.packed_down.shape
+        e, rows = int(self.packed_down.shape[0]), int(self.packed_down.shape[1])
+        ffn = self._unpacked_last(self.packed_down)
         return self._dequant_2d(self.packed_down, self.scale_down, e * rows, ffn, dtype).reshape(
             e, rows, ffn
         )
@@ -161,12 +178,14 @@ class QuantFusedExperts:
         """
         codes = self.packed_gate_up[index]
         scale = self.scale_gate_up[index]
-        return self._dequant_2d(codes, scale, int(codes.shape[0]), int(codes.shape[1]), dtype)
+        return self._dequant_2d(codes, scale, int(codes.shape[0]), self.hidden, dtype)
 
     def dequant_down_expert(self, index: int, dtype: Any = None) -> Any:
         codes = self.packed_down[index]
         scale = self.scale_down[index]
-        return self._dequant_2d(codes, scale, int(codes.shape[0]), int(codes.shape[1]), dtype)
+        return self._dequant_2d(
+            codes, scale, int(codes.shape[0]), self._unpacked_last(self.packed_down), dtype
+        )
 
 
 def quantize_fused_experts(fused: Any, *, bits: int = 8, group_size: int = 128):
@@ -177,13 +196,11 @@ def quantize_fused_experts(fused: Any, *, bits: int = 8, group_size: int = 128):
     """
     import torch  # noqa: PLC0415
 
+    from lemoq.quant import pack as qpack  # noqa: PLC0415
     from lemoq.quant import rtn as qrtn  # noqa: PLC0415
 
-    if bits != 8:
-        raise NotImplementedError(
-            "量化 grouped 路径目前只实现 8-bit（w8a16/w8a8 的权重侧）。"
-            "4-bit 需要 nibble 解包，见 EXP-p4b-01-truncation 记录 §3 的 P1 后续。"
-        )
+    if bits not in (4, 8):
+        raise NotImplementedError("量化 grouped 路径只实现 4 / 8-bit，得到 %r" % (bits,))
     if group_size <= 0:
         raise ValueError("group_size 必须 > 0")
     gate_up = fused.gate_up
@@ -203,7 +220,15 @@ def quantize_fused_experts(fused: Any, *, bits: int = 8, group_size: int = 128):
     q_d = qrtn.quantize_rtn(down.reshape(-1, ffn).float(), bits=bits, group_size=group_size)
 
     def _codes_scale(q, rows_shape, in_features):
-        codes = q["codes_padded"].to(torch.int8).reshape(*rows_shape, in_features)
+        padded = q["codes_padded"].reshape(
+            int(q["codes_padded"].numel()) // in_features, in_features
+        )
+        if bits == 4:
+            # 低半字节在前；pack_4bit 要求最后一维为偶数（group_size 偶数 ⇒ 成立）
+            packed = qpack.pack_4bit(padded)
+        else:
+            packed = padded.to(torch.int8)
+        codes = packed.reshape(*rows_shape, packed.shape[-1])
         scale = q["scale"].half().reshape(*rows_shape, in_features // group_size)
         return codes.contiguous(), scale.contiguous()
 
@@ -273,7 +298,7 @@ def quant_launch_plan(
     复用 `moe_grouped.launch_plan`（那里的 36 点网格扫描结论不该被复制一份），
     在其上补量化特有的检查：
 
-        1. bits == 8（4-bit 未实现）—— **总是**检查；
+        1. bits ∈ {4, 8}（4-bit 需要 group_size 为偶数）—— **总是**检查；
         2. hidden/ffn 被 group_size 整除（不补零）—— **总是**检查；
         3. `BLOCK_K` 整除 group_size（一个 k 块不跨组边界 → scale 是标量广播）；
         4. `dim % (SPLIT_K * BLOCK_K) == 0`（k 循环无掩码）。
@@ -282,16 +307,24 @@ def quant_launch_plan(
     oracle 路径（纯 PyTorch）不该被 kernel 的 grid 约束绑住 —— 否则一个小模型
     连 oracle 都跑不了（默认 BLOCK_K=128 是按生产 group_size=128 调的）。
     """
+    # ★ 必须喂**未打包**的形状：`launch_plan` 用 (E, 2F, H)/(E, H, F) 推 hidden/ffn 与 grid，
+    #   4-bit 的 packed 最后一维是 H//2 / F//2，直接用会静默算错 grid。
+    e = int(q.packed_gate_up.shape[0])
+    ffn = int(q.packed_gate_up.shape[1]) // 2
+    hidden = q.hidden
     plan = launch_plan(
         SimpleNamespace(
-            gate_up=_ShapeShim(tuple(q.packed_gate_up.shape)),
-            down=_ShapeShim(tuple(q.packed_down.shape)),
+            gate_up=_ShapeShim((e, 2 * ffn, hidden)),
+            down=_ShapeShim((e, hidden, ffn)),
         ),
         top_k=top_k,
         config=config,
     )
-    if int(q.bits) != 8:
-        raise NotImplementedError("量化 grouped 路径只实现 8-bit，得到 %d" % int(q.bits))
+    if int(q.bits) not in (4, 8):
+        raise NotImplementedError("量化 grouped 路径只实现 4/8-bit，得到 %d" % int(q.bits))
+    if int(q.bits) == 4 and int(q.group_size) % 2 != 0:
+        # nibble 成对打包：组大小必须是偶数，否则一对 code 会跨组边界
+        raise NotImplementedError("4-bit 要求 group_size 为偶数，得到 %d" % int(q.group_size))
 
     for name, tensor in (
         ("packed_gate_up", q.packed_gate_up),
@@ -456,6 +489,7 @@ def grouped_moe_forward_quant(
             BLOCK_K=int(ga["BLOCK_K"]),
             SPLIT_K=split,
             K_TOKENS=top_k,
+            BITS=int(q.bits),
             num_warps=int(ga["num_warps"]),
         )
         if plan["act_combine"] is not None:
@@ -500,6 +534,7 @@ def grouped_moe_forward_quant(
             BLOCK_N=int(ds["BLOCK_N"]),
             BLOCK_K=int(ds["BLOCK_K"]),
             SPLIT_K=dsplit,
+            BITS=int(q.bits),
             num_warps=int(ds["num_warps"]),
         )
         if plan["out_reduce"] is not None:

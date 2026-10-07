@@ -2207,18 +2207,19 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        if quantized and moe_mode == "grouped":
-            _qb = quant_spec_for_cfg(
-                {"bit_width": args.bit_width, "group_size": args.group_size}
-            ).weight_bits
-            if int(_qb) != 8:
-                print(
-                    "runner 拒绝: 量化 grouped 路径目前只实现 8-bit（%s 是 %d-bit）—— "
-                    "4-bit 的 nibble 解包未实现，见 EXP-p4b-01-truncation 记录 §3 的 P1。"
-                    % (args.bit_width, int(_qb)),
-                    file=sys.stderr,
-                )
-                return 2
+        # ★ 2026-10-07：量化 grouped 的 4-bit 拒绝已删除 —— nibble 解包在
+        #   `moe_grouped_quant` + `_grouped_triton._expand_int4` 里落地了（K1 门在 5090 上 PASS）。
+        #   ★ 但 w4a16 / g128 的**引用门 FAIL**（KL 0.0933 > 0.05）：它照跑，只是按硬规则 2
+        #   标成 `verdict=FAIL`、延迟只进 `_measurement.gate_failed_evidence`。
+        #   4-bit 真正的约束在下面这条：group_size 必须是偶数（nibble 成对打包）。
+        if quantized and moe_mode == "grouped" and args.group_size % 2 != 0:
+            print(
+                "runner 拒绝: 4/8-bit 量化 grouped 的 group_size=%d 不是偶数 —— "
+                "nibble 成对打包要求偶数（4-bit），且 kernel 的 k 块必须整除 group_size。"
+                % args.group_size,
+                file=sys.stderr,
+            )
+            return 2
 
     # ★ `--dry-run` **不受 `is_done` 短路**：它是只读查询（不加载模型、不写文件），
     #   必须永远答得出"这一格叫什么、门是什么状态"。`results/` 是**机器本地**的

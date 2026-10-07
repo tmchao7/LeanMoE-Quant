@@ -326,10 +326,9 @@ if _HAS_TRITON:
                         mask=mask_n[:, None] & mask_b[None, :],
                         other=0,
                     ).to(tl.int32)
-                    lo = packed & 0xF
-                    hi = (packed >> 4) & 0xF
-                    lo = tl.where(lo >= 8, lo - 16, lo)  # int4 符号扩展
-                    hi = tl.where(hi >= 8, hi - 16, hi)
+                    # int4 符号扩展：`((x & 0xF) ^ 8) - 8`（0..15 -> -8..7），纯算术
+                    lo = ((packed & 0xF) ^ 8) - 8
+                    hi = (((packed >> 4) & 0xF) ^ 8) - 8
                     # join + reshape 按 (byte, which) 展平成 k 序：k = 2j + which
                     codes = tl.reshape(tl.join(lo, hi), (BLOCK_N, BLOCK_K)).to(tl.float32)
 

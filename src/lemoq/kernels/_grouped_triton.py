@@ -232,9 +232,24 @@ def _out_reduce_kernel(
 
 
 @triton.jit
+def _expand_int4(packed, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+    """uint8 packed（低半字节在前）-> (BLOCK_N, BLOCK_K) 的 fp32 int4 值。
+
+    `k = 2*j + which`：byte j 的低半字节是 code[2j]、高半字节是 code[2j+1]。
+    符号扩展与 `lemoq.quant.pack.unpack_4bit(signed=True)` 逐位一致。
+    """
+    # 符号扩展用纯算术 `((x & 0xF) ^ 8) - 8`（0..15 -> -8..7），而不是 `tl.where` ——
+    # `_grouped_triton.py` 有一条 AST 守卫禁 device/host 的 where（见
+    # tests/test_moe_grouped.py::test_triton_kernels_avoid_everything_that_breaks_capture）。
+    lo = ((packed & 0xF) ^ 8) - 8
+    hi = (((packed >> 4) & 0xF) ^ 8) - 8
+    return tl.reshape(tl.join(lo, hi), (BLOCK_N, BLOCK_K)).to(tl.float32)
+
+
+@triton.jit
 def _gate_up_act_kernel_q(
     x_ptr,  # (H,) fp16     —— 本 token 的 hidden state
-    q_ptr,  # (E, 2F, H) int8 —— packed codes
+    q_ptr,  # (E, 2F, H) int8 [8-bit] / (E, 2F, H//2) uint8 [4-bit] —— packed codes
     s_ptr,  # (E, 2F, H//GROUP) fp16 —— per-group scale
     ids_ptr,  # (K,) int64
     act_ptr,  # (K, F) fp16  —— SPLIT_K == 1
@@ -247,8 +262,13 @@ def _gate_up_act_kernel_q(
     BLOCK_K: tl.constexpr,
     SPLIT_K: tl.constexpr,
     K_TOKENS: tl.constexpr,
+    BITS: tl.constexpr,
 ):
-    """`act[i, n] = silu((W_gate[e_i,n,:]*s).x) * ((W_up[e_i,n,:]*s).x)`，权重在寄存器里解包。"""
+    """`act[i, n] = silu((W_gate[e_i,n,:]*s).x) * ((W_up[e_i,n,:]*s).x)`，权重在寄存器里解包。
+
+    `BITS=4` 时 packed 是 uint8（两个 4-bit code 一个字节，低半字节在前），
+    在寄存器里展开成 int4 —— 与 dense 侧 `_dequant_triton` 同一个把戏。
+    """
     slot = tl.program_id(0)
     pid_n = tl.program_id(1)
     pid_k = tl.program_id(2)
@@ -259,7 +279,10 @@ def _gate_up_act_kernel_q(
     n_mask = n < F
     ng = H // GROUP  # 每行的组数
 
-    qbase = q_ptr + e * (2 * F * H)
+    # ★ 字节/行：8-bit 是 H，4-bit 是 H//2（`H * BITS // 8` 把两者写成同一个表达式）。
+    #   不写 `: tl.constexpr` 注解：H/BITS 都是 constexpr，这个表达式在 trace 时就是常量。
+    packed_row = H * BITS // 8
+    qbase = q_ptr + e * (2 * F * packed_row)
     sbase = s_ptr + e * (2 * F * ng)
 
     acc_g = tl.zeros((BLOCK_N,), dtype=tl.float32)
@@ -276,12 +299,23 @@ def _gate_up_act_kernel_q(
         xv = tl.load(x_ptr + k).to(tl.float32)
         sg = tl.load(sbase + n * ng + g0, mask=n_mask, other=0.0).to(tl.float32)
         su = tl.load(sbase + (F + n) * ng + g0, mask=n_mask, other=0.0).to(tl.float32)
-        qg = tl.load(qbase + n[:, None] * H + k[None, :], mask=n_mask[:, None], other=0).to(
-            tl.float32
-        )
-        qu = tl.load(qbase + (F + n)[:, None] * H + k[None, :], mask=n_mask[:, None], other=0).to(
-            tl.float32
-        )
+        if BITS == 8:
+            qg = tl.load(
+                qbase + n[:, None] * packed_row + k[None, :], mask=n_mask[:, None], other=0
+            ).to(tl.float32)
+            qu = tl.load(
+                qbase + (F + n)[:, None] * packed_row + k[None, :], mask=n_mask[:, None], other=0
+            ).to(tl.float32)
+        else:
+            kb = k // 2  # 两个 k 共用一个 uint8
+            pg = tl.load(
+                qbase + n[:, None] * packed_row + kb[None, :], mask=n_mask[:, None], other=0
+            ).to(tl.int32)
+            pu = tl.load(
+                qbase + (F + n)[:, None] * packed_row + kb[None, :], mask=n_mask[:, None], other=0
+            ).to(tl.int32)
+            qg = _expand_int4(pg, BLOCK_N, BLOCK_K)
+            qu = _expand_int4(pu, BLOCK_N, BLOCK_K)
         acc_g += tl.sum(qg * sg[:, None] * xv[None, :], axis=1)
         acc_u += tl.sum(qu * su[:, None] * xv[None, :], axis=1)
 
@@ -297,7 +331,7 @@ def _gate_up_act_kernel_q(
 @triton.jit
 def _down_sum_kernel_q(
     act_ptr,  # (K, F) fp16
-    q_ptr,  # (E, H, F) int8
+    q_ptr,  # (E, H, F) int8 [8-bit] / (E, H, F//2) uint8 [4-bit]
     s_ptr,  # (E, H, F//GROUP) fp16
     ids_ptr,  # (K,) int64
     wsum_ptr,  # (K,) fp16
@@ -310,8 +344,12 @@ def _down_sum_kernel_q(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     SPLIT_K: tl.constexpr,
+    BITS: tl.constexpr,
 ):
-    """`out[n] = sum_i top_w[i] * ((W_down[e_i,n,:]*s).act[i,:])`，权重在寄存器里解包。"""
+    """`out[n] = sum_i top_w[i] * ((W_down[e_i,n,:]*s).act[i,:])`，权重在寄存器里解包。
+
+    `BITS=4` 的 nibble 展开同 `_gate_up_act_kernel_q`。
+    """
     pid_n = tl.program_id(0)
     pid_k = tl.program_id(1)
 
@@ -328,16 +366,24 @@ def _down_sum_kernel_q(
     for slot in range(K_TOKENS):
         e = tl.load(ids_ptr + slot)
         w = tl.load(wsum_ptr + slot).to(tl.float32)
-        qbase = q_ptr + e * (H * F)
+        packed_row = F * BITS // 8
+        qbase = q_ptr + e * (H * packed_row)
         sbase = s_ptr + e * (H * ng)
         for k0 in range(k_start, k_end, BLOCK_K):
             k = k0 + tl.arange(0, BLOCK_K)
             g0 = k0 // GROUP
             a = tl.load(act_ptr + slot * F + k).to(tl.float32)
             s = tl.load(sbase + n * ng + g0, mask=n_mask, other=0.0).to(tl.float32)
-            wq = tl.load(qbase + n[:, None] * F + k[None, :], mask=n_mask[:, None], other=0).to(
-                tl.float32
-            )
+            if BITS == 8:
+                wq = tl.load(
+                    qbase + n[:, None] * packed_row + k[None, :], mask=n_mask[:, None], other=0
+                ).to(tl.float32)
+            else:
+                kb = k // 2
+                pw = tl.load(
+                    qbase + n[:, None] * packed_row + kb[None, :], mask=n_mask[:, None], other=0
+                ).to(tl.int32)
+                wq = _expand_int4(pw, BLOCK_N, BLOCK_K)
             acc += tl.sum(wq * s[:, None] * a[None, :], axis=1) * w
 
     if SPLIT_K == 1:
