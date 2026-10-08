@@ -639,6 +639,184 @@ def _print_table(summary: dict[str, Any]) -> None:
         print("失败（按纪律记录，不重试到「好看」为止）：%s" % ", ".join(failed))
 
 
+# --------------------------------------------------------------------------------------
+# 隔离计时回退臂：拿不到性能计数器时，仍然能回答"这个 kernel 到没到带宽墙"
+#
+# ★ 为什么这条不是"退而求其次还算过得去"：判据本来就是
+#       attained = 解析字节 / 测量时间        （解析字节手算，时间用 CUDA event）
+#   再除以**实测可达带宽**（`tools/probe_machine` 标定过的 1561.9 GB/s，不是规格值）。
+#   这与记录里步级"带宽达成率"是同一个口径，只是从一步缩到一个 kernel。
+#   计数器能多给的只有"为什么"（stall/occupancy），给不了"是多少"。
+#
+# ★ 已知偏差（必须写进结论）：
+#   - 小于约 10 µs 的 kernel，批内 wall time 含 launch 间隔 ⇒ 达成率被低估，
+#     这时正确的读法是"它是延迟受限的"（自研 RMSNorm 就属于这一类）；
+#   - L2：单次调用里权重会被读多遍吗？不会 —— 单次调用读一遍。但**连续多次调用**时
+#     下一遍可能命中 L2 中的残页。所以本模式报 **min 与 p50**，并用
+#     "DRAM 有效带宽上限 = 实测可达带宽" 保守判读，不把 L2 命中当成 DRAM 成就。
+# --------------------------------------------------------------------------------------
+
+
+def _measured_bw_gbps(path: str = "results/machine_probe.json") -> tuple[float | None, str]:
+    """实测可达带宽（硬规则 4：不许用规格值）。"""
+    full = path if os.path.isabs(path) else os.path.join(REPO_ROOT, path)
+    try:
+        with open(full, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        value = payload["bandwidth"]["value"]
+        return float(value), full
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        return None, "%s 读不到（%s）" % (full, type(exc).__name__)
+
+
+def _time_subject(fn: Any, args: Any) -> dict[str, Any]:
+    """R 轮 × 每轮 I 次，报每轮均值的 p50/min/MAD。"""
+    import statistics  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+
+    for _ in range(max(0, args.warmup)):
+        fn()
+    torch.cuda.synchronize()
+    rounds: list[float] = []
+    for _ in range(args.repeats):
+        start, end = torch.cuda.Event(True), torch.cuda.Event(True)
+        start.record()
+        for _ in range(args.iso_iters):
+            fn()
+        end.record()
+        torch.cuda.synchronize()
+        rounds.append(end.elapsed_time(start) / args.iso_iters)
+    ordered = sorted(rounds)
+    median = statistics.median(ordered)
+    return {
+        "rounds_ms": [round(v, 6) for v in rounds],
+        "p50_ms": round(median, 6),
+        "min_ms": round(ordered[0], 6),
+        "max_ms": round(ordered[-1], 6),
+        "mad_ms": round(statistics.median([abs(v - median) for v in ordered]), 6),
+        "method": "CUDA events 包住每轮 %d 次调用；报每轮均值的 p50/min/MAD" % args.iso_iters,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+
+def _run_isolated(args: Any) -> int:
+    import torch  # noqa: PLC0415
+
+    bw, bw_src = _measured_bw_gbps(args.machine_probe)
+    if bw is None:
+        print("需要实测可达带宽：%s" % bw_src, file=sys.stderr)
+        return 2
+    chosen = args.only or sorted(SUBJECTS)
+    unknown = [s for s in chosen if s not in SUBJECTS]
+    if unknown:
+        print("未知 subject: %s" % ", ".join(unknown), file=sys.stderr)
+        return 2
+
+    ncu_status = {
+        "ncu_attempted": True,
+        "ncu_available": _find_tool(args.ncu or "ncu") is not None,
+        "ncu_blocked_by": (
+            "ERR_NVGPUCTRPERM：宿主 `RmProfilingAdminOnly: 1` 且本容器 "
+            "CapEff 无 CAP_SYS_ADMIN（实测 0xa80425fb），连 "
+            "gpu__time_duration.sum 这种不需要计数器的指标也被拒。"
+            "见 docs/NCU_EVIDENCE.md §2 的原始报错。"
+        ),
+    }
+
+    results: dict[str, Any] = {}
+    order = list(chosen)
+    if order and order[0] not in args.canary_skip:
+        order = order + [order[0]]  # 首尾同格金丝雀（与步级协议一致）
+
+    def build_one(subject: str):
+        spec = SUBJECTS[subject]
+        for key, value in (spec.get("extra") or {}).items():
+            setattr(args, key, value)
+        fn, byte_info, meta = spec["builder"](args)
+        return fn, byte_info, meta
+
+    for index, subject in enumerate(order):
+        is_canary = index == len(order) - 1 and len(chosen) > 0
+        label = "canary:" + subject if is_canary else subject
+        fn, byte_info, meta = build_one(subject)
+        timing = _time_subject(fn, args)
+        total_bytes = byte_info.get("read", 0) + byte_info.get("write", 0)
+        gbps = total_bytes / (timing["p50_ms"] * 1e-3) / 1e9 if timing["p50_ms"] else None
+        gbps_min = total_bytes / (timing["min_ms"] * 1e-3) / 1e9 if timing["min_ms"] else None
+        record = {
+            "subject": subject,
+            "label": label,
+            "kernel": SUBJECTS[subject]["kernel"],
+            "note": SUBJECTS[subject]["note"],
+            "analytical_bytes": byte_info,
+            "meta": meta,
+            "timing": timing,
+            "achieved_gbps_p50": None if gbps is None else round(gbps, 1),
+            "achieved_gbps_best": None if gbps_min is None else round(gbps_min, 1),
+            "measured_achievable_gbps": bw,
+            "attainment_pct_p50": None if gbps is None else round(100.0 * gbps / bw, 1),
+            "attainment_pct_best": None if gbps_min is None else round(100.0 * gbps_min / bw, 1),
+            "evidence_kind": (
+                "kernel 级带宽达成率（解析字节 / 隔离计时 / 实测可达带宽）；"
+                "**不是** ncu 计数器的 dram__bytes"
+            ),
+        }
+        results[label] = record
+        print(
+            "%-26s %8.4f ms  %8.1f GB/s (best %8.1f)  %5.1f%% of wall"
+            % (
+                label,
+                timing["p50_ms"],
+                gbps or 0.0,
+                gbps_min or 0.0,
+                100.0 * gbps / bw if gbps else 0.0,
+            ),
+            flush=True,
+        )
+
+    drift = None
+    if len(order) > len(chosen):
+        head = results[chosen[0]]["timing"]["p50_ms"]
+        tail = results["canary:" + chosen[0]]["timing"]["p50_ms"]
+        drift = 100.0 * (tail - head) / head if head else None
+        print(
+            "\n金丝雀（%s）：%.4f → %.4f ms，漂移 %s%% ⇒ 本轮%s"
+            % (
+                chosen[0],
+                head,
+                tail,
+                _fmt(drift, 2),
+                "**作废**" if (drift is None or abs(drift) > 5.0) else "有效",
+            )
+        )
+
+    payload = {
+        "generated_by": "tools/ncu_evidence.py --isolated",
+        "kind": "kernel-level bandwidth attainment (no performance counters)",
+        "device": torch.cuda.get_device_name(0),
+        "measured_achievable_gbps": bw,
+        "measured_achievable_source": bw_src,
+        "clock_note": "不锁时钟；实验机器为空闲独占（先看 nvidia-smi）",
+        "ncu": ncu_status,
+        "canary_drift_pct": None if drift is None else round(drift, 3),
+        "subjects": results,
+        "caveat": (
+            "小于约 10 µs 的 kernel 的批内 wall time 含 launch 间隔，达成率被低估 —— "
+            "对这类 kernel 正确的读法是'延迟受限'；连续调用之间可能命中 L2，"
+            "所以同时报 min 与 p50，且 DRAM 上限一律用实测可达带宽（1561.9 GB/s），"
+            "不用规格值（硬规则 4）。"
+        ),
+    }
+    out = args.json or os.path.join(args.out_dir, "isolated.json")
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2, default=str)
+    print("isolated -> %s" % out)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--subject", choices=sorted(SUBJECTS), default=None, help=argparse.SUPPRESS)
@@ -664,9 +842,26 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dense-k", type=int, default=2048)
     ap.add_argument("--warmup", type=int, default=2)
     ap.add_argument("--iters", type=int, default=DEFAULT_ITERS)
+    ap.add_argument(
+        "--isolated",
+        action="store_true",
+        help="拿不到性能计数器时的回退臂：隔离计时 + 解析字节算 kernel 级带宽达成率",
+    )
+    ap.add_argument("--iso-iters", type=int, default=50, help="--isolated 每轮调用次数")
+    ap.add_argument("--repeats", type=int, default=5, help="--isolated 轮数")
+    ap.add_argument("--machine-probe", default="results/machine_probe.json")
+    ap.add_argument(
+        "--canary-skip",
+        action="append",
+        default=[],
+        help="--isolated 不把某个 subject 再跑一遍作金丝雀（可重复）",
+    )
     args = ap.parse_args(argv)
     # `num_experts` 这个名字在 builder 里用得更多，两个别名指向同一个值
     args.num_experts = args.entries
+
+    if args.isolated:
+        return _run_isolated(args)
 
     metrics = [m for m in args.metrics.split(",") if m] if args.metrics else _metric_list()
     ncu = args.ncu or _find_tool("ncu") or "ncu"
