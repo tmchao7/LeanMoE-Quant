@@ -73,6 +73,40 @@ def qmax_for(bits: int) -> int:
     return (2 ** (bits - 1)) - 1
 
 
+# scale 存储 dtype 的相对舍入半宽（尾数位 m ⇒ |δ| ≤ 2^-(m+1)）
+_REL_HALF_ULP = {"fp16": 2.0**-11, "fp32": 2.0**-24}
+
+
+def bound_slack(bits: int, *, scale_in_fp16: bool) -> float:
+    """`|err| ≤ s/2` 这个界的**相对**放宽系数，由 scale 的**存储 dtype** 推出。
+
+    ★ 为什么容差必须**相对**、且必须算出来，而不是写死一个 1e-6：
+
+    对称 RTN 下 `c = round(w/s)`、`Ŵ = c·s`，所以 `|err| ≤ s/2` 本体是**紧**的。
+    超出只能来自浮点：`Ŵ = c·s` 这个乘积本身要舍入，而 scale 存成低精度时
+    `c` 与 `s` 还不同源：
+
+        err = w − c·s_stored = (w − c·s) − c·s·δ,  |δ| ≤ 2^-(m+1), |c| ≤ qmax
+        ⇒ 超出最多 qmax·2^-(m+1)·s = 2·qmax·2^-(m+1)·(s/2)
+
+    8-bit：fp16 scale（m=10）⇒ 界的 **12.4%**；fp32 scale（m=23）⇒ 1.5e-5。
+    两者都比原来写死的绝对 1e-6 大几个数量级 —— 所以旧代码把"fp16 scale 的已知
+    舍入"当成"scale 用错 / codes 错位"报了出来（实测**每张 W8 张量都报违反**），
+    这条检查因此完全失去判别力。
+
+    反向同样致命：极小尺度（本文件记过实测最小值 9.5e-12，s≈1e-10）时界只有
+    5e-11，比 1e-6 的绝对容差小五个数量级 —— 那时**反量化完全算错也不报警**。
+    相对容差两端都成立。
+
+    ★ 代价必须一起报：fp16 scale 下余量是 12.4%，所以本检查只能可靠地抓**粗大**
+    错位（用错组的 scale / codes 与 scale 整体错位 ⇒ 实测超出 200 倍以上界的量级），
+    抓不到"邻组 scale 只差几个百分点"这种细微错位。这是 fp16 scale 的固有
+    分辨率，不是可以调掉的参数。
+    """
+    dtype = "fp16" if scale_in_fp16 else "fp32"
+    return 1.0 + 2.0 * qmax_for(int(bits)) * _REL_HALF_ULP[dtype]
+
+
 def error_stats(
     w: Any, *, bits: int, group_size: int, symmetric: bool = True, scale_in_fp16: bool = False
 ) -> dict[str, Any]:
@@ -101,6 +135,7 @@ def error_stats(
     grouped_w = wf.reshape(out_features, n_groups, group_size)
     grouped_e = err.reshape(out_features, n_groups, group_size)
     step = scale.reshape(out_features, n_groups, 1)
+    _slack = bound_slack(bits, scale_in_fp16=scale_in_fp16)
     total_sq = float((err**2).sum())
     return {
         "bits": int(bits),
@@ -110,7 +145,10 @@ def error_stats(
         "padded_in": int(padded_in),
         "mse": float((err**2).mean()),
         "rmse": float((err**2).mean().sqrt()),
-        "rel_fro": float(err.norm() / wf.norm()),
+        # ★ 分母必须 clamp：全零权重张量下 wf.norm()==0 → 0/0 = nan，而 nan 会静默
+        #   穿过后面所有比较（nan <= x 恒 False，单调性检查会给出假的结论）。
+        #   本文件其它分母（rms / den）都加了 clamp，唯独这里漏了。
+        "rel_fro": float(err.norm() / wf.norm().clamp(min=1e-12)),
         "max_abs_err": float(err.abs().max()),
         "mean_abs_err": float(err.abs().mean()),
         "step_max": float(step.max()),
@@ -118,8 +156,11 @@ def error_stats(
         #   真正随分组变的是 step 的**分布**，所以均值才是单调性该看的量。
         "step_mean": float(step.mean()),
         "bound_max": float(step.max() / 2.0),
-        # 界必须成立：|err| ≤ s/2。留 1e-6 的相对余量给 fp32 运算。
-        "bound_violation": float((grouped_e.abs() - step / 2.0 - 1e-6).clamp(min=0.0).max()),
+        # 界必须成立：|err| ≤ (s/2)·slack。slack 由 scale 的 dtype 推出（见
+        # `bound_slack`）—— 写死 1e-6 会让 fp16 scale 的已知舍入被当成缺陷，
+        # 也会让极小尺度下的真实错位漏报。
+        "bound_slack": _slack,
+        "bound_violation": float((grouped_e.abs() - step / 2.0 * _slack).clamp(min=0.0).max()),
         "error_top1pct_share": _top_share(grouped_w, grouped_e, 0.01),
         "single_element_dominated_frac": _dominated_frac(grouped_w),
         "dynamic_range_p50": _dyn_range(grouped_w, 0.5),
@@ -226,7 +267,12 @@ def mse_monotonicity(w: Any, bits: int, groups: tuple[int, ...] = (32, 64, 128))
         mses[g] = error_stats(w, bits=bits, group_size=g)["mse"]
     ordered = list(groups)
     monotone = all(mses[a] <= mses[b] for a, b in zip(ordered, ordered[1:]))
-    ratios = [round(mses[b] / mses[a], 4) for a, b in zip(ordered, ordered[1:])]
+    # ★ mse==0 会直接 ZeroDivisionError：全零权重张量，或极小权重（本文件记过实测
+    #   最小值 9.5e-12）下 fp16 下溢成精确 0。比值在这种情况下没有意义，报 None
+    #   而不是崩 —— 0 也**不**行，那会被读成"两组一样好"。
+    ratios = [
+        round(mses[b] / mses[a], 4) if mses[a] > 0 else None for a, b in zip(ordered, ordered[1:])
+    ]
     return {
         "bits": int(bits),
         "mse_by_group": mses,
@@ -308,7 +354,11 @@ def audit_tensors(
                 "bits": int(bits),
                 "mse_by_group": mses,
                 "monotone": all(mses[a] <= mses[b] for a, b in zip(ordered, ordered[1:])),
-                "step_ratios": [round(mses[b] / mses[a], 4) for a, b in zip(ordered, ordered[1:])],
+                # 同上：mse==0 时比值无意义，报 None 而不是崩
+                "step_ratios": [
+                    round(mses[b] / mses[a], 4) if mses[a] > 0 else None
+                    for a, b in zip(ordered, ordered[1:])
+                ],
             }
         # 嵌套性与位宽无关：每张量算一次
         entry["nested"] = nested_absmax_check(w, tuple(groups))
@@ -383,10 +433,18 @@ def main(argv: list[str] | None = None) -> int:
         # 合成权重：高斯 + 一个**植入的离群通道**，这样离群统计也有东西可测。
         torch.manual_seed(0)
         tensors = {}
+        # ★ `lm_head` 必须有形状：`--synthetic --scopes lm_head` 是合法的冒烟调用
+        #   （Mac 上就是这么跑的），缺这个键会 KeyError 崩在连权重都还没造出来的时候。
+        _shapes = {
+            "attention": (2048, 2048),
+            "router": (64, 2048),
+            "experts": (2048, 1024),
+            "lm_head": (50304, 2048),
+        }
         for scope in scopes:
-            shape = {"attention": (2048, 2048), "router": (64, 2048), "experts": (2048, 1024)}[
-                scope
-            ]
+            if scope not in _shapes:
+                raise SystemExit("未知 scope %r；--synthetic 支持的：%s" % (scope, sorted(_shapes)))
+            shape = _shapes[scope]
             w = (torch.randn(*shape) * 0.02).half()
             w[:, 7] *= 40.0  # 一个输入通道离群（AWQ 的动机）
             tensors["synthetic.%s" % scope] = w

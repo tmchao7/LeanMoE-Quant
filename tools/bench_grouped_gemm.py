@@ -614,7 +614,37 @@ def main(argv: list[str] | None = None) -> int:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(result, fh, ensure_ascii=False, indent=2, default=str)
         print("\nwrote %s" % args.json, file=sys.stderr)
-    return 0 if result.get("verdict", {}).get("grouped_faster", True) else 0
+    # ★ 退出码必须能表达闸门的三种结局 —— 原来两支都返回 0，于是一个判成
+    #   "NULL：grouped 没有更快，不要接进模型（转 D-2）" 的运行在脚本层面和 PASS
+    #   无法区分，整个 Stage C 闸门形同虚设。
+    #
+    #   0 = 闸门 PASS（可以把 kernel 接进模型）
+    #   1 = 闸门 NULL（**实测**结论：grouped 没有更快）—— 是结果，不是故障，但不该继续
+    #   2 = 闸门**未评估**（没有实测带宽 / correctness 未过）—— 按硬规则 1，未测 ≠ 通过
+    verdict = result.get("verdict")
+    if verdict is None:
+        print(
+            "闸门未评估：result 里没有 verdict（缺少实测带宽 ⇒ 没有 roofline 下界，"
+            "硬规则 4）。未测不等于通过，不放行。",
+            file=sys.stderr,
+        )
+        return 2
+    if not verdict.get("correctness_ok"):
+        print(
+            "闸门未评估：correctness 未过（见 result.correctness）—— "
+            "两边算的不是同一个东西，时间对照无意义，不放行。",
+            file=sys.stderr,
+        )
+        return 2
+    if verdict.get("grouped_faster"):
+        return 0
+    print(
+        "闸门 NULL：grouped 没有更快（gather %.4f ms vs grouped %.4f ms）—— "
+        "记录这个结果，不要把 kernel 接进模型。"
+        % (verdict.get("gather_p50_ms", float("nan")), verdict.get("grouped_p50_ms", float("nan"))),
+        file=sys.stderr,
+    )
+    return 1
 
 
 if __name__ == "__main__":

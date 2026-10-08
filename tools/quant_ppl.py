@@ -112,12 +112,25 @@ def ppl_and_nll(model: Any, ids: Any, *, ctx: int) -> dict[str, Any]:
         "nll_total": total,
         "nll_per_token": total / n if n else float("nan"),
         "ppl": math.exp(total / n) if n else float("nan"),
-        "_per_token_nll": per_token,
+        # ★ 名字里有 logp 而不是 nll：这个列表装的是 log_softmax 取出来的值
+        #   （恒 ≤ 0），即 **−NLL**。旧名叫 `_per_token_nll`，于是 `paired_delta`
+        #   的差值方向被读反过一次（见那里的注释）。
+        "_per_token_logp": per_token,
     }
 
 
 def paired_delta(reference: list[float], candidate: list[float]) -> dict[str, Any]:
-    """配对差值：参考（fp16）的 NLL 减去本臂的 NLL。正 = 本臂更好，负 = 更差。"""
+    """配对差值：**正 = 本臂更差**，负 = 本臂更好。
+
+    ★ 口径（与 `EXP-p1-03` 记录 §2 逐字一致，改这里必须先改记录）：
+
+        delta_i = logp_fp16(t_i) − logp_arm(t_i) = NLL_arm(t_i) − NLL_fp16(t_i)
+
+    因为 logp = −NLL，所以 `delta > 0` 意味着**本臂的 NLL 更高**，也就是**更差**。
+    旧注释写的是「参考的 NLL 减去本臂的 NLL，正 = 本臂更好」—— 那是这个量的
+    **相反数**，会把表格里每一行读反（`w4a16_attn_g32` 的 +0.019973 配合 PPL
+    退化 +2.02%，正是"更差"）。数值本身一直是对的，错的是这段说明。
+    """
     if len(reference) != len(candidate) or not reference:
         raise ValueError(
             "配对比较要求逐 token 数量相同：%d vs %d" % (len(reference), len(candidate))
@@ -132,7 +145,11 @@ def paired_delta(reference: list[float], candidate: list[float]) -> dict[str, An
         "paired_se": se,
         "t_stat": (mean / se) if se else None,
         "n_pairs": n,
-        "note": "正 = 本臂的 NLL 更低（更好）；|t| < 2 视为不可分辨",
+        # ★ 方向：正 = 本臂 NLL 更高 = 更差（见 docstring）。旧文案写反了。
+        "note": (
+            "delta = mean(logp_fp16 − logp_arm) = mean(NLL_arm − NLL_fp16)；"
+            "正 = 本臂 NLL 更高（更差），负 = 本臂更好；|t| < 2 视为不可分辨"
+        ),
     }
 
 
@@ -267,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
             measured = ppl_and_nll(model, ids, ctx=args.ctx)
             entry.update({k: v for k, v in measured.items() if not k.startswith("_")})
             entry["paired_vs_fp16"] = paired_delta(
-                ref["_per_token_nll"], measured["_per_token_nll"]
+                ref["_per_token_logp"], measured["_per_token_logp"]
             )
         except Exception as exc:  # noqa: BLE001
             entry["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:300])

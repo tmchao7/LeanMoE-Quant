@@ -260,6 +260,12 @@ def main(argv: list[str] | None = None) -> int:
         best = min(order, key=lambda n: samples[n][r])
         winners[best] += 1
     base = "B4K256w2s3" if "B4K256w2s3" in samples else order[0]
+    # ★ 基准必须用 base 的 **p50**，不能用它的第 0 轮原始样本。
+    #   这就是 AGENTS.md §0 点名过的那个坑（E7 的 1.1927 vs 1.1911：草稿拿了
+    #   金丝雀的**首值** 3.0084 当分母，采用值是末值 3.0124）。在这里它的形态是
+    #   "单样本 vs 对方的中位数"，而且第 0 轮紧跟 capture，最容易带上残留的
+    #   warm-up / allocator 状态。D 判据（赢家必须比默认快 >5%）读的就是这一列。
+    base_p50 = _summarize(samples[base])["p50_ms"]
     rows = []
     for name in order:
         s = _summarize(samples[name])
@@ -274,9 +280,11 @@ def main(argv: list[str] | None = None) -> int:
                 "achieved_GBps": gbs,
                 "MB_per_call": mb,
                 "wins": winners[name],
+                # 两侧同为 p50：`base_p50 / p50(name) − 1`。正 = 该配置比默认快。
                 "vs_default_pct": (
-                    (100.0 * (samples[base][0] / s["p50_ms"] - 1.0)) if name != base else 0.0
+                    round(100.0 * (base_p50 / s["p50_ms"] - 1.0), 3) if name != base else 0.0
                 ),
+                "vs_default_basis": "p50 vs p50（不是首轮单样本）",
             }
         )
         rows.append((name, s["p50_ms"], s["min_ms"], us, gbs, mb, winners[name]))
