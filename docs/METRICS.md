@@ -188,7 +188,7 @@ speedup_E2E = (T_bytes_fp16 + T_host) / (T_bytes_quant + T_host)
 | G1 | **任务级精度**（MMLU 5-shot 200 题 + GSM8K 100 题，只针对已过门的 w8a16） | §1「任务级分数」 | `tools/task_accuracy.py` | **待跑**（脚本已离线写好，`--dry-run` 可验） |
 | G2 | **batch 扫描**（batch ∈ {1,2,4,8}，吞吐-延迟曲线） | §2「throughput @ batch」 | `tools/batch_sweep.py` | **待跑**；★ 单列表，禁止与 batch=1 历史数字跨轮混表 |
 | G3 | **occupancy / register 下限估计**（fused RMSNorm + grouped kernel） | §5「融合后是否引入新瓶颈」 | `tools/occupancy_probe.py` | **待跑**（ncu 不可用时的替代口径） |
-| G4 | **ncu 补测**（需 `CAP_SYS_ADMIN` 的机器：stall / occupancy / `gpu__time_duration.sum`） | §3、§5 | `docs/NCU_PLAN.md` | **换机才能做** |
+| G4 | **ncu 补测**（需 `CAP_SYS_ADMIN` 的机器：stall / occupancy / `gpu__time_duration.sum`） | §3、§5 | [docs/NCU_PLAN.md](NCU_PLAN.md) | **换机才能做**（当前 blocked，见 [NCU_EVIDENCE.md](NCU_EVIDENCE.md) §1） |
 | G5 | **PPL 写入工件**（`ppl_fp16/ppl_this/ppl_delta` 进 `result.json`） | §1「PPL」 | `tools/quant_ppl.py` | **待跑**（工具已有，写工件这一步待接） |
 
 一键执行：`scripts/run_gpu_suite.sh`（`--dry-run` 先打印完整计划，含每项的命令、

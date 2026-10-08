@@ -282,6 +282,7 @@ the V100 box, the Mac) diverge, so:
 | `configs/experiments.yaml` | the declarative matrix: the only source of hypotheses and cell ids |
 | `experiments/<EXP-ID>.md` | the authoritative record of each experiment (status, results, applicability) |
 | `docs/NCU_EVIDENCE.md` | kernel-level evidence; why ncu counters are blocked on this host and what replaced them |
+| `docs/NCU_PLAN.md` | **换机才能做**的 ncu 补测清单：要测哪些 kernel、抓哪些 counter、验收判据（当前 blocked） |
 | `docs/figures/` | the three charts, regenerated from artifacts by `python -m tools.make_figures` |
 | `docs/HANDOFF_P2_FUSION.md` | **historical** Phase-2 handoff (banner at the top says so) |
 | `EXPERIMENTS.md` | mandatory record format and metric definitions |

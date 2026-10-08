@@ -323,3 +323,31 @@ def test_embedded_python_in_scripts_compiles():
                 raise AssertionError("%s 的嵌入 Python 语法错误: %s" % (name, exc)) from exc
             checked += 1
     assert checked > 0, "没找到任何嵌入的 Python（正则是不是失效了？）"
+
+
+def test_run_gpu_suite_dry_run_prints_the_full_plan():
+    """★ 上机套件的 `--dry-run` 必须打印**完整**计划（含每步的命令与验收阈值）。
+
+    这条是验收标准之一：拿到 GPU 之前要能在离线环境里确认"上机要跑什么、
+    跑多久、多少显存、什么算通过、失败了怎么回滚"。缺任何一步都会让真机
+    时间花在试错上。
+    """
+    path = os.path.join(SCRIPTS, "run_gpu_suite.sh")
+    assert os.path.exists(path), "scripts/run_gpu_suite.sh 不存在"
+    proc = subprocess.run(["bash", path, "--dry-run"], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    out = proc.stdout
+    for step in ("gate", "ppl", "task_accuracy", "batch_sweep", "occupancy"):
+        assert "step: %s" % step in out, "计划里缺步骤 %s" % step
+    for kw in ("预计时长", "显存", "验收", "回滚", "金丝雀", "跨轮"):
+        assert kw in out, "计划里缺关键信息：%s" % kw
+    # 硬规则必须出现在计划里
+    assert "混表" in out or "跨轮" in out, "必须提醒 batch 曲线不得跨轮混表"
+
+
+def test_run_gpu_suite_refuses_to_run_without_a_model():
+    """没有 --model 就不能开始跑 —— 否则会带着空模型路径上机。"""
+    path = os.path.join(SCRIPTS, "run_gpu_suite.sh")
+    proc = subprocess.run(["bash", path], capture_output=True, text=True, timeout=60)
+    assert proc.returncode != 0
+    assert "--model" in (proc.stderr + proc.stdout)
