@@ -12,7 +12,11 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from benchmarks.schema import PPL_NOT_MEASURED_NOTE, empty_result
+from benchmarks.schema import (
+    PPL_NOT_MEASURED_NOTE,
+    SCOPE_NOT_APPLICABLE,
+    empty_result,
+)
 from benchmarks.timing import summarize
 
 VALID_EXECUTIONS = ("eager", "cudagraph")
@@ -213,7 +217,8 @@ def blocked_result(
     }
     payload["applicability"] = {
         "applies_to": "not established; capture/replay did not complete",
-        "does_not_apply_to": "quantized execution, paged attention, other GPUs",
+        "does_not_apply_to": "%s；%s"
+        % ("quantized execution, paged attention, other GPUs", SCOPE_NOT_APPLICABLE),
         "why": "this is a diagnostic feasibility result, not a performance result",
     }
     payload["_cudagraph"] = {

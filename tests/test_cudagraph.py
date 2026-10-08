@@ -104,6 +104,31 @@ def test_correctness_failure_result_keeps_performance_unmeasured():
     assert validate_result(payload) == []
 
 
+def test_every_payload_states_that_service_performance_is_out_of_scope():
+    """★ 适用范围必须**写进每一份 result.json**，不能只写在 README 里。
+
+    本项目是 batch=1 单流测量：无并发度、无 req/s、无吞吐-延迟曲线。如果这句话
+    只活在 README，那么任何一份被单独引用出去的 payload 都会看起来像"服务性能"。
+    """
+    from benchmarks.cudagraph import blocked_result, failed_result
+    from benchmarks.schema import SCOPE_NOT_APPLICABLE
+
+    assert "batch=1" in SCOPE_NOT_APPLICABLE and "req/s" in SCOPE_NOT_APPLICABLE
+
+    cfg = {"ctx": 1024, "batch": 1, "max_new_tokens": 32, "warmup": 5, "timed": 20}
+    blocked = blocked_result(
+        exp_id="EXP-scope-01", config=cfg, failure={"stage": "capture", "type": "X", "message": "m"}
+    )
+    failed = failed_result(
+        exp_id="EXP-scope-02",
+        config=cfg,
+        correctness={"kl": 0.1, "top1_agreement": 0.5},
+        note="synthetic",
+    )
+    for payload in (blocked, failed):
+        assert "batch=1" in payload["applicability"]["does_not_apply_to"], payload["exp_id"]
+
+
 def test_graph_correctness_gate_requires_kl_and_top1_and_sequence():
     from benchmarks.cudagraph import graph_correctness_passed
 

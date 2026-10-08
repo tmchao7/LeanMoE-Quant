@@ -44,7 +44,7 @@ from benchmarks.cudagraph import (
     normalize_execution,
 )
 from benchmarks.harness import is_done, write_result
-from benchmarks.schema import PPL_NOT_MEASURED_NOTE, empty_result
+from benchmarks.schema import PPL_NOT_MEASURED_NOTE, SCOPE_NOT_APPLICABLE, empty_result
 from benchmarks.timing import summarize
 
 PROBE_PATH = "results/machine_probe.json"
@@ -1775,7 +1775,10 @@ def build_payload(
             cfg.get("ctx"),
             payload["hardware"].get("compute_capability"),
         )
-        _not_applies = "量化配置（见 EXP-p1-*）、batch>1、其它架构"
+        _not_applies = "%s；%s" % (
+            "量化配置（见 EXP-p1-*）、batch>1、其它架构",
+            SCOPE_NOT_APPLICABLE,
+        )
     else:
         _arm = res.get("dequant_arm") or cfg.get("dequant")
         _notes = (
@@ -1800,7 +1803,10 @@ def build_payload(
             cfg.get("ctx"),
             payload["hardware"].get("compute_capability"),
         )
-        _not_applies = "其它 group_size / ctx / targets（门没有实测）、batch>1、其它架构"
+        _not_applies = "%s；%s" % (
+            "其它 group_size / ctx / targets（门没有实测）、batch>1、其它架构",
+            SCOPE_NOT_APPLICABLE,
+        )
     payload["verdict"] = {
         "verdict": "PASS" if _gate_pass else "FAIL",
         "outcome": "supported" if _gate_pass else "refuted",
@@ -2060,7 +2066,7 @@ def build_cudagraph_payload(
         )
         _not_applies = (
             "其它 group_size / ctx / targets（门没有实测）、batch>1、其它架构、"
-            "PagedAttention；dequant 占比未测（graph 臂需要两张图交错）"
+            "PagedAttention；dequant 占比未测（graph 臂需要两张图交错）；%s" % SCOPE_NOT_APPLICABLE
         )
     else:
         _notes = "fp16 CUDA Graph feasibility and correctness gate; no quantization conclusion."
@@ -2068,7 +2074,10 @@ def build_cudagraph_payload(
             cfg.get("ctx"),
             payload["hardware"].get("compute_capability"),
         )
-        _not_applies = "quantized execution、PagedAttention、ctx>4096、other GPUs"
+        _not_applies = "%s；%s" % (
+            "quantized execution、PagedAttention、ctx>4096、other GPUs",
+            SCOPE_NOT_APPLICABLE,
+        )
     payload["verdict"] = {
         "verdict": "PASS" if gate_pass else "FAIL",
         "outcome": "supported" if gate_pass else "refuted",

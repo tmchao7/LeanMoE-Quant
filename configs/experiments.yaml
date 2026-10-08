@@ -342,6 +342,19 @@ experiments:
     desc: "FP8 权重+激活（W8A8-FP8）：位宽阶梯里 V100 拿不到的那一档"
     hypothesis: "FP8 的字节收益与 INT8 同级，但精度更好或相当"
     refutation_signal: "FP8 精度明显差于 INT8 → 该档对本模型无价值"
+    # ★ 上机前必须读懂这条前置条件，否则这格的预期收益是写错的：
+    #   本仓库现有的 kernel（grouped MoE / dense dequant-GEMM）**刻意不用 tl.dot**
+    #   —— M=1 是 batched GEMV，用 tl.dot 要把 M 补到 16，会多读 16/K 倍权重，
+    #   在一个纯带宽算子上正好是反优化（见 _grouped_triton.py 模块 docstring）。
+    #   FP8（以及 MXFP4）的价值**主要来自 Tensor Core**，走 tl.sum 的路径兑现不了：
+    #   只降字节、不换计算路径，预期收益就只剩"字节下降"那一部分（≈ E7 已量到的
+    #   1.19x 量级），而不是"FP8 算力"那一部分。
+    #   ⇒ 要让这条假设成立，得先切到 tl.dot 路径并重做 M=1 的 tile 设计。
+    note: >-
+      前置条件：要兑现 FP8/MXFP4 的**算力**收益，必须先切换到 tl.dot 路径并重做
+      M=1 的 tile 设计。现有 kernel 走 tl.sum（M=1 带宽受限下的正确取舍），
+      因此本格只能测到"字节下降"那部分收益，测不到 Tensor Core 那部分。
+      不改路径就跑，得到的数字不能用来支持"FP8 更快"这一类结论。
     factors:
       bit_width: ["w8a8-fp8"]
     metrics: ["kl", "per_token_p50", "bw_attainment"]
@@ -353,6 +366,15 @@ experiments:
     desc: "MXFP4/NVFP8 block-scale：解释'FP4 在 GEMM 赢 4x、在 token 输 3-4x'"
     hypothesis: "FP4 的 GEMM 优势被反量化与 host 开销吃掉，端到端收益远小于 4x（E7 的机制）"
     refutation_signal: "端到端也拿到接近 4x → 截断机制不成立"
+    # ★ 同上（EXP-p3-01 那条 note 的完整理由写在那里）：MXFP4 的 block-scale 更是
+    #   只在 Tensor Core 路径上才有意义。现有 kernel 走 tl.sum，跑出来的是
+    #   "字节 ÷4、时间只 ÷~2" 的**带宽侧**结果，不能用来判断"FP4 的 GEMM 优势"
+    #   是否被吃掉 —— 因为那个优势从一开始就没被启用。
+    #   ⇒ 上机前要么先切 tl.dot，要么把这格的结论限定成"带宽侧的字节-时间关系"。
+    note: >-
+      前置条件同 EXP-p3-01：MXFP4 block-scale 只在 tl.dot / Tensor Core 路径上
+      有意义。现有 tl.sum 路径下，本格测到的是带宽侧的"字节-时间"关系，
+      **不是**"FP4 的 GEMM 优势是否被吃掉"。要测后者必须先切 tl.dot。
     factors:
       bit_width: ["mxfp4"]
       dequant: ["separate", "fused"]

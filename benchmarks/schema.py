@@ -151,6 +151,18 @@ RESULT_SCHEMA: dict[str, dict[str, tuple[type, ...]]] = {
     },
 }
 
+# ★ 适用范围的**固定后缀**：本项目是 batch=1 单流课题，所有格子都没有并发度、
+#   没有 req/s、没有吞吐-延迟曲线。这句话必须出现在**每一份** result.json 的
+#   applicability 里，而不是只写在 README 里 —— 否则任何一个单独被引用出去的
+#   payload 都会看起来像"服务性能"。
+#   放在 schema 而不是 runner，是因为 `benchmarks.cudagraph` 也要用它，而 runner
+#   单向依赖 cudagraph（放 runner 会造成循环 import）。
+SCOPE_NOT_APPLICABLE = (
+    "服务/并发场景（单请求 batch=1 单流测量：无并发度、无 req/s、无吞吐-延迟曲线）—— "
+    "本项目的数字不能用来推断线上服务能力；吞吐随 batch 的衰减未测"
+    "（见 docs/METRICS.md §6 G2）"
+)
+
 REQUIRED_TOP = (
     "schema_version",
     "exp_id",
