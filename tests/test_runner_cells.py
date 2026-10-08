@@ -984,9 +984,15 @@ def test_fused_rmsnorm_is_refused_before_loading_but_hf_is_not(capsys, monkeypat
     注入"triton 不可用"，这样断言与机器无关（服务器上有 triton，直接跑会真加载模型）。
     第二段证明 `--rmsnorm hf` **不撞**这条 —— 它是显式退路，不是被这条拒绝挡住的。
     """
+    import torch
+
     import lemoq.kernels.rmsnorm as rmsnorm
 
     monkeypatch.setattr(rmsnorm, "unavailable_reason", lambda: "triton 不可用（测试注入）")
+    # ★ 第二段（`--rmsnorm hf`）在有 GPU 的机器上会**真的加载模型跑这一格**（实测：
+    #   服务器上 3 分钟的模型加载 + 占用 GPU）。把 CUDA 判成不可用，"走到哪一道门"就
+    #   与机器无关了 —— 这也是本文件里其它拒绝测试的做法。
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     base = [
         "--exp",
         "EXP-p4c-01-in-graph-attention",
@@ -1008,7 +1014,7 @@ def test_fused_rmsnorm_is_refused_before_loading_but_hf_is_not(capsys, monkeypat
     rc_hf = runner_main([*base, "--rmsnorm", "hf"])
     out_hf = capsys.readouterr()
     assert "rmsnorm" not in out_hf.err, out_hf.err
-    assert rc_hf == 2, rc_hf  # Mac 上没有 CUDA：仍会失败，但**不是因为 norm**
+    assert rc_hf == 2 and "requires CUDA" in out_hf.err, (rc_hf, out_hf.err)
 
 
 def test_dry_run_surfaces_the_rmsnorm_implementation(capsys):
