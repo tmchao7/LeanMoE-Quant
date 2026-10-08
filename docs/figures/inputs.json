@@ -1,0 +1,602 @@
+{
+  "generated_by": "tools/make_figures.py",
+  "caveat": "每个输入都带 source；source 里出现『记录正文，转录』的项是记录里量过但没有独立 payload 的数（本轮只有 EXP-p4c-02 §5.6 的融合 norm 全步 A/B）。",
+  "inputs": {
+    "baseline_fp16_eager_1024": {
+      "value": 82.6436,
+      "source": "results/EXP-p0-02-baseline-fp16__ctx=1024/result.json → latency.per_token_p50_ms",
+      "note": "EXP-p0-02 的『记录采用』值（P2j 归档/恢复后的规范 payload）"
+    },
+    "byte_floor_1024": {
+      "value": 1.5982,
+      "source": "results/EXP-p0-02-baseline-fp16__ctx=1024/result.json → attainment.floor_t_ms",
+      "note": "字节下限 [T] ÷ 实测可达带宽"
+    },
+    "fp16_cudagraph_1024": {
+      "value": 3.5881,
+      "source": "results/EXP-p4b-01-truncation__bit_width=fp16_execution=cudagraph_ctx=1024/result.json → latency.per_token_p50_ms",
+      "note": null
+    },
+    "fp16_cudagraph_4096": {
+      "value": 6.8269,
+      "source": "results/EXP-p4b-01-truncation__bit_width=fp16_execution=cudagraph_ctx=4096/result.json → latency.per_token_p50_ms",
+      "note": null
+    },
+    "w8a16_cudagraph_1024": {
+      "value": 3.0124,
+      "source": "results/EXP-p4b-01-truncation__bit_width=w8a16_execution=cudagraph_ctx=1024/result.json → latency.per_token_p50_ms",
+      "note": null
+    },
+    "w8a16_cudagraph_4096": {
+      "value": 6.2702,
+      "source": "results/EXP-p4b-01-truncation__bit_width=w8a16_execution=cudagraph_ctx=4096/result.json → latency.per_token_p50_ms",
+      "note": null
+    },
+    "fp16_eager_1024": {
+      "value": 9.8841,
+      "source": "results/EXP-p4b-01-truncation__bit_width=fp16_execution=eager_ctx=1024/result.json → latency.per_token_p50_ms",
+      "note": "E7 同一轮的 eager 臂（P2j 刷新 VOID，保留 pre-P2i 规范值）"
+    },
+    "p4c_fp16_sdpa_1024": {
+      "value": 3.5885,
+      "source": "results/EXP-p4c-01-run/v3_canaryB_fp16_sdpa_1024_result.json → latency.per_token_p50_ms",
+      "note": "v3 金丝雀 B（同轮 fp16×sdpa 参照）"
+    },
+    "p4c_fp16_sdpa_4096": {
+      "value": 6.8243,
+      "source": "results/EXP-p4c-01-run/v3_fp16_sdpa_4096_result.json → latency.per_token_p50_ms",
+      "note": null
+    },
+    "p4c_fp16_kernel_1024": {
+      "value": 2.5079,
+      "source": "results/EXP-p4c-01-run/v3_fp16_kernel_1024_result.json → latency.per_token_p50_ms",
+      "note": null
+    },
+    "p4c_fp16_kernel_4096": {
+      "value": 2.7559,
+      "source": "results/EXP-p4c-01-run/v3_fp16_kernel_4096_result.json → latency.per_token_p50_ms",
+      "note": null
+    },
+    "p4c_w8a16_kernel_1024": {
+      "value": 1.9241,
+      "source": "results/EXP-p4c-01-run/v3_w8a16_kernel_1024_result.json → latency.per_token_p50_ms",
+      "note": "本项目延迟最低的一格"
+    },
+    "norm_hf_step_ms": {
+      "value": 2.4143,
+      "source": "experiments/EXP-p4c-02-elementwise-tail.md（记录正文，转录）",
+      "note": "§5.6 三臂 A/B 的 HF 原链"
+    },
+    "norm_ours_step_ms": {
+      "value": 1.9537,
+      "source": "experiments/EXP-p4c-02-elementwise-tail.md（记录正文，转录）",
+      "note": "§5.6 三臂 A/B 的自研融合 kernel（15/15 轮获胜）"
+    },
+    "kernel_attainment": {
+      "value": {
+        "grouped_fp16_layer": {
+          "subject": "grouped_fp16_layer",
+          "label": "grouped_fp16_layer",
+          "kernel": "-（整层调用）",
+          "note": "grouped MoE **整层**一次调用（fp16）：4 个 kernel 的合计字节与端到端时间",
+          "analytical_bytes": {
+            "read": 100663296,
+            "write": 0
+          },
+          "working_set_mb": 100.7,
+          "l2_mb": 96,
+          "working_set_fits_l2": false,
+          "meta": {
+            "impl": "grouped_moe",
+            "bits": 16,
+            "group_size": null,
+            "expert_ids": "0..7（固定）",
+            "weights": "gate_up (E,2F,H) + down (E,H,F) 单层",
+            "scope": "layer",
+            "launched_kernels": "整层调用（gate_up_act + act_combine + down_sum [+ out_reduce]）",
+            "bytes_note": "top_k × 对应权重元素数 × 2 B（fp16）"
+          },
+          "timing": {
+            "warm_batch": {
+              "n": 5,
+              "p50_ms": 0.068717,
+              "min_ms": 0.067322,
+              "max_ms": 0.070916,
+              "mad_ms": 0.001244,
+              "samples_ms": [
+                0.06996,
+                0.06732,
+                0.07092,
+                0.06872,
+                0.06749
+              ]
+            },
+            "cold_single": {
+              "n": 15,
+              "p50_ms": 0.098304,
+              "min_ms": 0.096256,
+              "max_ms": 0.100352,
+              "mad_ms": 3.2e-05,
+              "samples_ms": [
+                0.0983,
+                0.09626,
+                0.10035,
+                0.0983,
+                0.09834,
+                0.10035,
+                0.09626,
+                0.0983,
+                0.09834,
+                0.09834,
+                0.0983,
+                0.09629,
+                0.09834,
+                0.0983,
+                0.0983
+              ]
+            },
+            "event_floor_ms": 0.005472,
+            "flush_mb": 256,
+            "method": "warm = 事件包住每轮 50 次调用；cold = 每次调用前 memset 256 MB 冲 L2 后单独计时",
+            "timestamp": "2026-10-08T11:09:53"
+          },
+          "achieved_gbps_cold_best": 1108.8,
+          "achieved_gbps_cold_p50": 1084.4,
+          "achieved_gbps_warm_p50": 1464.9,
+          "measured_achievable_gbps": 1561.9,
+          "attainment_pct_cold_best": 71.0,
+          "attainment_pct_cold_p50": 69.4,
+          "attainment_pct_warm_p50": 93.8,
+          "evidence_kind": "kernel 级带宽达成率 = 解析字节 / (cold 计时 − 事件地板) / 实测可达带宽；**不是** ncu 计数器的 dram__bytes"
+        },
+        "grouped_w8a16_layer": {
+          "subject": "grouped_w8a16_layer",
+          "label": "grouped_w8a16_layer",
+          "kernel": "-（整层调用）",
+          "note": "同上，8-bit packed 权重（不物化 fp16）",
+          "analytical_bytes": {
+            "read": 51118080,
+            "write": 0
+          },
+          "working_set_mb": 51.1,
+          "l2_mb": 96,
+          "working_set_fits_l2": true,
+          "meta": {
+            "impl": "grouped_moe",
+            "bits": 8,
+            "group_size": 128,
+            "expert_ids": "0..7（固定）",
+            "weights": "gate_up (E,2F,H) + down (E,H,F) 单层",
+            "scope": "layer",
+            "launched_kernels": "整层调用（gate_up_act + act_combine + down_sum [+ out_reduce]）",
+            "bytes_note": "top_k 个专家的 packed codes（8-bit）+ per-group fp16 scale"
+          },
+          "timing": {
+            "warm_batch": {
+              "n": 5,
+              "p50_ms": 0.076895,
+              "min_ms": 0.076112,
+              "max_ms": 0.079089,
+              "mad_ms": 0.000541,
+              "samples_ms": [
+                0.07909,
+                0.07713,
+                0.07635,
+                0.07611,
+                0.0769
+              ]
+            },
+            "cold_single": {
+              "n": 15,
+              "p50_ms": 0.065536,
+              "min_ms": 0.063488,
+              "max_ms": 0.065568,
+              "mad_ms": 3.2e-05,
+              "samples_ms": [
+                0.06349,
+                0.06554,
+                0.06352,
+                0.06554,
+                0.06557,
+                0.06554,
+                0.06557,
+                0.06554,
+                0.06554,
+                0.06352,
+                0.06349,
+                0.06349,
+                0.06451,
+                0.06554,
+                0.06554
+              ]
+            },
+            "event_floor_ms": 0.005024,
+            "flush_mb": 256,
+            "method": "warm = 事件包住每轮 50 次调用；cold = 每次调用前 memset 256 MB 冲 L2 后单独计时",
+            "timestamp": "2026-10-08T11:09:55"
+          },
+          "achieved_gbps_cold_best": 874.4,
+          "achieved_gbps_cold_p50": 844.8,
+          "achieved_gbps_warm_p50": 664.8,
+          "measured_achievable_gbps": 1561.9,
+          "attainment_pct_cold_best": 56.0,
+          "attainment_pct_cold_p50": 54.1,
+          "attainment_pct_warm_p50": 42.6,
+          "evidence_kind": "kernel 级带宽达成率 = 解析字节 / (cold 计时 − 事件地板) / 实测可达带宽；**不是** ncu 计数器的 dram__bytes"
+        },
+        "grouped_w4a16_layer": {
+          "subject": "grouped_w4a16_layer",
+          "label": "grouped_w4a16_layer",
+          "kernel": "-（整层调用）",
+          "note": "同上，4-bit packed 权重",
+          "analytical_bytes": {
+            "read": 25952256,
+            "write": 0
+          },
+          "working_set_mb": 26.0,
+          "l2_mb": 96,
+          "working_set_fits_l2": true,
+          "meta": {
+            "impl": "grouped_moe",
+            "bits": 4,
+            "group_size": 128,
+            "expert_ids": "0..7（固定）",
+            "weights": "gate_up (E,2F,H) + down (E,H,F) 单层",
+            "scope": "layer",
+            "launched_kernels": "整层调用（gate_up_act + act_combine + down_sum [+ out_reduce]）",
+            "bytes_note": "top_k 个专家的 packed codes（4-bit）+ per-group fp16 scale"
+          },
+          "timing": {
+            "warm_batch": {
+              "n": 5,
+              "p50_ms": 0.076627,
+              "min_ms": 0.076047,
+              "max_ms": 0.078383,
+              "mad_ms": 0.000299,
+              "samples_ms": [
+                0.07838,
+                0.07693,
+                0.07663,
+                0.07605,
+                0.07641
+              ]
+            },
+            "cold_single": {
+              "n": 15,
+              "p50_ms": 0.043008,
+              "min_ms": 0.042976,
+              "max_ms": 0.044064,
+              "mad_ms": 0.0,
+              "samples_ms": [
+                0.04301,
+                0.04403,
+                0.04301,
+                0.04406,
+                0.04301,
+                0.04301,
+                0.04403,
+                0.04301,
+                0.04301,
+                0.04301,
+                0.04298,
+                0.04301,
+                0.04298,
+                0.04301,
+                0.04403
+              ]
+            },
+            "event_floor_ms": 0.005408,
+            "flush_mb": 256,
+            "method": "warm = 事件包住每轮 50 次调用；cold = 每次调用前 memset 256 MB 冲 L2 后单独计时",
+            "timestamp": "2026-10-08T11:09:58"
+          },
+          "achieved_gbps_cold_best": 690.8,
+          "achieved_gbps_cold_p50": 690.2,
+          "achieved_gbps_warm_p50": 338.7,
+          "measured_achievable_gbps": 1561.9,
+          "attainment_pct_cold_best": 44.2,
+          "attainment_pct_cold_p50": 44.2,
+          "attainment_pct_warm_p50": 21.7,
+          "evidence_kind": "kernel 级带宽达成率 = 解析字节 / (cold 计时 − 事件地板) / 实测可达带宽；**不是** ncu 计数器的 dram__bytes"
+        },
+        "dequant_lm_head_w8a16": {
+          "subject": "dequant_lm_head_w8a16",
+          "label": "dequant_lm_head_w8a16",
+          "kernel": "_dequant_gemm_kernel",
+          "note": "dense 融合反量化 GEMM，形状取 lm_head（单次调用字节量最大的 dense 层）",
+          "analytical_bytes": {
+            "read": 104636416,
+            "write": 100608
+          },
+          "working_set_mb": 104.7,
+          "l2_mb": 96,
+          "working_set_fits_l2": false,
+          "meta": {
+            "impl": "dequant_gemm_fused",
+            "bits": 8,
+            "group_size": 128,
+            "shape": "(M=1, K=2048) x (N=50304, K=2048)",
+            "bytes_note": "N·K int8 + N·(K/g)·2 B scale + M·K·2 B 激活；写 N·2 B"
+          },
+          "timing": {
+            "warm_batch": {
+              "n": 5,
+              "p50_ms": 0.028269,
+              "min_ms": 0.028211,
+              "max_ms": 0.030324,
+              "mad_ms": 1e-05,
+              "samples_ms": [
+                0.03032,
+                0.02821,
+                0.02827,
+                0.02827,
+                0.02826
+              ]
+            },
+            "cold_single": {
+              "n": 15,
+              "p50_ms": 0.077824,
+              "min_ms": 0.075776,
+              "max_ms": 0.083968,
+              "mad_ms": 0.002016,
+              "samples_ms": [
+                0.08397,
+                0.07782,
+                0.07782,
+                0.08192,
+                0.07581,
+                0.07782,
+                0.08189,
+                0.07782,
+                0.08192,
+                0.07782,
+                0.07987,
+                0.07581,
+                0.07987,
+                0.07578,
+                0.07782
+              ]
+            },
+            "event_floor_ms": 0.00512,
+            "flush_mb": 256,
+            "method": "warm = 事件包住每轮 50 次调用；cold = 每次调用前 memset 256 MB 冲 L2 后单独计时",
+            "timestamp": "2026-10-08T11:09:58"
+          },
+          "achieved_gbps_cold_best": 1482.4,
+          "achieved_gbps_cold_p50": 1440.6,
+          "achieved_gbps_warm_p50": 3705.0,
+          "measured_achievable_gbps": 1561.9,
+          "attainment_pct_cold_best": 94.9,
+          "attainment_pct_cold_p50": 92.2,
+          "attainment_pct_warm_p50": 237.2,
+          "evidence_kind": "kernel 级带宽达成率 = 解析字节 / (cold 计时 − 事件地板) / 实测可达带宽；**不是** ncu 计数器的 dram__bytes"
+        },
+        "attn_split_kv_1024": {
+          "subject": "attn_split_kv_1024",
+          "label": "attn_split_kv_1024",
+          "kernel": "_attn_split_kernel",
+          "note": "split-KV decode attention，ctx=1024",
+          "analytical_bytes": {
+            "read": 8392704,
+            "write": 4096
+          },
+          "working_set_mb": 8.4,
+          "l2_mb": 96,
+          "working_set_fits_l2": true,
+          "meta": {
+            "impl": "attn_decode (split-KV)",
+            "ctx": 1024,
+            "shape": "q (1,16,1,128), k/v (1,16,1024,128)",
+            "bytes_note": "读整段 k+v（split kernel 各 split 读自己那一段）+ q；写 partials 与输出",
+            "note": "partials 的写（num_splits·H·D·3）与 combine kernel 不在本条内"
+          },
+          "timing": {
+            "warm_batch": {
+              "n": 5,
+              "p50_ms": 0.065774,
+              "min_ms": 0.065554,
+              "max_ms": 0.067789,
+              "mad_ms": 0.000127,
+              "samples_ms": [
+                0.06779,
+                0.06576,
+                0.06577,
+                0.06555,
+                0.0659
+              ]
+            },
+            "cold_single": {
+              "n": 15,
+              "p50_ms": 0.014336,
+              "min_ms": 0.014304,
+              "max_ms": 0.014368,
+              "mad_ms": 0.0,
+              "samples_ms": [
+                0.01434,
+                0.01437,
+                0.01434,
+                0.0143,
+                0.01434,
+                0.0143,
+                0.01434,
+                0.01434,
+                0.01434,
+                0.01434,
+                0.01434,
+                0.01434,
+                0.01437,
+                0.01434,
+                0.01434
+              ]
+            },
+            "event_floor_ms": 0.005088,
+            "flush_mb": 256,
+            "method": "warm = 事件包住每轮 50 次调用；cold = 每次调用前 memset 256 MB 冲 L2 后单独计时",
+            "timestamp": "2026-10-08T11:09:58"
+          },
+          "achieved_gbps_cold_best": 911.1,
+          "achieved_gbps_cold_p50": 908.0,
+          "achieved_gbps_warm_p50": 127.7,
+          "measured_achievable_gbps": 1561.9,
+          "attainment_pct_cold_best": 58.3,
+          "attainment_pct_cold_p50": 58.1,
+          "attainment_pct_warm_p50": 8.2,
+          "evidence_kind": "kernel 级带宽达成率 = 解析字节 / (cold 计时 − 事件地板) / 实测可达带宽；**不是** ncu 计数器的 dram__bytes"
+        },
+        "rmsnorm_h2048": {
+          "subject": "rmsnorm_h2048",
+          "label": "rmsnorm_h2048",
+          "kernel": "_rms_norm_kernel",
+          "note": "自研融合 RMSNorm，H=2048（每层 4 个 norm 里的 input/post_attention）",
+          "analytical_bytes": {
+            "read": 8192,
+            "write": 4096
+          },
+          "working_set_mb": 0.0,
+          "l2_mb": 96,
+          "working_set_fits_l2": true,
+          "meta": {
+            "impl": "rms_norm_fused",
+            "shape": "(M=1, H=2048)",
+            "bytes_note": "读 M·H·2 B（x）+ H·2 B（weight）；写 M·H·2 B",
+            "note": "单次调用只有 8 KB 流量 ⇒ 预期它是**延迟受限**的。它的收益来自把 7 个 kernel 变成 1 个（EXP-p4c-02 §5.6：994→539 kernel/步），不是来自字节 —— 本表就是这句话的证据。"
+          },
+          "timing": {
+            "warm_batch": {
+              "n": 5,
+              "p50_ms": 0.017712,
+              "min_ms": 0.017618,
+              "max_ms": 0.019101,
+              "mad_ms": 9.4e-05,
+              "samples_ms": [
+                0.01866,
+                0.01771,
+                0.01762,
+                0.01769,
+                0.0191
+              ]
+            },
+            "cold_single": {
+              "n": 15,
+              "p50_ms": 0.006144,
+              "min_ms": 0.004096,
+              "max_ms": 0.006144,
+              "mad_ms": 0.0,
+              "samples_ms": [
+                0.00614,
+                0.00614,
+                0.00413,
+                0.00614,
+                0.0041,
+                0.00614,
+                0.0041,
+                0.00614,
+                0.00614,
+                0.00614,
+                0.0041,
+                0.00614,
+                0.00614,
+                0.00614,
+                0.0041
+              ]
+            },
+            "event_floor_ms": 0.004992,
+            "flush_mb": 256,
+            "method": "warm = 事件包住每轮 50 次调用；cold = 每次调用前 memset 256 MB 冲 L2 后单独计时",
+            "timestamp": "2026-10-08T11:09:58"
+          },
+          "achieved_gbps_cold_best": null,
+          "achieved_gbps_cold_p50": 10.7,
+          "achieved_gbps_warm_p50": 0.7,
+          "measured_achievable_gbps": 1561.9,
+          "attainment_pct_cold_best": null,
+          "attainment_pct_cold_p50": 0.7,
+          "attainment_pct_warm_p50": 0.0,
+          "evidence_kind": "kernel 级带宽达成率 = 解析字节 / (cold 计时 − 事件地板) / 实测可达带宽；**不是** ncu 计数器的 dram__bytes"
+        },
+        "canary:grouped_fp16_layer": {
+          "subject": "grouped_fp16_layer",
+          "label": "canary:grouped_fp16_layer",
+          "kernel": "-（整层调用）",
+          "note": "grouped MoE **整层**一次调用（fp16）：4 个 kernel 的合计字节与端到端时间",
+          "analytical_bytes": {
+            "read": 100663296,
+            "write": 0
+          },
+          "working_set_mb": 100.7,
+          "l2_mb": 96,
+          "working_set_fits_l2": false,
+          "meta": {
+            "impl": "grouped_moe",
+            "bits": 16,
+            "group_size": null,
+            "expert_ids": "0..7（固定）",
+            "weights": "gate_up (E,2F,H) + down (E,H,F) 单层",
+            "scope": "layer",
+            "launched_kernels": "整层调用（gate_up_act + act_combine + down_sum [+ out_reduce]）",
+            "bytes_note": "top_k × 对应权重元素数 × 2 B（fp16）"
+          },
+          "timing": {
+            "warm_batch": {
+              "n": 5,
+              "p50_ms": 0.063985,
+              "min_ms": 0.063695,
+              "max_ms": 0.065597,
+              "mad_ms": 0.00029,
+              "samples_ms": [
+                0.0656,
+                0.0637,
+                0.06399,
+                0.06381,
+                0.06479
+              ]
+            },
+            "cold_single": {
+              "n": 15,
+              "p50_ms": 0.098304,
+              "min_ms": 0.098272,
+              "max_ms": 0.100352,
+              "mad_ms": 0.0,
+              "samples_ms": [
+                0.0983,
+                0.0983,
+                0.09827,
+                0.0983,
+                0.10035,
+                0.0983,
+                0.0983,
+                0.0983,
+                0.0983,
+                0.0983,
+                0.0983,
+                0.0983,
+                0.09827,
+                0.09834,
+                0.10032
+              ]
+            },
+            "event_floor_ms": 0.005568,
+            "flush_mb": 256,
+            "method": "warm = 事件包住每轮 50 次调用；cold = 每次调用前 memset 256 MB 冲 L2 后单独计时",
+            "timestamp": "2026-10-08T11:10:01"
+          },
+          "achieved_gbps_cold_best": 1085.9,
+          "achieved_gbps_cold_p50": 1085.5,
+          "achieved_gbps_warm_p50": 1573.2,
+          "measured_achievable_gbps": 1561.9,
+          "attainment_pct_cold_best": 69.5,
+          "attainment_pct_cold_p50": 69.5,
+          "attainment_pct_warm_p50": 100.7,
+          "evidence_kind": "kernel 级带宽达成率 = 解析字节 / (cold 计时 − 事件地板) / 实测可达带宽；**不是** ncu 计数器的 dram__bytes"
+        }
+      },
+      "source": "results/ncu_evidence/isolated.json → subjects",
+      "note": "cold（每次计时前 memset 256 MB 冲 L2）− 事件地板"
+    },
+    "measured_bw_gbps": {
+      "value": 1561.9,
+      "source": "results/ncu_evidence/isolated.json → measured_achievable_gbps",
+      "note": null
+    }
+  }
+}
