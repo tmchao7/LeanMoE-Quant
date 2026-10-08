@@ -10,13 +10,17 @@ settled — do not re-derive them and do not re-run their cells:
 - **E2 (`EXP-p2-01`) — `refuted`.** Fusing the dequant into the GEMV is *not* the 1.3–2× the
   matrix predicted: in the eager cells the fused arm is **5% slower** (`host_share` 71.7%,
   ~19k kernels/step). Isolated the fused kernel is 1.21× cheaper per call — Python/launch eats it.
-- **E7 (`EXP-p4b-01`) — judged.** ★ The numbers below are **pre-P2i** (measured with HF's
-  RMSNorm; the norm swap changes every absolute ms — see §4 P2j). The truncation is real and
-  **only the fused arm cashes it in**:
-  the same `w8a16` config goes `speedup_eager` **~0.78 → speedup_cudagraph 1.170** (ctx=1024;
-  → 1.084 at 4096) while `host_share` drops 77.5% → 1.6%; the separate arm does not move
-  (0.7674 / 0.8530) even after the kernel fix. Ceiling is measured: the weight stream is only
-  42% (1024) / 23% (4096) of a graph step ⇒ even a perfect weight path ≤ ~1.74× / ~1.30×.
+- **E7 (`EXP-p4b-01`) — judged.** The truncation is real and **only the fused arm cashes it in**.
+  ★ Refreshed 2026-10-08 (P2j, fused RMSNorm): the graph cells now read `speedup_cudagraph`
+  **1.1927** (1024) / **1.0888** (4096) with fp16 3.5881/6.8269 and w8a16 3.0084/6.2702 ms
+  (canary +0.13%); the **eager** arm's 8 cells are **pre-P2i** — their refresh was VOID because a
+  co-tenant's CPU load inflated `host_p50` (evidence: the *old* implementation re-run now shows
+  `host_p50` 35.2 ms vs 1.5 ms archived, while `kernels_per_call` and `gpu_busy` match exactly).
+  Host_share drops 77.5% → 1.6%, and the weight stream is only 42% (1024) / 23% (4096) of a graph
+  step ⇒ even a perfect weight path ≤ ~1.74× / ~1.30×.
+  ★★ **`w8a8@4096`'s citation gate flipped FAIL → PASS** under the fused norm, so those cells now
+  publish latency (8.8509 ms cudagraph) — but the flip is 3/165 positions (borderline), so it is
+  **not** evidence that w8a8 works at 4096; see `EXP-p1-04` v2 §1 and `EXP-p4b-01` §P2j.
 
 - **`EXP-p4c-01` — supported (the other big non-weight block was the ATTENTION IMPLEMENTATION).**
   Swapping HF sdpa for this repo's split-KV core *inside the graph* cuts the step 1.36–2.44×.
@@ -50,8 +54,9 @@ settled — do not re-derive them and do not re-run their cells:
   w4a16 FAIL both, **and `w8a8@4096` FLIPS from FAIL to PASS** (top-1 0.9455 → 0.9636). ★ That flip
   is **3/165 positions** — the two measurements straddle the threshold, and the norm change also
   moves the fp16 reference's greedy tokens (w2/w4) ⇒ the honest reading is "**not resolvable at
-  this budget**", not "it passes now". τ was not touched. Consequences to decide: re-running
-  `EXP-p4b-01`'s w8a8 cells (their recorded `gate FAIL` is v1) — see §4 P2j.
+  this budget**", not "it passes now". τ was not touched. The consequence was executed in P2j: the
+  refreshed `w8a8@4096` cells now publish latency (8.8509 ms cudagraph) and the flip is documented
+  in `EXP-p4b-01` §P2j as a re-adjudication, not as "w8a8 works at 4096".
 
 - **A fix was tried and REFUTED (kept on purpose).** Replacing HF's `OlmoeRMSNorm` chain (7 kernels ×
   65 norms/step, incl. 130 dtype casts) with torch's fused `F.rms_norm` is **5% slower**
@@ -121,14 +126,14 @@ in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`
 
 | Area | State | Authority |
 | --- | --- | --- |
-| Gate-0 probe, fp16 baseline, static MoE + cudagraph | done | `experiments/EXP-p0-02-baseline-fp16.md`, `experiments/EXP-p0-04-cudagraph-static-moe.md` |
+| Gate-0 probe, fp16 baseline, static MoE + cudagraph | done — P2j refresh: probes re-run, but all their cells are **host-bound ⇒ refresh VOID**, pre-P2i values kept | `experiments/EXP-p0-02-baseline-fp16.md`, `experiments/EXP-p0-04-cudagraph-static-moe.md` |
 | cudagraph feasibility with the HF MoE path | `blocked` **by design** (hf + dynamic cache cannot capture) | `experiments/EXP-p0-03-baseline-cudagraph.md` |
 | Accuracy gate — the only source of `GATE_CITATIONS` | done — **v2** (2026-10-08, re-measured under the fused RMSNorm): all 6 rows re-measured; only `w8a8@4096` flips (borderline top-1) | `experiments/EXP-p1-04-prompt-set-gate.md` |
 | Precision side: error attribution, mixed bits, W8/W4 sweep | done (the old `EXP-p1-01` protocol was superseded by `p1-04`) | `experiments/EXP-p1-02-quant-error-attribution.md`, `experiments/EXP-p1-03-quant-mixed-bits.md`, `experiments/EXP-p1-01-w8-w4-accuracy.md` |
-| Attention path: eager, kernel, in-graph | done | `experiments/EXP-p2-03-decode-attention.md`, `experiments/EXP-p2-04-eager-attention.md`, `experiments/EXP-p2-05-attn-kernel.md` |
-| Grouped MoE GEMV (fp16) | done | `experiments/EXP-p2-02-moe-grouped-gemm.md` |
-| E2 dequant fusion, 6 cells, 8-bit **and** 4-bit | done — **`refuted`** | `experiments/EXP-p2-01-dequant-fusion.md` |
-| P3 wiring + E7, 16/16 cells | done — **judged** | `experiments/EXP-p4b-01-truncation.md` |
+| Attention path: eager, kernel, in-graph | done — refreshed (P2j, fused norm): eager 3.1051/3.4788 → **2.6258/3.0004**, kernel 3.0077/3.2356 → **2.5134/2.7483 ms** | `experiments/EXP-p2-03-decode-attention.md`, `experiments/EXP-p2-04-eager-attention.md`, `experiments/EXP-p2-05-attn-kernel.md` |
+| Grouped MoE GEMV (fp16) | done — refreshed (P2j, fused norm): 4.0829 → **3.6828 ms** | `experiments/EXP-p2-02-moe-grouped-gemm.md` |
+| E2 dequant fusion, 6 cells, 8-bit **and** 4-bit | done — **`refuted`**; P2j refresh **VOID** for all 6 cells (eager/host-bound) ⇒ pre-P2i values kept, verdict unchanged | `experiments/EXP-p2-01-dequant-fusion.md` |
+| P3 wiring + E7, 16/16 cells | done — **judged**; refreshed 2026-10-08 (P2j): graph cells under the fused norm, eager cells **pre-P2i** (refresh VOID — host contention); `w8a8@4096` gate now reads PASS (borderline) | `experiments/EXP-p4b-01-truncation.md` |
 | In-graph attention × quantization, 8 cells | done — **supported**; **canonical = v3** (fused RMSNorm, §5.7): quantized **1.1955/1.3034** @1024, **1.0875/1.2555** @4096, best cell **1.87× / 3.11×** vs fp16 × sdpa | `experiments/EXP-p4c-01-in-graph-attention.md` |
 | E4 routing overhead | done — **supported**: 44.2% of GPU busy, and **quantization-invariant** (4.478/4.512/4.526/4.555 ms for fp16/w8a16/w8a8/w4a16) | `experiments/EXP-p4-01-moe-routing-overhead.md` |
 | The elementwise/copy tail (0.90 ms, "~330 kernels") | done — classified: it is **~13 named families × 16–83 calls/step**, not a flat tail; module-level attribution VOID (its own K1 failed) | `experiments/EXP-p4c-02-elementwise-tail.md` |
@@ -155,8 +160,8 @@ that the science was not done — read the record first.
 | P2b | ✅ **classified 2026-10-07** (`EXP-p4c-02`): the 0.90 ms tail is **13 named families × 16–83 calls/step** — copies 0.17 (149 calls), RMSNorm mean+rsqrt 0.15–0.25, KV-cache write+cat 0.11, residual add 0.05, routing topK 0.05; **no single kernel >20%** | it was the largest non-weight bucket left | `experiments/EXP-p4c-02-elementwise-tail.md` | no |
 | P2f | ✅ **identified 2026-10-07** (`EXP-p4c-02` §5.5): the copy family is **`aten::_to_copy` ×150/step (0.185 ms)** — dtype casts from HF's RMSNorm (`to(fp32)` + `to(fp16)` per norm × 65 norms) plus the norm's `pow/mean/rsqrt/mul` chain ⇒ P2f and the norm question are **the same fix** | — | — | no |
 | P2i | ✅ **done 2026-10-08**: plumbing + `--aggregate-only` (interrupted-run finalisation by the tool's own aggregation code) + gate re-measured **under the fused norm** for both ctx + `GATE_CITATIONS`/artifacts/tests updated + `EXP-p4c-01`'s 8 cells re-run as **v3** (canary −0.067%, one contaminated cell re-run clean) | P2h passed K1+D but the gate on record was HF-norm | `EXP-p1-04` v2 section + `EXP-p4c-01` §5.7 + `results/EXP-p4c-01-run/v3_*` | done |
-| P2j | **Decide + execute the fallout of the norm swap on already-recorded cells.** (a) `w8a8@4096`'s gate now reads PASS ⇒ `EXP-p4b-01`'s w8a8 cells (recorded `gate FAIL`) need a re-run to change verdict — otherwise they stay explicitly labelled v1; (b) every *other* recorded absolute ms (p4b's 12 quantized + p2-01's 6 + the p2/p0 fp16 baselines) was measured with HF's norm and is now stale by the constant the norm saves (~0.34–0.48 ms/step) | the norm swap changes every cell's absolute time; only p4c-01 has been refreshed | archive + relabel (v4/v5) the affected cells, or state in §3 which records are pre-P2i | **YES — scope/cost: ~30 cells** |
-| P2e | Optional: fuse q/k/v into **one** launch (3→1) — the projection kernel is now 5.15 µs/call vs a 2.72 µs byte floor, so ~2.4 µs/call of launch/ramp is left | follows P2b's elementwise verdict; needs a shape decision (the three projections must share `in_features`) | isolated in-graph A/B (the P2d-style tool) before any cell run | no, if it stays inside `EXP-p4c-01`'s declared config; ask if it needs a new id |
+| P2j | ✅ **done 2026-10-08** (31 cells re-run, canary +0.13%): **13 graph cells adopted** (host ≤5%) — e.g. p4b's cudagraph set (E7 now **1.1927/1.0888**), p2-02 4.08→3.68, p2-04 3.11/3.48→2.63/3.00, p2-05 3.01/3.24→2.51/2.75; **18 host-bound cells VOID** (co-tenant CPU load; proved by the `--rmsnorm hf` control: `kernels_per_call`/`gpu_busy` match the archive exactly while `host_p50` goes 1.5 → 35.2 ms) ⇒ their pre-P2i payloads were **restored as canonical** and the contended refresh copies are kept in `results/EXP-p2j-refresh/contended/`. `w8a8@4096`'s gate flip is documented as a re-adjudication (borderline) | the norm swap made every recorded ms stale | per-record "★ P2j 刷新" sections + `results/EXP-p2j-refresh/` | done |
+| P2k | **Re-run the 18 host-bound cells on a quiet box** (p0-02 ×2, p0-04 ×2, p2-01 ×6, p4b eager ×8) | their refresh was VOID on the shared card; their conclusions don't depend on the norm (~0.4 ms in an 8–272 ms step) so this is about record hygiene, not science | the same protocol (archive → re-run → canary → per-record update); if the box is never quiet, keep the pre-P2i labels | no (just needs a quiet machine) |
 | P2c | Widen the routing classifier (torch `topk`/`sort`/`index_select`/`gather`/`scatter`) so the **grouped** path's routing cost can be quoted | `EXP-p4-01` §5.3: the classifier's 0.0% on the grouped path is a **blind spot**, not a measurement | new rules + tests; the number must be produced in its own round | **YES — it changes the meaning of the `routing_share_pct` field** |
 | P3 | Breadth: E5 (`EXP-p4-02`), E6 (`EXP-p5-01`), E8 (`EXP-p8-01`, needs the V100), E1's group axis under the corrected prompt set, dense curves, batch sweep (E3 — today it has **no** experiment), FP8/MXFP4 (`EXP-p3-01/02`), repairing the W4A16 gate | each closes a declared hypothesis or lever; several need a matrix entry that does not exist | per matrix entry; E8 only after the same protocol passes on the V100 | partial: new matrix entries need approval |
 | P4 | Publication: ncu evidence, E7 charts, final README/PLAN pass | closes Phase 2's last deliverable and Phase 7 | ncu metrics per `lemoq.kernels.NCU_METRICS`; charts regenerated from `result.json` | no |
