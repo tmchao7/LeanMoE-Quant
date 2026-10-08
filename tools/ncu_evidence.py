@@ -203,7 +203,8 @@ def _build_attn(args: Any):
     q = randn(b, h, 1, d)
     k = randn(b, h, length, d)
     v = randn(b, h, length, d)
-    filled = torch.tensor(length, dtype=torch.int64, device=args.device)
+    # ★ 契约要求 int32（`attn_decode._filled_tensor` 会显式拒绝 int64）
+    filled = torch.tensor(length, dtype=torch.int32, device=args.device)
 
     def fn():
         return attn_decode_forward(q, k, v, filled)
