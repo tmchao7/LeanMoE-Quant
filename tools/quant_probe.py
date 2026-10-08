@@ -671,6 +671,13 @@ def aggregate_windows(
         mean = sum(kls) / len(kls)
         top1s = [v["top1_agreement"] for v in real.values() if v.get("top1_agreement") is not None]
         ones_kl = next((v.get("kl") for k, v in rows.items() if k.startswith("ones")), None)
+        # ★ top-1 的**均值**必须写进工件：runner 的引用门（`gate_from_metrics`）用的
+        #   就是均值（docs/METRICS.md §1 的合取口径），而此前工件里只有 `top1_min`。
+        #   于是"引用门的那个数"只能靠人手抄进 `GATE_CITATIONS` —— 工件自己既
+        #   不自洽也不能自检。逐窗口的**最小值**仍保留，但只是额外信息：按下限判门
+        #   会让 w8a16（有一个窗口 0.9394 < 0.95）也过不了，与 p1-04 已记录的
+        #   PASS 直接矛盾。
+        top1_mean = (sum(top1s) / len(top1s)) if top1s else None
         rec["aggregate"] = {
             "n_windows": len(kls),
             "kl_mean": mean,
@@ -678,6 +685,7 @@ def aggregate_windows(
             "kl_min": min(kls),
             "kl_max": max(kls),
             "kl_spread_x": (max(kls) / min(kls)) if min(kls) > 0 else None,
+            "top1_mean": top1_mean,
             "top1_min": min(top1s) if top1s else None,
             "ones_control_kl": ones_kl,
         }
@@ -689,13 +697,23 @@ def aggregate_windows(
                 break
         th = kl_gate_w8 if bits == 8 else kl_gate_w4
         agg = rec["aggregate"]
+        # ★ 门是**合取**，且两个判据都用**均值**：
+        #       gate = PASS  ⟺  kl_mean < kl_max  且  top1_mean >= top1_gate
+        #   与 runner 的 `gate_from_metrics` 同一条口径。逐窗口最小值只作额外信息
+        #   （`top1_min_pass`），**不是**判门依据 —— 它按下限判会否掉 w8a16。
+        top1_mean_pass = (top1_mean is None) or (top1_mean >= top1_gate)
         rec["gate"] = {
             "weight_bits": bits,
             "kl_max": th,
             "top1_min_required": top1_gate,
             "kl_mean_pass": mean < th,
             "all_windows_pass": all(k < th for k in kls),
+            "top1_mean_pass": bool(top1_mean_pass),
+            # 额外信息（不是判据）：逐窗口最差的那个
             "top1_min_pass": (agg["top1_min"] is None) or (agg["top1_min"] >= top1_gate),
+            # ★ 工件自己必须能回答"这个臂过没过门"，而不是让人去别处对表
+            "verdict": "PASS" if (mean < th and top1_mean_pass) else "FAIL",
+            "verdict_basis": "kl_mean 与 top1_**均值** 的合取（METRICS §1 的口径）",
         }
         if ones_kl is not None:
             rec["gate"]["ones_control_pass"] = ones_kl < th

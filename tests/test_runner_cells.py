@@ -420,7 +420,15 @@ def _artifact_for_ctx(ctx: int) -> Path:
 
 
 def _top1_mean(arm: dict) -> float:
-    """工件的 aggregate 只存 top1_min；门的口径是**均值**（p1-04 记录：mean_pass）。"""
+    """门的口径是 top-1 的**均值**（p1-04 记录：mean_pass），不是逐窗口最小值。
+
+    ★ 优先读工件自己算的 `aggregate.top1_mean`（`tools/quant_probe.aggregate_windows`
+    现在会写它）；老工件没有这个键时**退回逐窗口重算**，这样新旧工件都能钉。
+    按下限判门会否掉 w8a16（它有一个窗口 0.9394 < 0.95），与已记录的 PASS 矛盾。
+    """
+    agg = arm.get("aggregate") or {}
+    if agg.get("top1_mean") is not None:
+        return float(agg["top1_mean"])
     vals = [
         v["top1_agreement"]
         for k, v in arm["windows"].items()
@@ -462,6 +470,46 @@ def test_gate_citations_match_the_artifacts():
         assert (
             gate_for_cell(bit_width, group_size, ctx)["gate"] == expected
         ), "%s@%d 的 gate 与实测/门槛不符" % (bit_width, ctx)
+
+
+def test_artifact_derives_the_same_verdict_as_the_runner():
+    """★ 工件自己必须能回答"这个臂过没过门"，且与 runner 的门**逐格一致**。
+
+    以前 `tools/quant_probe.aggregate_windows` 只写 `top1_min`、不写 `top1_mean`，
+    而 `rec["gate"]` 用项目明确否掉的"下限"判据 —— 于是 w8a16@1024 在工件里
+    是 `top1_min_pass=false`，runner 却发 PASS。引用值只能手抄进 `GATE_CITATIONS`。
+    现在 `aggregate_windows` 同时写 `top1_mean` 与由均值推出的 `verdict`，
+    这条测试用**工具自己的代码**重算一遍并逐格对齐。
+    """
+    import copy
+
+    from tools.quant_probe import aggregate_windows
+
+    checked = 0
+    for (bit_width, group_size, ctx), cited in GATE_CITATIONS.items():
+        artifact_path = _artifact_for_ctx(ctx)
+        if not artifact_path.exists():
+            continue
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        arm_id = "%s_attn_experts_g%d" % (bit_width, group_size)
+        if arm_id not in artifact.get("arms", {}):
+            continue
+        arm = copy.deepcopy(artifact["arms"][arm_id])
+        aggregate_windows({"arms": {arm_id: arm}}, kl_gate_w8=0.01, kl_gate_w4=0.05, top1_gate=0.95)
+        top1_mean = arm["aggregate"]["top1_mean"]
+        assert top1_mean is not None, "%s 的工件算不出 top-1 均值" % arm_id
+        assert abs(top1_mean - cited["top1"]) < 5e-7, "%s@%d 工件 top-1 != 引用" % (
+            bit_width,
+            ctx,
+        )
+        expected = gate_from_metrics(bit_width, arm["aggregate"]["kl_mean"], top1_mean)
+        assert arm["gate"]["verdict"] == expected, "%s@%d 工件 verdict != runner 门" % (
+            bit_width,
+            ctx,
+        )
+        checked += 1
+    if not checked:
+        pytest.skip("EXP-p1-04 的工件不在本机（results/ 是 gitignored）")
 
 
 def test_the_gate_is_a_conjunction_not_decoration():

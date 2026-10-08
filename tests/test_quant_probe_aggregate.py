@@ -74,10 +74,55 @@ def test_aggregate_only_computes_mean_over_real_windows_and_derives_the_gate(tmp
     assert full["gate"]["all_windows_pass"] is True
     assert full["gate"]["ones_control_pass"] is False, "ones 对照也要按同一 τ 判（它不参与 mean）"
 
+    # ★ top-1 的**均值**必须落在工件里：runner 的引用门用的就是均值，以前工件只有
+    #   top1_min，于是那个数只能手抄。均值 = (1.0+0.9+1.0+1.0+1.0)/5 = 0.98
+    assert abs(agg["top1_mean"] - 0.98) < 1e-12
+    assert full["gate"]["top1_mean_pass"] is True
+    # 逐窗口最小值 0.9 < 0.95 —— 它**不得**判门（按下限判会否掉 w8a16）
+    assert agg["top1_min"] == 0.9
+    assert full["gate"]["top1_min_pass"] is False
+    # 工件自己必须能回答"过没过门"：合取用均值
+    assert full["gate"]["verdict"] == "PASS"
+
     thin = out["arms"]["w4a16_attn_experts_g128"]
     assert thin["aggregate"]["n_windows"] == 2
     assert thin["gate"]["weight_bits"] == 4 and thin["gate"]["kl_max"] == 0.05
     assert thin["gate"]["kl_mean_pass"] is False  # (0.05+0.07)/2 = 0.06 > 0.05
+    # top-1 均值 (0.8+0.7)/2 = 0.75 < 0.95 ⇒ 合取 FAIL
+    assert abs(thin["aggregate"]["top1_mean"] - 0.75) < 1e-12
+    assert thin["gate"]["top1_mean_pass"] is False
+    assert thin["gate"]["verdict"] == "FAIL"
+
+
+def test_kl_passes_but_top1_mean_fails_still_fails_the_gate(tmp_path):
+    """门是**合取**：KL 过、top-1 均值不过 ⇒ FAIL。
+
+    ★ 这正是 `w8a8@4096` 那格曾经被误放行过的形态（KL 均值 0.0046 过 W8 门，
+      而 top-1 均值 0.9455 < 0.95）。合成一个只在这一条上失败的臂，确保工件里的
+      `verdict` 用的是合取，不是只看 KL。
+    """
+
+    def entry(kl: float, top1: float, bits: int = 8) -> dict:
+        return {"kl": kl, "top1_agreement": top1, "spec": {"weight_bits": bits}}
+
+    data = {
+        "tool": "tools.quant_probe.py",
+        "windows": {"w0": {}, "w1": {}},
+        "arms": {
+            "kl_ok_top1_bad": {
+                "kind": "rtn",
+                "group": "prompt_set",
+                "windows": {"w%d" % i: entry(0.004, 0.94) for i in range(5)},
+            }
+        },
+    }
+    path = tmp_path / "probe.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert main(["--aggregate-only", str(path)]) == 0
+    gate = json.loads(path.read_text(encoding="utf-8"))["arms"]["kl_ok_top1_bad"]["gate"]
+    assert gate["kl_mean_pass"] is True
+    assert gate["top1_mean_pass"] is False
+    assert gate["verdict"] == "FAIL"
 
 
 def test_aggregate_only_records_provenance_and_flags_thin_arms(tmp_path):
