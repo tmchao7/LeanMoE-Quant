@@ -349,6 +349,20 @@ def grouped_moe_forward(
             "用 backend='oracle' 可以只跑 host 管线 + 参考实现。"
         )
     if not use_oracle:
+        # ★ dtype 守卫（只约束 **triton 路径**）：`_grouped_triton` 的 `tl.store`
+        #   硬编码 `.to(tl.float16)`，而 host 侧按 `gate_up.dtype` 分配缓冲区 ——
+        #   若模型是 fp32/bf16，kernel 会把 fp16 位模式写进 fp32 缓冲区，**不报错**。
+        #   oracle 路径是纯 PyTorch、dtype 无关，所以不受此约束（CPU 上的 oracle
+        #   测试用的就是 fp32）。与 `rmsnorm.rms_norm_fused` 同一条纪律。
+        #   ★ 位置刻意在 `_kernels()` **之前**：先校验输入，再去 import triton ——
+        #     否则在没装 triton 的机器上会先撞"无 triton"，dtype 分支永远测不到。
+        if gate_up.dtype != torch.float16:
+            raise NotImplementedError(
+                "grouped kernel 的 store 目前硬编码 fp16，只支持 fp16 融合权重；"
+                "得到 gate_up.dtype=%s。要支持别的 dtype 得先参数化 kernel 的 store "
+                "dtype（并在真机上重过 K1 门），不能静默按 fp16 写。"
+                % str(gate_up.dtype).replace("torch.", "")
+            )
         triton, k = _kernels()
 
     xf = x.reshape(-1).contiguous()

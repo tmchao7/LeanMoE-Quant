@@ -433,6 +433,15 @@ def grouped_moe_forward_quant(
             "用 backend='oracle' 可以只跑 host 管线 + 参考实现。"
         )
     if not use_oracle:
+        # ★ 同上（`moe_grouped.grouped_moe_forward`）：`_gate_up_act_kernel_q` /
+        #   `_down_sum_kernel_q` 的 store 也是硬编码 `.to(tl.float16)`。量化路径的 x
+        #   会被转到 `scale_gate_up.dtype`，所以这里守的是 scale 的 dtype。
+        #   位置同样在 `_kernels()` **之前**，理由同上。
+        if q.scale_gate_up.dtype != torch.float16:
+            raise NotImplementedError(
+                "量化 grouped kernel 的 store 目前硬编码 fp16，只支持 fp16 scale；"
+                "得到 scale_gate_up.dtype=%s。" % str(q.scale_gate_up.dtype).replace("torch.", "")
+            )
         _triton, k = _kernels()
 
     xf = x.reshape(-1).contiguous()

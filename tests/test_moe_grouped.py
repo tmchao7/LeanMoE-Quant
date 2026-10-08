@@ -403,6 +403,67 @@ def test_grouped_moe_forward_requires_triton_when_backend_is_auto():
     assert "triton" in str(excinfo.value)
 
 
+def test_grouped_kernel_refuses_a_non_fp16_weight_on_the_triton_path():
+    """★ kernel 的 `tl.store` 硬编码 fp16，非 fp16 权重必须**响亮拒绝**。
+
+    host 侧按 `gate_up.dtype` 分配缓冲区，kernel 却恒按 fp16 写 —— fp32/bf16 权重
+    会收到 fp16 的位模式而**不报错**。守卫只约束 triton 路径：oracle 是纯 PyTorch、
+    dtype 无关（CPU 上的 oracle 测试就用 fp32，必须仍然能跑）。
+    """
+    block = _tiny_block()
+    fused = fuse_experts(block.experts)
+    assert fused.gate_up.dtype != torch.float16, "这条要用非 fp16 权重，前置条件变了"
+
+    # triton 路径：必须拒绝（守卫在 _kernels() 之前，所以没装 triton 也测得）
+    with pytest.raises(NotImplementedError, match="fp16"):
+        grouped_moe_forward(
+            torch.randn(32),
+            fused,
+            torch.tensor([0, 1]),
+            torch.tensor([0.5, 0.5]),
+            backend="triton",
+        )
+
+    # oracle 路径：dtype 无关，必须照常工作
+    out = grouped_moe_forward(
+        torch.randn(32),
+        fused,
+        torch.tensor([0, 1]),
+        torch.tensor([0.5, 0.5]),
+        backend="oracle",
+    )
+    assert out.shape == (32,)
+
+
+def test_grouped_quant_kernel_refuses_a_non_fp16_scale():
+    """量化 grouped kernel 的 store 同样硬编码 fp16 —— 守的是 scale 的 dtype。"""
+    from lemoq.kernels.moe_grouped_quant import (
+        grouped_moe_forward_quant,
+        quantize_fused_experts,
+    )
+
+    fused = fuse_experts(_tiny_block().experts)
+    # tiny block: hidden=32 / ffn=16 —— group_size 必须同时整除两者（量化路径不补零）
+    q = quantize_fused_experts(fused, bits=8, group_size=8)
+    assert q.scale_gate_up.dtype == torch.float16
+    q_fp32 = type(q)(  # 同结构、scale 换成 fp32 —— 模拟"哪天把 scale 存成 fp32"
+        packed_gate_up=q.packed_gate_up,
+        scale_gate_up=q.scale_gate_up.float(),
+        packed_down=q.packed_down,
+        scale_down=q.scale_down.float(),
+        bits=q.bits,
+        group_size=q.group_size,
+    )
+    with pytest.raises(NotImplementedError, match="fp16"):
+        grouped_moe_forward_quant(
+            torch.zeros(int(q.hidden), dtype=torch.float16),
+            q_fp32,
+            torch.tensor([0, 1]),
+            torch.tensor([0.5, 0.5], dtype=torch.float16),
+            backend="triton",
+        )
+
+
 def test_check_act_fn_refuses_a_non_silu_activation():
     """kernel 里融合的是 silu。别的激活必须显式拒绝，不能静默算错。"""
     import torch.nn.functional as F
