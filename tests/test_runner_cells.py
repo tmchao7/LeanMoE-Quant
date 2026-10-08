@@ -28,7 +28,6 @@ pytestmark = requires_torch
 
 from benchmarks.runner import (  # noqa: E402
     GATE_CITATIONS,
-    KL_MAX_W8,
     TOP1_MIN,
     _matrix_axes,
     _moe_for_exp,
@@ -465,21 +464,44 @@ def test_gate_citations_match_the_artifacts():
         ), "%s@%d 的 gate 与实测/门槛不符" % (bit_width, ctx)
 
 
-def test_the_top1_criterion_actually_bites_at_ctx4096():
-    """★ P2 的关键发现：`w8a8@4096` 的 KL 过门、**top-1 不过门**。
+def test_the_gate_is_a_conjunction_not_decoration():
+    """门是**合取**：KL 过但 top-1 不过 ⇒ FAIL；只看 KL 会误判为 PASS。
 
-    这条测试钉住"门是合取"而不是装饰：若有人把规则退回"只看 KL"，
-    `w8a8@4096` 就会变成 PASS 并发表延迟 —— 那是放宽正确性门（硬规则 2）。
+    ★ 2026-10-08（P2i）：这条原来读的是**当时的** `w8a8@4096` 引用（v1：KL 0.004606 过、
+    top-1 0.9455 不过）。换实现后同一个臂的 top-1 变成 0.9636 ⇒ 那格不再"咬人"。
+    判据本身没错，错的是把"逻辑"钉在一格贴线的实测上 —— 所以现在用**构造的实测值**
+    测逻辑；真实数据的贴线事实由下面那条留档测试负责。
     """
-    if not _artifact_for_ctx(4096).exists():
-        pytest.skip("ctx=4096 的工件不在本机")
-    cite = gate_for_cell("w8a8", 128, 4096)
-    assert cite is not None
-    assert cite["kl"] < KL_MAX_W8, "这条测试的前提是 KL 确实过门"
-    assert cite["top1"] < TOP1_MIN, "这条测试的前提是 top-1 确实不过门"
-    assert cite["gate"] == "FAIL"
-    # 对照：只看 KL 会误判为 PASS —— 显式记录这个陷阱
-    assert gate_from_metrics("w8a8", cite["kl"], 1.0) == "PASS"
+    assert gate_from_metrics("w8a8", 0.004, 0.90) == "FAIL", "KL 过、top-1 不过必须 FAIL"
+    assert gate_from_metrics("w8a8", 0.02, 1.0) == "FAIL", "KL 不过必须 FAIL"
+    assert gate_from_metrics("w8a16", 0.004, 0.99) == "PASS"
+    assert gate_from_metrics("w4a16", 0.049, 0.96) == "PASS", "w4 用 0.05 门槛"
+    assert gate_from_metrics("w4a16", 0.051, 0.96) == "FAIL"
+
+
+def test_w8a8_at_4096_straddles_the_top1_threshold_across_implementations():
+    """★ 留档（P2i）：`w8a8@4096` 的 top-1 骑在门线上，**两个同样合法的实现跨在两侧**。
+
+    v1（HF 的 `OlmoeRMSNorm` 原链）：top-1 0.9455 → FAIL
+    v2（本仓库融合 RMSNorm）      ：top-1 0.9636 → PASS
+
+    差 3/165 个位置；而且 v2 还改变了 fp16 参考的贪心轨迹（w2/w4）。
+    所以"w8a8@4096 过不了 top-1 门"这个曾经被当成硬边界的结论，应当降级为
+    **"在这个测法下不可分辨"**。这条测试的作用是防止有人把归档的 v1 悄悄删掉 ——
+    两个工件都在，才能看出这个翻转是"贴线"而不是"改判"。
+    """
+    v1 = RESULTS / "EXP-p1-04-prompt-set-gate" / "probe_prompt_set_ctx4096_v1_hf_norm.json"
+    v2 = _artifact_for_ctx(4096)
+    if not v1.exists() or not v2.exists():
+        pytest.skip("两个版本的工件不齐（results/ 是 gitignored）")
+    a1 = json.loads(v1.read_text(encoding="utf-8"))["arms"]["w8a8_attn_experts_g128"]
+    a2 = json.loads(v2.read_text(encoding="utf-8"))["arms"]["w8a8_attn_experts_g128"]
+    t1, t2 = _top1_mean(a1), _top1_mean(a2)
+    assert t1 < TOP1_MIN <= t2, (t1, t2)
+    # 位置级别的差距极小（165 个位置里 3 个）：这正是"贴线"而不是"改判"的证据
+    assert abs(t2 - t1) * 165 <= 4, (t1, t2)
+    # 引用表填的是**当前实现**的实测值，不是"更好看"的那个
+    assert abs(gate_for_cell("w8a8", 128, 4096)["top1"] - t2) < 5e-7
 
 
 def test_gate_for_cell_returns_none_for_unmeasured_configs():
