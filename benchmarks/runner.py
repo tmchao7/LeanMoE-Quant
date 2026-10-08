@@ -1295,7 +1295,12 @@ def run_baseline(
     #   实测单步 ~105 ms，而 roofline 下限 1.52 ms —— 差 ~70 倍。不做归因的话，
     #   会把它误当成"MoE 在 batch=1 本来就慢"，从而彻底错过真正的原因。
     breakdown = _breakdown(model, nxt, past, device, dtype)
-    moe = _bench_moe_block(model, device, dtype)
+    # ★ 原名 `moe = _bench_moe_block(...)` —— 它把**形参** moe（"hf"/"gather"/
+    #   "grouped"）覆盖掉了，于是 eager 臂的 res["moe"] 变成 str(dict)，而
+    #   cudagraph 臂（run_cudagraph）的 res["moe"] 是实现名字符串 —— 同一个字段
+    #   两种语义。今天没人读它（build_payload 走 cfg.get("moe")），但
+    #   build_cudagraph_payload 读 res.get("moe")，是地雷。改成不遮蔽。
+    moe_block_bench = _bench_moe_block(model, device, dtype)
 
     vram = split_report(tr)
 
@@ -1344,7 +1349,7 @@ def run_baseline(
         "rmsnorm": str(getattr(model, "_lemoq_rmsnorm_impl", rmsnorm)),
         "rms_norms_replaced": int(getattr(model, "_lemoq_rms_norms_replaced", 0)),
         "breakdown": breakdown,
-        "moe_block": moe,
+        "moe_block": moe_block_bench,
         "ttft": ttft,
         "steps": steps,
         # `EXP-p2-01` 的证据：这一格**实际**走的反量化臂 + 同进程交错的 A/B。
