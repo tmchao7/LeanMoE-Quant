@@ -10,18 +10,23 @@ settled — do not re-derive them and do not re-run their cells:
 - **E2 (`EXP-p2-01`) — `refuted`.** Fusing the dequant into the GEMV is *not* the 1.3–2× the
   matrix predicted: in the eager cells the fused arm is **5% slower** (`host_share` 71.7%,
   ~19k kernels/step). Isolated the fused kernel is 1.21× cheaper per call — Python/launch eats it.
-- **E7 (`EXP-p4b-01`) — judged.** The truncation is real and **only the fused arm cashes it in**:
+- **E7 (`EXP-p4b-01`) — judged.** ★ The numbers below are **pre-P2i** (measured with HF's
+  RMSNorm; the norm swap changes every absolute ms — see §4 P2j). The truncation is real and
+  **only the fused arm cashes it in**:
   the same `w8a16` config goes `speedup_eager` **~0.78 → speedup_cudagraph 1.170** (ctx=1024;
   → 1.084 at 4096) while `host_share` drops 77.5% → 1.6%; the separate arm does not move
   (0.7674 / 0.8530) even after the kernel fix. Ceiling is measured: the weight stream is only
   42% (1024) / 23% (4096) of a graph step ⇒ even a perfect weight path ≤ ~1.74× / ~1.30×.
 
 - **`EXP-p4c-01` — supported (the other big non-weight block was the ATTENTION IMPLEMENTATION).**
-  Swapping HF sdpa for this repo's split-KV core *inside the graph* cuts the step 1.36–2.44×;
-  with the projection-kernel fix below, the quantized speedup is **1.169 (sdpa) / 1.250 (kernel)**
-  @1024 and 1.084 / 1.214 @4096, and the best cell `w8a16 × kernel` = **1.70× / 2.77×** vs
-  fp16 × sdpa. Mechanism: the removed attention cost is bit-width-independent (@4096 both arms
-  save ~4.1 ms) — a constant that helps the smaller (quantized) total relatively more.
+  Swapping HF sdpa for this repo's split-KV core *inside the graph* cuts the step 1.36–2.44×.
+  **Canonical numbers are now v3** (2026-10-08, fused RMSNorm; §5.7): quantized speedup
+  **1.1955 (sdpa) / 1.3034 (kernel)** @1024 and 1.0875 / 1.2555 @4096, best cell
+  `w8a16 × kernel` = **1.87× / 3.11×** vs fp16 × sdpa (v2 was 1.17/1.25 and 1.70×/2.77×).
+  Mechanism: the removed cost (attention core, then the norm chain) is bit-width-independent —
+  a constant that helps the smaller (quantized) total relatively more.
+  Canary in the v3 round: −0.067%; one cell was contaminated (`host_share` 51%) and re-run
+  clean (2.5079/2.5120 ms) — see §5.7.
 - **The projection kernel was 3× off its byte floor — and it is fixed.** In-graph config tuning
   (new tool `tools/bench_dequant_gemm_graph.py`) showed the old ranking was launcher-bound and that
   the default config is optimal, so the 5.4 µs/call gap was structural: the scale was gathered
@@ -38,15 +43,15 @@ settled — do not re-derive them and do not re-run their cells:
   one-shot fix. ★ Its **module-level** attribution is **VOID by its own pre-registered K1**
   (eager/graph top-8 overlap 5/8) — the record says so instead of quoting it.
 
-- **★ A custom fused RMSNorm wins 23.6% — the biggest single win so far.** The elementwise/copy tail's
-  dominant chain was HF's `OlmoeRMSNorm` (7 kernels/norm × 65 norms/step, incl. 130 dtype casts).
-  `src/lemoq/kernels/rmsnorm.py` does it in **one** launch with HF's rounding point (fp32 mean →
-  round to fp16 → multiply by fp16 weight) and is **1.2358×** on the whole step (2.4143 → 1.9537 ms,
-  wins 15/15), kernel/step **994 → 539**, K1 vs HF's formula **5.261e-04** (torch's `F.rms_norm`
-  was both slower *and* numerically farther: 1.118e-03). ★ The gate re-measurement (P2i) is
-  **half done**: under the fused norm the ctx=1024 readings are w8a16 0.001361 / w8a8 0.033304 /
-  w4a16 0.093560 vs 0.001273 / 0.032753 / 0.093323 with HF's norm ⇒ **no verdict changes**; the
-  probe's own aggregate section still has to be written and the citations re-pinned (§4 P2i).
+- **★ The fused RMSNorm is now the DEFAULT decode path, and the gate was re-measured under it
+  (P2i, 2026-10-08).** `--rmsnorm {fused,hf}` (default `fused`), the implementation is recorded in
+  `config.rmsnorm`, and there is a 6th load-time refusal for machines without triton/CUDA.
+  Gate under the fused norm (5 windows): w8a16 **0.001361/0.000842** @1024/@4096 (both still PASS),
+  w4a16 FAIL both, **and `w8a8@4096` FLIPS from FAIL to PASS** (top-1 0.9455 → 0.9636). ★ That flip
+  is **3/165 positions** — the two measurements straddle the threshold, and the norm change also
+  moves the fp16 reference's greedy tokens (w2/w4) ⇒ the honest reading is "**not resolvable at
+  this budget**", not "it passes now". τ was not touched. Consequences to decide: re-running
+  `EXP-p4b-01`'s w8a8 cells (their recorded `gate FAIL` is v1) — see §4 P2j.
 
 - **A fix was tried and REFUTED (kept on purpose).** Replacing HF's `OlmoeRMSNorm` chain (7 kernels ×
   65 norms/step, incl. 130 dtype casts) with torch's fused `F.rms_norm` is **5% slower**
@@ -118,13 +123,13 @@ in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`
 | --- | --- | --- |
 | Gate-0 probe, fp16 baseline, static MoE + cudagraph | done | `experiments/EXP-p0-02-baseline-fp16.md`, `experiments/EXP-p0-04-cudagraph-static-moe.md` |
 | cudagraph feasibility with the HF MoE path | `blocked` **by design** (hf + dynamic cache cannot capture) | `experiments/EXP-p0-03-baseline-cudagraph.md` |
-| Accuracy gate — the only source of `GATE_CITATIONS` | done | `experiments/EXP-p1-04-prompt-set-gate.md` |
+| Accuracy gate — the only source of `GATE_CITATIONS` | done — **v2** (2026-10-08, re-measured under the fused RMSNorm): all 6 rows re-measured; only `w8a8@4096` flips (borderline top-1) | `experiments/EXP-p1-04-prompt-set-gate.md` |
 | Precision side: error attribution, mixed bits, W8/W4 sweep | done (the old `EXP-p1-01` protocol was superseded by `p1-04`) | `experiments/EXP-p1-02-quant-error-attribution.md`, `experiments/EXP-p1-03-quant-mixed-bits.md`, `experiments/EXP-p1-01-w8-w4-accuracy.md` |
 | Attention path: eager, kernel, in-graph | done | `experiments/EXP-p2-03-decode-attention.md`, `experiments/EXP-p2-04-eager-attention.md`, `experiments/EXP-p2-05-attn-kernel.md` |
 | Grouped MoE GEMV (fp16) | done | `experiments/EXP-p2-02-moe-grouped-gemm.md` |
 | E2 dequant fusion, 6 cells, 8-bit **and** 4-bit | done — **`refuted`** | `experiments/EXP-p2-01-dequant-fusion.md` |
 | P3 wiring + E7, 16/16 cells | done — **judged** | `experiments/EXP-p4b-01-truncation.md` |
-| In-graph attention × quantization, 8 cells | done — **supported**; re-measured after the kernel fix (**1.70× / 2.77×** combined, §5.6) | `experiments/EXP-p4c-01-in-graph-attention.md` |
+| In-graph attention × quantization, 8 cells | done — **supported**; **canonical = v3** (fused RMSNorm, §5.7): quantized **1.1955/1.3034** @1024, **1.0875/1.2555** @4096, best cell **1.87× / 3.11×** vs fp16 × sdpa | `experiments/EXP-p4c-01-in-graph-attention.md` |
 | E4 routing overhead | done — **supported**: 44.2% of GPU busy, and **quantization-invariant** (4.478/4.512/4.526/4.555 ms for fp16/w8a16/w8a8/w4a16) | `experiments/EXP-p4-01-moe-routing-overhead.md` |
 | The elementwise/copy tail (0.90 ms, "~330 kernels") | done — classified: it is **~13 named families × 16–83 calls/step**, not a flat tail; module-level attribution VOID (its own K1 failed) | `experiments/EXP-p4c-02-elementwise-tail.md` |
 | E5 expert sensitivity, E6 KV INT8, E8 cross-bandwidth, FP8/MXFP4, dense curves, batch sweep | **not run** | `configs/experiments.yaml`, `PLAN.md` §7 |
@@ -146,11 +151,11 @@ that the science was not done — read the record first.
 | --- | --- | --- | --- | --- |
 | P0 | ✅ **done 2026-10-07** (see §5): README status, `PLAN.md` pointer, p4b `Status`, p1-02/03/04 artifact notes, `constraints.txt` freeze | those files contradicted the records | four gates green, both machines on one commit | no |
 | P1 | ✅ **done 2026-10-07**: E4 → routing/pack = **44.2%** of GPU busy and constant within 1.7% across fp16→w4a16 | the plan's `minimal_credible` scope is now **6/6** | `experiments/EXP-p4-01-moe-routing-overhead.md` | no |
-| P2 | ✅ **done 2026-10-07** (re-measured after the kernel fix): in-graph attention + projection-kernel fix → speedup **1.169 / 1.250** (1024) and 1.084 / 1.214 (4096); best cell **1.70× / 2.77×** vs fp16 × sdpa | the user approved a new id (`EXP-p4c-01`), see §3 | `experiments/EXP-p4c-01-in-graph-attention.md` | no |
+| P2 | ✅ **done 2026-10-07** (then superseded: **v3** numbers are in §0/§3): this row's 1.169/1.250 and 1.70×/2.77× are the **v2** reading (HF norm) | the user approved a new id (`EXP-p4c-01`), see §3 | `experiments/EXP-p4c-01-in-graph-attention.md` | no |
 | P2b | ✅ **classified 2026-10-07** (`EXP-p4c-02`): the 0.90 ms tail is **13 named families × 16–83 calls/step** — copies 0.17 (149 calls), RMSNorm mean+rsqrt 0.15–0.25, KV-cache write+cat 0.11, residual add 0.05, routing topK 0.05; **no single kernel >20%** | it was the largest non-weight bucket left | `experiments/EXP-p4c-02-elementwise-tail.md` | no |
 | P2f | ✅ **identified 2026-10-07** (`EXP-p4c-02` §5.5): the copy family is **`aten::_to_copy` ×150/step (0.185 ms)** — dtype casts from HF's RMSNorm (`to(fp32)` + `to(fp16)` per norm × 65 norms) plus the norm's `pow/mean/rsqrt/mul` chain ⇒ P2f and the norm question are **the same fix** | — | — | no |
-| P2i | 🔄 **IN PROGRESS — resume here 2026-10-08** (user approved the full pass). Done: plumbing (`--rmsnorm {fused,hf}`, default fused, recorded in `config.rmsnorm` + `config.rms_norms_replaced`, 6th load-time refusal, pinned by tests); the ctx=1024 gate **probe was re-run under the fused norm** and stopped at 26/51 arms when the server was shut down. **The three citation arms are complete** (all 6 windows; `rmsnorm: fused`, `norms_replaced: 65`): preliminary reading over w0–w4 — w8a16 **0.001361** (was 0.001273, +6.9%), w8a8 0.033304 (was 0.032753), w4a16 0.093560 (was 0.093323) ⇒ **no verdict changes**, so adopting is safe numerically. ⚠️ Those three numbers were computed **by hand from the salvaged windows** — the tool's own `aggregate` section was never written (run killed), so they are **not** a citation yet. | next steps | (1) add `--aggregate-only <artifact>` to `tools/quant_probe.py` (reuse its own aggregation code path) **or** re-run the probe; the salvaged artifact is `results/EXP-p1-04-prompt-set-gate/probe_prompt_set_rmsnorm_fused_ctx1024.json` (also on the Mac). (2) Write the aggregate, archive the HF-norm artifacts (`probe_prompt_set.json`, `..._ctx4096.json`) as `..._v1_hf_norm.json`, copy the new ones to the canonical names. (3) Update `GATE_CITATIONS` kl/top-1 **verbatim** from the new artifact + the pinned assertion in `tests/test_runner_cells.py` (~line 507) + the ctx=4096 probe (second run). (4) Re-run `EXP-p4c-01`'s 8 cells with `--force` (default is already fused): the pre-P2i artifacts are archived at `results/EXP-p4c-01-run/pre_p2i_hf_norm/` (synced to the Mac) — cells stay the same ids, label them **v3** in the record. (5) Add the v3 table to `experiments/EXP-p4c-01-in-graph-attention.md` §5.7. | **YES — already given** |
-| P2d | ✅ **done 2026-10-07** (9 + 2 cells, canary −0.006%, occupancy clean): E7 fused `speedup_cudagraph` **1.1071 → 1.1703** (1024) / **1.0512 → 1.0839** (4096); E2's eager ratios unchanged (1.0442 / 1.0523 / 0.9681) — the fix is graph-only | the kernel fix made the recorded absolute ms stale | v1 archived under `results/<EXP>-run/v1_archive/`, v1/v2 labelled in both records | no |
+| P2i | ✅ **done 2026-10-08**: plumbing + `--aggregate-only` (interrupted-run finalisation by the tool's own aggregation code) + gate re-measured **under the fused norm** for both ctx + `GATE_CITATIONS`/artifacts/tests updated + `EXP-p4c-01`'s 8 cells re-run as **v3** (canary −0.067%, one contaminated cell re-run clean) | P2h passed K1+D but the gate on record was HF-norm | `EXP-p1-04` v2 section + `EXP-p4c-01` §5.7 + `results/EXP-p4c-01-run/v3_*` | done |
+| P2j | **Decide + execute the fallout of the norm swap on already-recorded cells.** (a) `w8a8@4096`'s gate now reads PASS ⇒ `EXP-p4b-01`'s w8a8 cells (recorded `gate FAIL`) need a re-run to change verdict — otherwise they stay explicitly labelled v1; (b) every *other* recorded absolute ms (p4b's 12 quantized + p2-01's 6 + the p2/p0 fp16 baselines) was measured with HF's norm and is now stale by the constant the norm saves (~0.34–0.48 ms/step) | the norm swap changes every cell's absolute time; only p4c-01 has been refreshed | archive + relabel (v4/v5) the affected cells, or state in §3 which records are pre-P2i | **YES — scope/cost: ~30 cells** |
 | P2e | Optional: fuse q/k/v into **one** launch (3→1) — the projection kernel is now 5.15 µs/call vs a 2.72 µs byte floor, so ~2.4 µs/call of launch/ramp is left | follows P2b's elementwise verdict; needs a shape decision (the three projections must share `in_features`) | isolated in-graph A/B (the P2d-style tool) before any cell run | no, if it stays inside `EXP-p4c-01`'s declared config; ask if it needs a new id |
 | P2c | Widen the routing classifier (torch `topk`/`sort`/`index_select`/`gather`/`scatter`) so the **grouped** path's routing cost can be quoted | `EXP-p4-01` §5.3: the classifier's 0.0% on the grouped path is a **blind spot**, not a measurement | new rules + tests; the number must be produced in its own round | **YES — it changes the meaning of the `routing_share_pct` field** |
 | P3 | Breadth: E5 (`EXP-p4-02`), E6 (`EXP-p5-01`), E8 (`EXP-p8-01`, needs the V100), E1's group axis under the corrected prompt set, dense curves, batch sweep (E3 — today it has **no** experiment), FP8/MXFP4 (`EXP-p3-01/02`), repairing the W4A16 gate | each closes a declared hypothesis or lever; several need a matrix entry that does not exist | per matrix entry; E8 only after the same protocol passes on the V100 | partial: new matrix entries need approval |
