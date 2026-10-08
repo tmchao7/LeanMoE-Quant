@@ -87,8 +87,12 @@ OLMOE = {
 # --------------------------------------------------------------------------------------
 
 
-def _build_grouped(args: Any, *, bits: int | None):
-    """grouped MoE GEMV：fp16（`bits=None`）或 packed 8/4-bit。"""
+def _build_grouped(args: Any, *, bits: int | None, field: str):
+    """grouped MoE GEMV：fp16（`bits=None`）或 packed 8/4-bit。
+
+    `field`：`gate_up` / `down`（per-kernel 的 ncu subject）/ `layer`（整层一次调用，
+    `--isolated` 用）。它只影响**字节归属**，不影响被测的可调用对象。
+    """
     import torch  # noqa: PLC0415
 
     from lemoq.kernels.moe_static import FusedExperts  # noqa: PLC0415
@@ -118,7 +122,33 @@ def _build_grouped(args: Any, *, bits: int | None):
         "group_size": None if bits is None else args.group_size,
         "expert_ids": "0..%d（固定）" % (top_k - 1),
         "weights": "gate_up (E,2F,H) + down (E,H,F) 单层",
+        "scope": field,
+        "launched_kernels": (
+            "整层调用（gate_up_act + act_combine + down_sum [+ out_reduce]）"
+            if field == "layer"
+            else "整层调用；字节只算 %s 那一段" % field
+        ),
     }
+
+    # ★ 字节必须按"这条 subject 到底看哪个 kernel / 哪次调用"来算。
+    #   第一版把整层字节给了 per-kernel 的 subject：于是 gate_up 的"达成率"里
+    #   混进了 down 的字节，数字好看到 97% 却是假的。per-kernel 与整层必须分开。
+    if bits is None:
+        per_unit = 2
+        scale_gu = scale_dn = 0
+    else:
+        per_unit = bits / 8.0
+        # scale 沿 K 维分组：gate_up 每组 2F 行、hidden/g 组；down 每组 H 行、ffn/g 组
+        scale_gu = int(top_k * 2 * ffn * (hidden // args.group_size)) * 2
+        scale_dn = int(top_k * hidden * (ffn // args.group_size)) * 2
+
+    bytes_by_field = {
+        "gate_up": int(gate_up_elems * per_unit) + scale_gu,
+        "down": int(down_elems * per_unit) + scale_dn,
+        "layer": int((gate_up_elems + down_elems) * per_unit) + scale_gu + scale_dn,
+    }
+    if field not in bytes_by_field:
+        raise ValueError("field 必须是 gate_up / down / layer，得到 %r" % (field,))
 
     if bits is None:
         from lemoq.kernels.moe_grouped import grouped_moe_forward  # noqa: PLC0415
@@ -126,8 +156,7 @@ def _build_grouped(args: Any, *, bits: int | None):
         def fn():
             return grouped_moe_forward(x, fused, ids, top_w)
 
-        read = (gate_up_elems + down_elems) * 2
-        meta["bytes_note"] = "top_k × (2F·H + H·F) × 2 B（fp16 权重）"
+        meta["bytes_note"] = "top_k × 对应权重元素数 × 2 B（fp16）"
     else:
         from lemoq.kernels.moe_grouped_quant import (  # noqa: PLC0415
             grouped_moe_forward_quant,
@@ -136,21 +165,12 @@ def _build_grouped(args: Any, *, bits: int | None):
 
         q = quantize_fused_experts(fused, bits=bits, group_size=args.group_size)
         del fused  # 别让 fp16 与 packed 同时占显存（在计费机器上这是实打实的钱）
-        code_bytes = int(gate_up_elems * bits / 8) + int(down_elems * bits / 8)
-        # scale 沿 K 维分组：gate_up 每组 2F 行、hidden/g 组；down 每组 H 行、ffn/g 组
-        n_gu = top_k * 2 * ffn * (hidden // args.group_size)
-        n_dn = top_k * hidden * (ffn // args.group_size)
-        scale_bytes = (n_gu + n_dn) * 2
+        meta["bytes_note"] = "top_k 个专家的 packed codes（%d-bit）+ per-group fp16 scale" % bits
 
         def fn():
             return grouped_moe_forward_quant(x, q, ids, top_w)
 
-        read = code_bytes + scale_bytes
-        meta["bytes_note"] = "top_k 个专家的 packed codes（%d-bit）+ per-group fp16 scale" % bits
-        meta["packed_code_bytes"] = code_bytes
-        meta["scale_bytes"] = scale_bytes
-
-    return fn, {"read": int(read), "write": 0}, meta
+    return fn, {"read": int(bytes_by_field[field]), "write": 0}, meta
 
 
 def _build_dequant(args: Any):
@@ -251,43 +271,83 @@ def _build_rmsnorm(args: Any):
 
 
 SUBJECTS: dict[str, dict[str, Any]] = {
+    # --- ncu 臂：per-kernel（`--kernel-name` 精确匹配一个 kernel，字节只算它那一段） ---
     "grouped_fp16_gate_up": {
         "kernel": "_gate_up_act_kernel",
-        "builder": lambda a: _build_grouped(a, bits=None),
+        "builder": lambda a: _build_grouped(a, bits=None, field="gate_up"),
         "note": "grouped MoE GEMV 第一段：gate/up 投影（top_k 个专家）",
+        "in_ncu": True,
+        "in_iso": False,
     },
     "grouped_w8a16_gate_up": {
         "kernel": "_gate_up_act_kernel_q",
-        "builder": lambda a: _build_grouped(a, bits=8),
+        "builder": lambda a: _build_grouped(a, bits=8, field="gate_up"),
         "note": "同上，权重 8-bit packed + per-group scale 在 kernel 内解包",
+        "in_ncu": True,
+        "in_iso": False,
     },
     "grouped_w4a16_gate_up": {
         "kernel": "_gate_up_act_kernel_q",
-        "builder": lambda a: _build_grouped(a, bits=4),
+        "builder": lambda a: _build_grouped(a, bits=4, field="gate_up"),
         "note": "同上，4-bit —— 看 sector/request 是否退化（nibble 展开最容易不合并）",
+        "in_ncu": True,
+        "in_iso": False,
     },
     "grouped_fp16_down": {
         "kernel": "_down_sum_kernel",
-        "builder": lambda a: _build_grouped(a, bits=None),
+        "builder": lambda a: _build_grouped(a, bits=None, field="down"),
         "note": "grouped MoE GEMV 第二段：down 投影 + top_k 加权求和",
+        "in_ncu": True,
+        "in_iso": False,
+    },
+    # --- isolated 臂：per-call（整层调用，字节就是整层；不需要计数器） ---
+    "grouped_fp16_layer": {
+        "kernel": "-（整层调用）",
+        "builder": lambda a: _build_grouped(a, bits=None, field="layer"),
+        "note": "grouped MoE **整层**一次调用（fp16）：4 个 kernel 的合计字节与端到端时间",
+        "in_ncu": False,
+        "in_iso": True,
+    },
+    "grouped_w8a16_layer": {
+        "kernel": "-（整层调用）",
+        "builder": lambda a: _build_grouped(a, bits=8, field="layer"),
+        "note": "同上，8-bit packed 权重（不物化 fp16）",
+        "in_ncu": False,
+        "in_iso": True,
+    },
+    "grouped_w4a16_layer": {
+        "kernel": "-（整层调用）",
+        "builder": lambda a: _build_grouped(a, bits=4, field="layer"),
+        "note": "同上，4-bit packed 权重",
+        "in_ncu": False,
+        "in_iso": True,
     },
     "dequant_lm_head_w8a16": {
         "kernel": "_dequant_gemm_kernel",
         "builder": _build_dequant,
         "note": "dense 融合反量化 GEMM，形状取 lm_head（单次调用字节量最大的 dense 层）",
         "extra": {"dense_n": 50304, "dense_k": 2048},
+        "in_ncu": True,
+        "in_iso": True,
     },
     "attn_split_kv_1024": {
         "kernel": "_attn_split_kernel",
         "builder": _build_attn,
-        "note": "split-KV decode attention，ctx=1024（整段 k/v 都在 L2 之外）",
+        "note": "split-KV decode attention，ctx=1024",
+        "in_ncu": True,
+        "in_iso": True,
     },
     "rmsnorm_h2048": {
         "kernel": "_rms_norm_kernel",
         "builder": _build_rmsnorm,
         "note": "自研融合 RMSNorm，H=2048（每层 4 个 norm 里的 input/post_attention）",
+        "in_ncu": True,
+        "in_iso": True,
     },
 }
+
+NCU_SUBJECTS: tuple[str, ...] = tuple(s for s, spec in SUBJECTS.items() if spec["in_ncu"])
+ISO_SUBJECTS: tuple[str, ...] = tuple(s for s, spec in SUBJECTS.items() if spec["in_iso"])
 
 # 默认跳过 2 次 launch 再取 1 次：第 1 次是 Triton JIT 编译 + cubin 加载，
 # 第 2 次是"首次真跑"（此时 L2 状态与后续不同）。第 3 次才是稳态。
@@ -670,8 +730,69 @@ def _measured_bw_gbps(path: str = "results/machine_probe.json") -> tuple[float |
         return None, "%s 读不到（%s）" % (full, type(exc).__name__)
 
 
-def _time_subject(fn: Any, args: Any) -> dict[str, Any]:
-    """R 轮 × 每轮 I 次，报每轮均值的 p50/min/MAD。"""
+def _foreign_processes() -> list[dict[str, Any]]:
+    """记录同卡的他人进程（协议：记录，**绝不 kill**）。
+
+    ★ 为什么隔离计时也必须记录：本模式的 p50 里含 launch 间隔，宿主 CPU 被压住时
+      GPU 会在两次 launch 之间空转 ⇒ p50 被抬高。所以同时报 min（受宿主影响最小）
+      与 p50，并把同租户快照写进工件 —— 让读者自己看到"这份数字是在什么环境下取的"。
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,process_name,used_memory",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [{"status": "unavailable", "reason": type(exc).__name__}]
+    out: list[dict[str, Any]] = []
+    self_pid = str(os.getpid())
+    for line in (proc.stdout or "").splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if not parts or not parts[0]:
+            continue
+        pid = parts[0]
+        if pid == self_pid:
+            # ★ 别把自己写进"他人进程"：第一版的 foreign_processes 里就是本工具自己，
+            #   读起来像"有共租户"，其实是空场。自己的 pid 单独记（见 payload.self_pid）。
+            continue
+        entry: dict[str, Any] = {
+            "pid": pid,
+            "process_name": parts[1] if len(parts) > 1 else "",
+            "used_memory": parts[2] if len(parts) > 2 else "",
+        }
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as fh:
+                entry["cmdline"] = fh.read().decode("utf-8", "replace").replace("\0", " ").strip()
+        except OSError:
+            entry["cmdline"] = "<unreadable>"
+        try:
+            stat = subprocess.run(
+                ["ps", "-o", "pcpu=", "-p", pid], capture_output=True, text=True, timeout=15
+            )
+            entry["cpu_pct"] = (stat.stdout or "").strip()
+        except (OSError, subprocess.TimeoutExpired):
+            entry["cpu_pct"] = None
+        out.append(entry)
+    return out
+
+
+def _time_subject(fn: Any, args: Any, *, flush_mb: int) -> dict[str, Any]:
+    """两种计时，缺一不可：
+
+    1. **warm batch**：R 轮 × 每轮 I 次，事件包住整批。接近真实推理（权重留在 L2 里），
+       但工作集 < L2 的 subject 会得到"带宽 > 实测可达带宽"的假相（L2 不是 DRAM）；
+    2. **cold single**：每次调用前先 memset 一块 256 MB 的 buffer 把 L2 冲掉，
+       再单独计时一次。**这一列才代表 DRAM**。
+
+    ★ 事件计时本身有固定开销（一次 record 约 µs 量级），小 kernel 上不能忽略。
+      所以显式测一个"空调用"的开销并记录，读者可以自己减。
+    """
     import statistics  # noqa: PLC0415
     import time  # noqa: PLC0415
 
@@ -680,26 +801,71 @@ def _time_subject(fn: Any, args: Any) -> dict[str, Any]:
     for _ in range(max(0, args.warmup)):
         fn()
     torch.cuda.synchronize()
-    rounds: list[float] = []
+
+    def _pair():
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        return start, end
+
+    # 空调用 = 事件地板（不许当成 kernel 时间）
+    floor_samples: list[float] = []
+    for _ in range(20):
+        start, end = _pair()
+        start.record()
+        end.record()
+        torch.cuda.synchronize()
+        # ★ 方向：`start.elapsed_time(end)`（self 先记、参数后记）。写反了会得到一个
+        #   "恰好等于真值但带负号"的数 —— 它看起来像环境坏了，其实是调用写反了。
+        floor_samples.append(start.elapsed_time(end))
+    event_floor_ms = min(floor_samples)
+
+    warm: list[float] = []
     for _ in range(args.repeats):
-        start, end = torch.cuda.Event(True), torch.cuda.Event(True)
+        start, end = _pair()
         start.record()
         for _ in range(args.iso_iters):
             fn()
         end.record()
         torch.cuda.synchronize()
-        rounds.append(end.elapsed_time(start) / args.iso_iters)
-    ordered = sorted(rounds)
-    median = statistics.median(ordered)
-    return {
-        "rounds_ms": [round(v, 6) for v in rounds],
-        "p50_ms": round(median, 6),
-        "min_ms": round(ordered[0], 6),
-        "max_ms": round(ordered[-1], 6),
-        "mad_ms": round(statistics.median([abs(v - median) for v in ordered]), 6),
-        "method": "CUDA events 包住每轮 %d 次调用；报每轮均值的 p50/min/MAD" % args.iso_iters,
+        warm.append(start.elapsed_time(end) / args.iso_iters)
+
+    flush = None
+    cold: list[float] = []
+    if flush_mb > 0:
+        flush = torch.empty(flush_mb * 1024 * 1024, dtype=torch.uint8, device=args.device)
+        for _ in range(args.cold_iters):
+            flush.zero_()  # 冲掉 L2（256 MB > 96 MB）
+            start, end = _pair()
+            start.record()
+            fn()
+            end.record()
+            torch.cuda.synchronize()
+            cold.append(start.elapsed_time(end))
+
+    def _stats(values: list[float]) -> dict[str, Any]:
+        ordered = sorted(values)
+        median = statistics.median(ordered)
+        return {
+            "n": len(values),
+            "p50_ms": round(median, 6),
+            "min_ms": round(ordered[0], 6),
+            "max_ms": round(ordered[-1], 6),
+            "mad_ms": round(statistics.median([abs(v - median) for v in ordered]), 6),
+            "samples_ms": [round(v, 5) for v in values],
+        }
+
+    out: dict[str, Any] = {
+        "warm_batch": _stats(warm),
+        "cold_single": _stats(cold) if cold else None,
+        "event_floor_ms": round(event_floor_ms, 6),
+        "flush_mb": flush_mb if flush is not None else 0,
+        "method": (
+            "warm = 事件包住每轮 %d 次调用；cold = 每次调用前 memset %d MB 冲 L2 后单独计时"
+            % (args.iso_iters, flush_mb)
+        ),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
+    return out
 
 
 def _run_isolated(args: Any) -> int:
@@ -709,10 +875,18 @@ def _run_isolated(args: Any) -> int:
     if bw is None:
         print("需要实测可达带宽：%s" % bw_src, file=sys.stderr)
         return 2
-    chosen = args.only or sorted(SUBJECTS)
+    chosen = list(args.only) if args.only else list(ISO_SUBJECTS)
     unknown = [s for s in chosen if s not in SUBJECTS]
     if unknown:
         print("未知 subject: %s" % ", ".join(unknown), file=sys.stderr)
+        return 2
+    not_iso = [s for s in chosen if not SUBJECTS[s]["in_iso"]]
+    if not_iso:
+        print(
+            "--isolated 只支持按「一次调用」计时的 subject；这些是 per-kernel 的，"
+            "请用 ncu 臂：%s" % ", ".join(not_iso),
+            file=sys.stderr,
+        )
         return 2
 
     ncu_status = {
@@ -742,72 +916,109 @@ def _run_isolated(args: Any) -> int:
         is_canary = index == len(order) - 1 and len(chosen) > 0
         label = "canary:" + subject if is_canary else subject
         fn, byte_info, meta = build_one(subject)
-        timing = _time_subject(fn, args)
+        timing = _time_subject(fn, args, flush_mb=args.flush_mb)
         total_bytes = byte_info.get("read", 0) + byte_info.get("write", 0)
-        gbps = total_bytes / (timing["p50_ms"] * 1e-3) / 1e9 if timing["p50_ms"] else None
-        gbps_min = total_bytes / (timing["min_ms"] * 1e-3) / 1e9 if timing["min_ms"] else None
+        floor = timing["event_floor_ms"]
+
+        def _rate(ms: float, subtract_floor: bool) -> float | None:
+            effective = ms - floor if subtract_floor else ms
+            if not effective or effective <= 0:
+                return None
+            return total_bytes / (effective * 1e-3) / 1e9
+
+        # 主判据：cold（冲过 L2）− 事件地板。减去地板是必须的：不加的话
+        # 8 KB 的 RMSNorm 会把 ~2 µs 的事件开销当成自己的时间。
+        cold = timing["cold_single"] or {}
+        cold_min = cold.get("min_ms")
+        gbps_cold = None if cold_min is None else _rate(cold_min, True)
+        gbps_cold_p50 = None if cold.get("p50_ms") is None else _rate(cold["p50_ms"], True)
+        warm = timing["warm_batch"]
+        gbps_warm = _rate(warm["p50_ms"], False)
+        warm_ws_mb = total_bytes / 1e6
         record = {
             "subject": subject,
             "label": label,
             "kernel": SUBJECTS[subject]["kernel"],
             "note": SUBJECTS[subject]["note"],
             "analytical_bytes": byte_info,
+            "working_set_mb": round(warm_ws_mb, 1),
+            "l2_mb": args.l2_mb,
+            "working_set_fits_l2": warm_ws_mb < args.l2_mb,
             "meta": meta,
             "timing": timing,
-            "achieved_gbps_p50": None if gbps is None else round(gbps, 1),
-            "achieved_gbps_best": None if gbps_min is None else round(gbps_min, 1),
+            "achieved_gbps_cold_best": None if gbps_cold is None else round(gbps_cold, 1),
+            "achieved_gbps_cold_p50": (None if gbps_cold_p50 is None else round(gbps_cold_p50, 1)),
+            "achieved_gbps_warm_p50": None if gbps_warm is None else round(gbps_warm, 1),
             "measured_achievable_gbps": bw,
-            "attainment_pct_p50": None if gbps is None else round(100.0 * gbps / bw, 1),
-            "attainment_pct_best": None if gbps_min is None else round(100.0 * gbps_min / bw, 1),
+            "attainment_pct_cold_best": (
+                None if gbps_cold is None else round(100 * gbps_cold / bw, 1)
+            ),
+            "attainment_pct_cold_p50": (
+                None if gbps_cold_p50 is None else round(100 * gbps_cold_p50 / bw, 1)
+            ),
+            "attainment_pct_warm_p50": (
+                None if gbps_warm is None else round(100 * gbps_warm / bw, 1)
+            ),
             "evidence_kind": (
-                "kernel 级带宽达成率（解析字节 / 隔离计时 / 实测可达带宽）；"
+                "kernel 级带宽达成率 = 解析字节 / (cold 计时 − 事件地板) / 实测可达带宽；"
                 "**不是** ncu 计数器的 dram__bytes"
             ),
         }
         results[label] = record
         print(
-            "%-26s %8.4f ms  %8.1f GB/s (best %8.1f)  %5.1f%% of wall"
+            "%-26s cold %8.4f ms  %8.1f GB/s  %5.1f%% of wall   (warm %5.1f%%)"
             % (
                 label,
-                timing["p50_ms"],
-                gbps or 0.0,
-                gbps_min or 0.0,
-                100.0 * gbps / bw if gbps else 0.0,
+                cold_min if cold_min is not None else float("nan"),
+                gbps_cold or 0.0,
+                100 * gbps_cold / bw if gbps_cold else 0.0,
+                100 * gbps_warm / bw if gbps_warm else 0.0,
             ),
             flush=True,
         )
 
+    def _cold_ms(label: str) -> float | None:
+        cold = results[label]["timing"]["cold_single"]
+        return None if not cold else cold["min_ms"]
+
     drift = None
     if len(order) > len(chosen):
-        head = results[chosen[0]]["timing"]["p50_ms"]
-        tail = results["canary:" + chosen[0]]["timing"]["p50_ms"]
-        drift = 100.0 * (tail - head) / head if head else None
-        print(
-            "\n金丝雀（%s）：%.4f → %.4f ms，漂移 %s%% ⇒ 本轮%s"
-            % (
-                chosen[0],
-                head,
-                tail,
-                _fmt(drift, 2),
-                "**作废**" if (drift is None or abs(drift) > 5.0) else "有效",
+        head = _cold_ms(chosen[0])
+        tail = _cold_ms("canary:" + chosen[0])
+        if head and tail:
+            drift = 100.0 * (tail - head) / head
+            print(
+                "\n金丝雀（%s，cold min）：%.4f → %.4f ms，漂移 %s%% ⇒ 本轮%s"
+                % (
+                    chosen[0],
+                    head,
+                    tail,
+                    _fmt(drift, 2),
+                    "**作废**" if abs(drift) > 5.0 else "有效",
+                )
             )
-        )
 
     payload = {
         "generated_by": "tools/ncu_evidence.py --isolated",
-        "kind": "kernel-level bandwidth attainment (no performance counters)",
+        "kind": "kernel/call-level bandwidth attainment (no performance counters)",
         "device": torch.cuda.get_device_name(0),
         "measured_achievable_gbps": bw,
         "measured_achievable_source": bw_src,
-        "clock_note": "不锁时钟；实验机器为空闲独占（先看 nvidia-smi）",
+        "event_floor_ms": results[chosen[0]]["timing"]["event_floor_ms"] if chosen else None,
+        "flush_mb": args.flush_mb,
+        "clock_note": "不锁时钟；同租户快照见 foreign_processes（协议：记录，绝不 kill）",
+        "self_pid": os.getpid(),
+        "foreign_processes": _foreign_processes(),
         "ncu": ncu_status,
         "canary_drift_pct": None if drift is None else round(drift, 3),
         "subjects": results,
         "caveat": (
-            "小于约 10 µs 的 kernel 的批内 wall time 含 launch 间隔，达成率被低估 —— "
-            "对这类 kernel 正确的读法是'延迟受限'；连续调用之间可能命中 L2，"
-            "所以同时报 min 与 p50，且 DRAM 上限一律用实测可达带宽（1561.9 GB/s），"
-            "不用规格值（硬规则 4）。"
+            "主判据是 cold（每次调用前 memset 256 MB 冲掉 L2）− 事件地板：不冲 L2 的话，"
+            "工作集小于 96 MB 的 subject（8/4-bit 的权重、attention 的 k/v）会命中 L2，"
+            "算出超过实测可达带宽的假达成率；不减去事件地板的话，8 KB 的 RMSNorm 会把 "
+            "µs 级的事件开销算成自己的时间。cold 计时含**单次 launch** 的间隔，"
+            "所以 <10 µs 的 kernel 达成率仍是下界（正确的读法是「延迟受限」）。"
+            "DRAM 上限一律用实测可达带宽，不用规格值（硬规则 4）。"
         ),
     }
     out = args.json or os.path.join(args.out_dir, "isolated.json")
@@ -849,7 +1060,14 @@ def main(argv: list[str] | None = None) -> int:
         help="拿不到性能计数器时的回退臂：隔离计时 + 解析字节算 kernel 级带宽达成率",
     )
     ap.add_argument("--iso-iters", type=int, default=50, help="--isolated 每轮调用次数")
-    ap.add_argument("--repeats", type=int, default=5, help="--isolated 轮数")
+    ap.add_argument("--repeats", type=int, default=5, help="--isolated 的 warm 轮数")
+    ap.add_argument(
+        "--cold-iters", type=int, default=15, help="--isolated 的 cold 单次计时次数（每次前冲 L2）"
+    )
+    ap.add_argument("--flush-mb", type=int, default=256, help="--isolated 冲 L2 的 buffer 大小")
+    ap.add_argument(
+        "--l2-mb", type=int, default=96, help="本卡 L2 容量（5090 = 96 MB），用于标注是否 L2 驻留"
+    )
     ap.add_argument("--machine-probe", default="results/machine_probe.json")
     ap.add_argument(
         "--canary-skip",
@@ -882,10 +1100,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    chosen = args.only or sorted(SUBJECTS)
+    chosen = list(args.only) if args.only else list(NCU_SUBJECTS)
     unknown = [s for s in chosen if s not in SUBJECTS]
     if unknown:
         print("未知 subject: %s（可选：%s）" % (", ".join(unknown), ", ".join(sorted(SUBJECTS))))
+        return 2
+    not_ncu = [s for s in chosen if not SUBJECTS[s]["in_ncu"]]
+    if not_ncu:
+        print(
+            "ncu 臂只支持 per-kernel 的 subject；这些请用 --isolated：%s" % ", ".join(not_ncu),
+            file=sys.stderr,
+        )
         return 2
 
     os.makedirs(args.out_dir, exist_ok=True)
