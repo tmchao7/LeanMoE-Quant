@@ -54,6 +54,26 @@ def _artifact() -> dict:
     }
 
 
+def test_build_arms_has_no_duplicate_ids():
+    """★ arm id 撞车会让后面那个静默覆盖前面的聚合，也会白跑一遍 GPU。
+
+    实测撞过：`repro_doc` 与 `prompt_set` 都生成 `%s_attn_experts_g%d`，
+    w8a16/w4a16 × {32,64,128} 共 6 个 id 重复。`add()` 现在拒绝重复，
+    并且 `repro_doc` 的 id 加了 `_doc` 后缀 —— 规范名留给 `prompt_set`
+    （门建在 prompt 集上，METRICS §1）。
+    """
+    from tools.quant_probe import build_arms
+
+    arms = build_arms()
+    ids = [a["id"] for a in arms]
+    assert len(ids) == len(set(ids)), [k for k in ids if ids.count(k) > 1]
+    doc = {a["id"] for a in arms if a["group"] == "repro_doc"}
+    pset = {a["id"] for a in arms if a["group"] == "prompt_set"}
+    assert doc and pset and not (doc & pset), "两组历史上撞过车"
+    # 门引用读的是 prompt_set 的规范名，必须还在
+    assert "w8a16_attn_experts_g128" in pset
+
+
 def test_aggregate_only_computes_mean_over_real_windows_and_derives_the_gate(tmp_path):
     path = tmp_path / "probe.json"
     path.write_text(json.dumps(_artifact()), encoding="utf-8")

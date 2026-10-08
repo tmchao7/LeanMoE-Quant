@@ -74,6 +74,17 @@ def build_arms(
     def add(group: str, arm: dict[str, Any]) -> None:
         arm = dict(arm)
         arm["group"] = group
+        # ★ arm id 撞车必须响亮失败。实测撞过：`repro_doc` 与 `prompt_set` 都生成
+        #   `%s_attn_experts_g%d`，于是 w8a16/w4a16 × {32,64,128} 共 **6 个 id 重复**。
+        #   `result["arms"].setdefault(...)` 保留先到的那个（repro_doc），后到的
+        #   `rec["windows"][label] = entry` 又把它覆盖 —— 净效果是 6 个臂白跑一遍
+        #   GPU，而且记录里的 group 标签是错的。重复 id 一律拒绝，不静默覆盖。
+        for existing in arms:
+            if existing["id"] == arm["id"]:
+                raise ValueError(
+                    "arm id 重复：%r（组 %s 与 %s）—— 撞车会让后面那个静默覆盖前面"
+                    "的聚合，也会白跑一遍 GPU。" % (arm["id"], existing["group"], group)
+                )
         arms.append(arm)
 
     for scheme in ("w8a16", "w4a16"):
@@ -89,12 +100,16 @@ def build_arms(
                     "layers": None,
                 },
             )
+    # ★ 这一组以前用的 id 与下面 `prompt_set` 组**完全相同**（`%s_attn_experts_g%d`）。
+    #   门建在 prompt **集**上（METRICS §1），所以规范名应当留给 `prompt_set`；
+    #   这里加 `_doc` 后缀区分（ beide 的 scheme/group_size/targets 一致，数值也一致，
+    #   但"这个 id 属于哪一组"必须能从工件里看出来）。撞车本身由 `add()` 拒绝。
     for scheme in ("w8a16", "w4a16"):
         for g in (32, 64, 128):
             add(
                 "repro_doc",
                 {
-                    "id": "%s_attn_experts_g%d" % (scheme, g),
+                    "id": "%s_attn_experts_g%d_doc" % (scheme, g),
                     "kind": "rtn",
                     "scheme": scheme,
                     "group_size": g,
@@ -689,13 +704,20 @@ def aggregate_windows(
             "top1_min": min(top1s) if top1s else None,
             "ones_control_kl": ones_kl,
         }
-        bits = 8
+        # ★ `spec` 只有 kind=="rtn" 的臂写。mixed 臂写的是 `plan`、noise 臂写的是
+        #   `lam` —— 两者都没有 `spec`，于是旧代码把 `bits` 留在**默认 8**。后果有两层：
+        #     (a) 工件里 `gate["weight_bits"]` 对 `mixed_qk_w4_vo_w8_exp_w4` 这类
+        #         **含 w4 子计划**的臂记成 8 —— 一个写进工件的错值；
+        #     (b) 门用 kl_gate_w8=0.01 而不是 0.05 去判它。
+        #   没有单一位宽的臂就**不许**编一个：weight_bits=None、kl_max=None、
+        #   按位宽的判据为 None（未判），verdict=None。未测 ≠ 通过（硬规则 1）。
+        bits = None
         for v in real.values():
             wb = (v.get("spec") or {}).get("weight_bits")
             if wb:
                 bits = int(wb)
                 break
-        th = kl_gate_w8 if bits == 8 else kl_gate_w4
+        th = None if bits is None else (kl_gate_w8 if bits == 8 else kl_gate_w4)
         agg = rec["aggregate"]
         # ★ 门是**合取**，且两个判据都用**均值**：
         #       gate = PASS  ⟺  kl_mean < kl_max  且  top1_mean >= top1_gate
@@ -706,17 +728,27 @@ def aggregate_windows(
             "weight_bits": bits,
             "kl_max": th,
             "top1_min_required": top1_gate,
-            "kl_mean_pass": mean < th,
-            "all_windows_pass": all(k < th for k in kls),
-            "top1_mean_pass": bool(top1_mean_pass),
+            # bits/th 为 None 时这三项都是 None（**未判**），不是 False —— 那是
+            # "判了不过"，而这里是"没有单一位宽，不适用按位宽的 KL 门"。
+            "kl_mean_pass": None if th is None else mean < th,
+            "all_windows_pass": None if th is None else all(k < th for k in kls),
+            "top1_mean_pass": (
+                None if th is None else bool(top1_mean_pass)
+            ),  # 门是按位宽建的，位宽未知则整体不判
             # 额外信息（不是判据）：逐窗口最差的那个
             "top1_min_pass": (agg["top1_min"] is None) or (agg["top1_min"] >= top1_gate),
             # ★ 工件自己必须能回答"这个臂过没过门"，而不是让人去别处对表
-            "verdict": "PASS" if (mean < th and top1_mean_pass) else "FAIL",
-            "verdict_basis": "kl_mean 与 top1_**均值** 的合取（METRICS §1 的口径）",
+            "verdict": (
+                None if th is None else ("PASS" if (mean < th and top1_mean_pass) else "FAIL")
+            ),
+            "verdict_basis": (
+                "本臂没有单一位宽（mixed / noise），不适用按位宽的 KL 门"
+                if th is None
+                else "kl_mean 与 top1_**均值** 的合取（METRICS §1 的口径）"
+            ),
         }
         if ones_kl is not None:
-            rec["gate"]["ones_control_pass"] = ones_kl < th
+            rec["gate"]["ones_control_pass"] = None if th is None else ones_kl < th
         print(
             "  %-30s kl mean=%-11.6g sd=%-9.4g [min %.6g max %.6g] spread=%-7s ones=%-11s mean_pass=%-5s all_pass=%s"
             % (
@@ -917,11 +949,21 @@ def main(argv: list[str] | None = None) -> int:
         if not args.prompt_cache or not os.path.exists(args.prompt_cache):
             raise SystemExit("--prompt-source wikitext 需要 --prompt-cache 指向已缓存的 token id")
         cached = torch.load(args.prompt_cache, weights_only=True)
+        # ★ 先压成 1-D：缓存若是 (1, N) 的二维张量，`cached[a:b]` 切的是第 0 维，
+        #   `.view(1, -1)` 于是给出一个**比 ctx 长得多**的 prompt，且不报错 ——
+        #   短窗口会静默混进聚合（与 ctx=1024 的窗口一起算 mean/sd/min/max）。
+        cached = cached.reshape(-1)
         if cached.numel() < offset + args.ctx:
             raise SystemExit(
                 "缓存 token 不够：%d < offset %d + ctx %d" % (int(cached.numel()), offset, args.ctx)
             )
-        return cached[offset : offset + args.ctx].view(1, -1).to(device)
+        window = cached[offset : offset + args.ctx]
+        if window.numel() != args.ctx:
+            raise SystemExit(
+                "窗口长度 %d != ctx %d（offset=%d）—— 不能让它静默进聚合"
+                % (int(window.numel()), args.ctx, offset)
+            )
+        return window.view(1, -1).to(device)
 
     # ★ prompt **集**：METRICS.md 说的是"固定 prompt 集上的逐位置 KL 平均"。
     #   单个窗口的估计本身有 5.6x 的窗口间散布（见 EXP-p1-03），所以门必须建在集合上。
