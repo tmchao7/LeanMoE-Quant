@@ -16,9 +16,10 @@
 <text x="545.0" y="406.0" font-size="11.0" fill="#57606a" font-weight="400" text-anchor="middle">measured speedup (×, same-round A/B)</text>
 <text x="194.0" y="136.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">Execution</text>
 <text x="194.0" y="151.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">(eager → CUDA Graph)</text>
-<rect x="210.0" y="121.5" width="615.2" height="16.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
-<text x="817.2" y="134.0" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">2.75×  ctx=1024   (9.88 → 3.59 ms)</text>
-<text x="216.0" y="155.5" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">refresh VOID — no same-round pair</text>
+<rect x="210.0" y="121.5" width="542.8" height="16.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
+<text x="744.8" y="134.0" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">2.43×  ctx=1024   (9.88 → 4.07 ms, pre-P2j round)</text>
+<rect x="210.0" y="143.5" width="301.1" height="16.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
+<text x="519.1" y="156.0" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.35×  ctx=4096   (9.87 → 7.32 ms, pre-P2j round)</text>
 <text x="194.0" y="201.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">Quantization</text>
 <text x="194.0" y="216.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">(w8a16 vs fp16, in-graph)</text>
 <rect x="210.0" y="186.5" width="266.0" height="16.0" fill="#12b886" opacity="1.00" rx="3.0"/>

@@ -78,6 +78,22 @@ SOURCES: dict[str, dict[str, str]] = {
         "path": "results/EXP-p4b-01-truncation__bit_width=w8a16_execution=cudagraph_ctx=4096/result.json",
         "ptr": "latency.per_token_p50_ms",
     },
+    "fp16_cudagraph_1024_pre_p2j": {
+        "kind": "payload",
+        "path": "results/EXP-p2j-refresh/archive/EXP-p4b-01-truncation__bit_width=fp16_execution=cudagraph_ctx=1024.json",
+        "ptr": "latency.per_token_p50_ms",
+        "note": "P2j 归档的同轮 cudagraph（HF norm 轮）",
+    },
+    "fp16_cudagraph_4096_pre_p2j": {
+        "kind": "payload",
+        "path": "results/EXP-p2j-refresh/archive/EXP-p4b-01-truncation__bit_width=fp16_execution=cudagraph_ctx=4096.json",
+        "ptr": "latency.per_token_p50_ms",
+    },
+    "fp16_eager_4096": {
+        "kind": "payload",
+        "path": "results/EXP-p2j-refresh/archive/EXP-p4b-01-truncation__bit_width=fp16_execution=eager_ctx=4096.json",
+        "ptr": "latency.per_token_p50_ms",
+    },
     "fp16_eager_1024": {
         "kind": "payload",
         "path": "results/EXP-p4b-01-truncation__bit_width=fp16_execution=eager_ctx=1024/result.json",
@@ -105,6 +121,12 @@ SOURCES: dict[str, dict[str, str]] = {
         "kind": "payload",
         "path": "results/EXP-p4c-01-run/v3_fp16_kernel_4096_result.json",
         "ptr": "latency.per_token_p50_ms",
+    },
+    "p4c_w8a16_sdpa_1024": {
+        "kind": "payload",
+        "path": "results/EXP-p4c-01-run/v3_w8a16_sdpa_1024_result.json",
+        "ptr": "latency.per_token_p50_ms",
+        "note": "v3 同轮的 w8a16×sdpa，用作 attention 那一跳的分母",
     },
     "p4c_w8a16_kernel_1024": {
         "kind": "payload",
@@ -295,11 +317,18 @@ def fig1(inputs: dict[str, Any]) -> str:
             [
                 (
                     "ctx=1024",
-                    ratio("fp16_eager_1024", "fp16_cudagraph_1024"),
+                    ratio("fp16_eager_1024", "fp16_cudagraph_1024_pre_p2j"),
                     COLORS["fp16"],
-                    "%s → %s ms" % (ms("fp16_eager_1024"), ms("fp16_cudagraph_1024")),
+                    "%s → %s ms, pre-P2j round"
+                    % (ms("fp16_eager_1024"), ms("fp16_cudagraph_1024_pre_p2j")),
                 ),
-                ("ctx=4096", None, COLORS["fp16"], "refresh VOID — no same-round pair"),
+                (
+                    "ctx=4096",
+                    ratio("fp16_eager_4096", "fp16_cudagraph_4096_pre_p2j"),
+                    COLORS["fp16"],
+                    "%s → %s ms, pre-P2j round"
+                    % (ms("fp16_eager_4096"), ms("fp16_cudagraph_4096_pre_p2j")),
+                ),
             ],
         ),
         (
@@ -431,26 +460,59 @@ def fig1(inputs: dict[str, Any]) -> str:
 
 
 def fig2(inputs: dict[str, Any]) -> str:
-    """★ 这里只把**同轮可比的**格子连成一条链。
+    """★ 链条里**每一跳**都必须是同轮（或同格前后）比较，且逐跳标注它是什么杠杆。
 
-    fp16 eager 的 82.64 ms 来自另一个轮次（EXP-p0-02 的工件），把它接进链里会造出一个
-    "8.36× vs previous" 的假杠杆 —— 那正是本项目禁止的跨轮混比（硬规则 3）。
-    所以它单独画成"参照"，链从 E7 那一轮的 eager 开始。
+    第一版把"pre-P2i 的 eager"接上"post-P2j 的 graph"，凭空造出一个 2.75× —— 那是跨轮混比
+    （硬规则 3）。现在：
+      跳1 execution  : 同为 pre-P2j 那一轮（归档里的 eager 与 cudagraph 两个 payload）
+      跳2 融合 norm  : 同一个 cudagraph 格在 P2j 前后的值（4.0670 → 3.5881）
+      跳3 quantization: 同轮（P2j canonical 的两个格）
+      跳4 attention  : 用 v3 同轮的 w8a16×sdpa（3.0036）作分母，而不是上一根条
+    最早那个 82.64 ms 来自另一轮，画成空心条、明确标注"不属于链条"。
     """
 
     def p50(name: str) -> float:
         return float(inputs[name]["value"])
 
+    eager_pre = p50("fp16_eager_1024")
+    graph_pre = p50("fp16_cudagraph_1024_pre_p2j")
+    fp16_graph_now = p50("fp16_cudagraph_1024")
+    w8a16_graph_now = p50("w8a16_cudagraph_1024")
+    w8a16_sdpa_v3 = p50("p4c_w8a16_sdpa_1024")
+    w8a16_kernel = p50("p4c_w8a16_kernel_1024")
+
     chain = [
-        ("fp16 eager (E7 round)", p50("fp16_eager_1024"), COLORS["fp16"]),
-        ("fp16 + CUDA Graph", p50("fp16_cudagraph_1024"), COLORS["fp16"]),
-        ("w8a16 + CUDA Graph", p50("w8a16_cudagraph_1024"), COLORS["quant"]),
-        ("w8a16 × split-KV kernel", p50("p4c_w8a16_kernel_1024"), COLORS["attn"]),
+        ("fp16 eager", eager_pre, COLORS["fp16"], None),
+        (
+            "fp16 + CUDA Graph",
+            graph_pre,
+            COLORS["fp16"],
+            "%.2f×  execution axis (same round)" % (eager_pre / graph_pre),
+        ),
+        (
+            "+ fused RMSNorm",
+            fp16_graph_now,
+            COLORS["norm"],
+            "%.2f×  fused RMSNorm (same cell, P2j)" % (graph_pre / fp16_graph_now),
+        ),
+        (
+            "w8a16 + CUDA Graph",
+            w8a16_graph_now,
+            COLORS["quant"],
+            "%.2f×  quantization (same round)" % (fp16_graph_now / w8a16_graph_now),
+        ),
+        (
+            "w8a16 × split-KV kernel",
+            w8a16_kernel,
+            COLORS["attn"],
+            "%.2f×  attention impl (vs its own same-round sdpa %.2f ms)"
+            % (w8a16_sdpa_v3 / w8a16_kernel, w8a16_sdpa_v3),
+        ),
     ]
-    context = ("fp16 eager (earlier round)", p50("baseline_fp16_eager_1024"), COLORS["fp16"])
+    context = ("fp16 eager (earlier round)", p50("baseline_fp16_eager_1024"), COLORS["fp16"], None)
     floor = p50("byte_floor_1024")
 
-    w, h = 940, 470
+    w, h = 940, 510
     svg = Svg(
         w,
         h,
@@ -458,10 +520,10 @@ def fig2(inputs: dict[str, Any]) -> str:
         [
             "ms per token, log scale. Dashed line = byte floor [T] / measured achievable bandwidth (%.4f ms)."
             % floor,
-            "Everything above the floor is launch, host and implementation cost — not bytes.",
+            "Each hop is its own same-round (or same-cell) A/B; the hollow bar is context, not a hop.",
         ],
     )
-    left, right, top, bottom = 292, 170, 118, 66
+    left, right, top, bottom = 300, 250, 118, 66
     plot_w, plot_h = w - left - right, h - top - bottom
     import math
 
@@ -485,37 +547,26 @@ def fig2(inputs: dict[str, Any]) -> str:
 
     rows = [context] + chain
     row_h = plot_h / len(rows)
-    bar_h = 20
-    prev = None
-    for i, (label, value, color) in enumerate(rows):
+    bar_h = 18
+    for i, (label, value, color, hop) in enumerate(rows):
         y = top + i * row_h + (row_h - bar_h) / 2
         if i == 0:
-            svg.rect(left, y, max(2.0, x_of(value) - left), bar_h, "#ffffff")
             svg.rect(left, y, max(2.0, x_of(value) - left), bar_h, color, opacity=0.18, radius=3)
             svg.line(left, y + bar_h, x_of(value), y + bar_h, color, width=1.2, dash="3 3")
         else:
             svg.rect(left, y, max(2.0, x_of(value) - left), bar_h, color, radius=3)
-        svg.text(left - 14, y + 14, label, size=11.5, color=INK, anchor="end")
+        svg.text(left - 14, y + 13, label, size=11.5, color=INK, anchor="end")
         svg.text(
             x_of(value) - 8,
-            y + 14,
+            y + 13,
             "%.2f ms" % value,
             size=11,
             color=COLORS["warn"] if i == 0 else "#ffffff",
             weight="600",
             anchor="end",
         )
-        if i == 1:
-            svg.text(x_of(value) + 10, y + 14, "chain starts here", size=10, color=MUTED)
-        if prev is not None and i > 1:
-            svg.text(
-                x_of(value) + 10,
-                y + 14,
-                "→ %.2f× vs previous" % (prev / value),
-                size=10.5,
-                color=MUTED,
-            )
-        prev = value
+        if hop:
+            svg.text(x_of(value) + 10, y + 13, hop, size=10.5, color=MUTED)
 
     xf = x_of(floor)
     svg.line(xf, top - 10, xf, top + plot_h + 4, COLORS["floor"], width=1.6, dash="5 3")
@@ -523,8 +574,7 @@ def fig2(inputs: dict[str, Any]) -> str:
     svg.text(
         24,
         h - 16,
-        "Earlier-round baseline is %.0f× above the floor; the best cell is %.2f× above it. "
-        "The hollow bar is context only — it is not part of the chain."
+        "The earlier-round baseline sits %.0f× above the floor; the best cell is %.2f× above it."
         % (context[1] / floor, chain[-1][1] / floor),
         size=10.5,
         color=MUTED,

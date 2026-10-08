@@ -1,45 +1,47 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="940" height="470" viewBox="0 0 940 470" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
-<rect width="940" height="470" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="510" viewBox="0 0 940 510" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect width="940" height="510" fill="#ffffff"/>
 <text x="24.0" y="34.0" font-size="17.0" fill="#1f2328" font-weight="600" text-anchor="start">Distance to the bandwidth wall @ctx=1024</text>
 <text x="24.0" y="56.0" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="start">ms per token, log scale. Dashed line = byte floor [T] / measured achievable bandwidth (1.5982 ms).</text>
-<text x="24.0" y="71.0" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="start">Everything above the floor is launch, host and implementation cost — not bytes.</text>
-<line x1="292.0" y1="118.0" x2="292.0" y2="404.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="292.0" y="422.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">1</text>
-<line x1="361.2" y1="118.0" x2="361.2" y2="404.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="361.2" y="422.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">2</text>
-<line x1="452.7" y1="118.0" x2="452.7" y2="404.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="452.7" y="422.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">5</text>
-<line x1="521.9" y1="118.0" x2="521.9" y2="404.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="521.9" y="422.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">10</text>
-<line x1="591.1" y1="118.0" x2="591.1" y2="404.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="591.1" y="422.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">20</text>
-<line x1="682.6" y1="118.0" x2="682.6" y2="404.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="682.6" y="422.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">50</text>
-<line x1="751.8" y1="118.0" x2="751.8" y2="404.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="751.8" y="422.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">100</text>
-<text x="531.0" y="444.0" font-size="11.0" fill="#57606a" font-weight="400" text-anchor="middle">ms / token  (log scale)</text>
-<rect x="292.0" y="136.6" width="440.8" height="20.0" fill="#ffffff" opacity="1.00" rx="0.0"/>
-<rect x="292.0" y="136.6" width="440.8" height="20.0" fill="#4c6ef5" opacity="0.18" rx="3.0"/>
-<line x1="292.0" y1="156.6" x2="732.8" y2="156.6" stroke="#4c6ef5" stroke-width="1.2" stroke-dasharray="3 3"/>
-<text x="278.0" y="150.6" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fp16 eager (earlier round)</text>
-<text x="724.8" y="150.6" font-size="11.0" fill="#c92a2a" font-weight="600" text-anchor="end">82.64 ms</text>
-<rect x="292.0" y="193.8" width="228.7" height="20.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
-<text x="278.0" y="207.8" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fp16 eager (E7 round)</text>
-<text x="512.7" y="207.8" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">9.88 ms</text>
-<text x="530.7" y="207.8" font-size="10.0" fill="#57606a" font-weight="400" text-anchor="start">chain starts here</text>
-<rect x="292.0" y="251.0" width="127.6" height="20.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
-<text x="278.0" y="265.0" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fp16 + CUDA Graph</text>
-<text x="411.6" y="265.0" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">3.59 ms</text>
-<text x="429.6" y="265.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">→ 2.75× vs previous</text>
-<rect x="292.0" y="308.2" width="110.1" height="20.0" fill="#12b886" opacity="1.00" rx="3.0"/>
-<text x="278.0" y="322.2" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">w8a16 + CUDA Graph</text>
-<text x="394.1" y="322.2" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">3.01 ms</text>
-<text x="412.1" y="322.2" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">→ 1.19× vs previous</text>
-<rect x="292.0" y="365.4" width="65.3" height="20.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
-<text x="278.0" y="379.4" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">w8a16 × split-KV kernel</text>
-<text x="349.3" y="379.4" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">1.92 ms</text>
-<text x="367.3" y="379.4" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">→ 1.57× vs previous</text>
-<line x1="338.8" y1="108.0" x2="338.8" y2="408.0" stroke="#adb5bd" stroke-width="1.6" stroke-dasharray="5 3"/>
-<text x="346.8" y="102.0" font-size="10.5" fill="#57606a" font-weight="600" text-anchor="start">byte floor 1.5982 ms</text>
-<text x="24.0" y="454.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">Earlier-round baseline is 52× above the floor; the best cell is 1.20× above it. The hollow bar is context only — it is not part of the chain.</text>
+<text x="24.0" y="71.0" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="start">Each hop is its own same-round (or same-cell) A/B; the hollow bar is context, not a hop.</text>
+<line x1="300.0" y1="118.0" x2="300.0" y2="444.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="300.0" y="462.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">1</text>
+<line x1="356.5" y1="118.0" x2="356.5" y2="444.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="356.5" y="462.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">2</text>
+<line x1="431.1" y1="118.0" x2="431.1" y2="444.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="431.1" y="462.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">5</text>
+<line x1="487.6" y1="118.0" x2="487.6" y2="444.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="487.6" y="462.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">10</text>
+<line x1="544.0" y1="118.0" x2="544.0" y2="444.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="544.0" y="462.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">20</text>
+<line x1="618.7" y1="118.0" x2="618.7" y2="444.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="618.7" y="462.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">50</text>
+<line x1="675.1" y1="118.0" x2="675.1" y2="444.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="675.1" y="462.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">100</text>
+<text x="495.0" y="484.0" font-size="11.0" fill="#57606a" font-weight="400" text-anchor="middle">ms / token  (log scale)</text>
+<rect x="300.0" y="136.2" width="359.6" height="18.0" fill="#4c6ef5" opacity="0.18" rx="3.0"/>
+<line x1="300.0" y1="154.2" x2="659.6" y2="154.2" stroke="#4c6ef5" stroke-width="1.2" stroke-dasharray="3 3"/>
+<text x="286.0" y="149.2" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fp16 eager (earlier round)</text>
+<text x="651.6" y="149.2" font-size="11.0" fill="#c92a2a" font-weight="600" text-anchor="end">82.64 ms</text>
+<rect x="300.0" y="190.5" width="186.6" height="18.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
+<text x="286.0" y="203.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fp16 eager</text>
+<text x="478.6" y="203.5" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">9.88 ms</text>
+<rect x="300.0" y="244.8" width="114.3" height="18.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
+<text x="286.0" y="257.8" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fp16 + CUDA Graph</text>
+<text x="406.3" y="257.8" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">4.07 ms</text>
+<text x="424.3" y="257.8" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">2.43×  execution axis (same round)</text>
+<rect x="300.0" y="299.2" width="104.1" height="18.0" fill="#e8590c" opacity="1.00" rx="3.0"/>
+<text x="286.0" y="312.2" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">+ fused RMSNorm</text>
+<text x="396.1" y="312.2" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">3.59 ms</text>
+<text x="414.1" y="312.2" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">1.13×  fused RMSNorm (same cell, P2j)</text>
+<rect x="300.0" y="353.5" width="89.8" height="18.0" fill="#12b886" opacity="1.00" rx="3.0"/>
+<text x="286.0" y="366.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">w8a16 + CUDA Graph</text>
+<text x="381.8" y="366.5" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">3.01 ms</text>
+<text x="399.8" y="366.5" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">1.19×  quantization (same round)</text>
+<rect x="300.0" y="407.8" width="53.3" height="18.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
+<text x="286.0" y="420.8" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">w8a16 × split-KV kernel</text>
+<text x="345.3" y="420.8" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">1.92 ms</text>
+<text x="363.3" y="420.8" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">1.56×  attention impl (vs its own same-round sdpa 3.00 ms)</text>
+<line x1="338.2" y1="108.0" x2="338.2" y2="448.0" stroke="#adb5bd" stroke-width="1.6" stroke-dasharray="5 3"/>
+<text x="346.2" y="102.0" font-size="10.5" fill="#57606a" font-weight="600" text-anchor="start">byte floor 1.5982 ms</text>
+<text x="24.0" y="494.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">The earlier-round baseline sits 52× above the floor; the best cell is 1.20× above it.</text>
 </svg>

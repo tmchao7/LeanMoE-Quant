@@ -31,10 +31,10 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 
 | # | 杠杆 | 实测 | 口径 | 出处 |
 | --- | --- | --- | --- | --- |
-| 1 | **执行轴**（eager → cudagraph，同一实现） | **2.39×** @1024 / **1.32×** @4096 | fp16，同轮同格；`host_share` 67.3% → 1.4% | [EXP-p4b-01](experiments/EXP-p4b-01-truncation.md) §2.8.2 |
+| 1 | **执行轴**（eager → cudagraph，同一实现、**同一轮**） | **2.43×** @1024 / **1.35×** @4096 | fp16：9.8841 → 4.0670 / 9.8716 → 7.3211 ms；`host_share` 67.3% → 1.4%。★ 用归档里那一轮的两个 payload，**不**用"pre-P2i eager vs post-P2j graph"（跨轮，会造出假的 2.75×） | 归档 `results/EXP-p2j-refresh/archive/EXP-p4b-01-*`；[EXP-p4b-01](experiments/EXP-p4b-01-truncation.md) §2.8.2 |
 | 2 | **量化**（w8a16 vs fp16，图内 fused 臂） | **1.1911×** @1024 / **1.0888×** @4096 | 同一实现只换 bit-width；canary ±0.13% | 同上 §P2j（采用列 3.5881 / 3.0124） |
 | 3 | **注意力实现**（HF sdpa → 自研 split-KV，图内） | **1.3034×** @1024 / **1.2555×** @4096（w8a16 格） | vs **同格 fp16**；最好格 **1.87× / 3.11×** vs fp16×sdpa | [EXP-p4c-01](experiments/EXP-p4c-01-in-graph-attention.md) §5.7 |
-| 4 | **融合 RMSNorm**（7 kernel → 1 kernel） | **1.2358×** 全步；kernel/步 **994 → 539** | 同进程交错 A/B，**15/15 轮获胜** | [EXP-p4c-02](experiments/EXP-p4c-02-elementwise-tail.md) §5.6 |
+| 4 | **融合 RMSNorm**（7 kernel → 1 kernel） | **1.2358×** 全步；kernel/步 **994 → 539** | 同进程交错 A/B，**15/15 轮获胜**；同一个 cudagraph 格在 P2j 前后 **4.0670 → 3.5881 ms（1.13×）** 是它的端到端兑现 | [EXP-p4c-02](experiments/EXP-p4c-02-elementwise-tail.md) §5.6 |
 | 5 | **投影 kernel 修复**（每元素 gather → 每 tile 装载+广播） | 每调用 **8.14 → 5.15 µs**（**523 → 826 GB/s**） | 图内配置扫描；模型桶 0.5245 → 0.3254 ms | [EXP-p4c-01](experiments/EXP-p4c-01-in-graph-attention.md) §5.4 |
 
 ![每条杠杆各自的同轮 A/B](docs/figures/fig1_per_axis_speedups.svg)

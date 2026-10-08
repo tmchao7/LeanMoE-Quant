@@ -32,6 +32,21 @@
       "source": "results/EXP-p4b-01-truncation__bit_width=w8a16_execution=cudagraph_ctx=4096/result.json → latency.per_token_p50_ms",
       "note": null
     },
+    "fp16_cudagraph_1024_pre_p2j": {
+      "value": 4.067,
+      "source": "results/EXP-p2j-refresh/archive/EXP-p4b-01-truncation__bit_width=fp16_execution=cudagraph_ctx=1024.json → latency.per_token_p50_ms",
+      "note": "P2j 归档的同轮 cudagraph（HF norm 轮）"
+    },
+    "fp16_cudagraph_4096_pre_p2j": {
+      "value": 7.3211,
+      "source": "results/EXP-p2j-refresh/archive/EXP-p4b-01-truncation__bit_width=fp16_execution=cudagraph_ctx=4096.json → latency.per_token_p50_ms",
+      "note": null
+    },
+    "fp16_eager_4096": {
+      "value": 9.8716,
+      "source": "results/EXP-p2j-refresh/archive/EXP-p4b-01-truncation__bit_width=fp16_execution=eager_ctx=4096.json → latency.per_token_p50_ms",
+      "note": null
+    },
     "fp16_eager_1024": {
       "value": 9.8841,
       "source": "results/EXP-p4b-01-truncation__bit_width=fp16_execution=eager_ctx=1024/result.json → latency.per_token_p50_ms",
@@ -56,6 +71,11 @@
       "value": 2.7559,
       "source": "results/EXP-p4c-01-run/v3_fp16_kernel_4096_result.json → latency.per_token_p50_ms",
       "note": null
+    },
+    "p4c_w8a16_sdpa_1024": {
+      "value": 3.0036,
+      "source": "results/EXP-p4c-01-run/v3_w8a16_sdpa_1024_result.json → latency.per_token_p50_ms",
+      "note": "v3 同轮的 w8a16×sdpa，用作 attention 那一跳的分母"
     },
     "p4c_w8a16_kernel_1024": {
       "value": 1.9241,
