@@ -20,12 +20,23 @@ from benchmarks.timing import (
 
 
 def test_percentile_matches_numpy_convention():
+    """★ 容差必须窄到能**区分** percentile 的几种约定。
+
+    旧写法是 `abs=0.51`，对 1..100 而言 numpy 的线性插值(50.5) / lower(50) /
+    higher(51) / nearest(50) 全部落在 ±0.51 内 —— 把实现改成 `nearest` 或
+    `lower` 这条测试也全绿，"matches numpy convention" 名不副实。
+    钉住线性插值需要 1e-9 量级。
+    """
     xs = [float(i) for i in range(1, 101)]  # 1..100
-    assert percentile(xs, 50) == pytest.approx(50.5, abs=0.51)
-    assert percentile(xs, 5) == pytest.approx(5.95, abs=0.51)
-    assert percentile(xs, 95) == pytest.approx(95.05, abs=0.51)
+    # pos = q/100 * (n-1) = 0.99*99 … 线性插值
+    assert percentile(xs, 50) == pytest.approx(50.5, abs=1e-9)
+    assert percentile(xs, 5) == pytest.approx(5.95, abs=1e-9)
+    assert percentile(xs, 95) == pytest.approx(95.05, abs=1e-9)
     assert percentile(xs, 0) == 1.0
     assert percentile(xs, 100) == 100.0
+    # 判别力：其它约定必须**落在外面**，否则这条断言没有意义
+    assert abs(percentile(xs, 50) - 50.0) > 1e-9, "lower 约定"
+    assert abs(percentile(xs, 50) - 51.0) > 1e-9, "higher 约定"
 
 
 def test_percentile_single_sample():

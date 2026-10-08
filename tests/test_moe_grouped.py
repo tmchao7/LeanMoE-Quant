@@ -274,23 +274,37 @@ def test_grid_size_must_be_enough_to_fill_the_gpu():
     """
     import math
 
-    sms = 170  # RTX 5090
-    for block_n, split in ((32, 1), (64, 1), (128, 1), (64, 4), (64, 8)):
+    sms = 170  # RTX 5090（硬编码的是**这台卡**，判据本身是比例）
+    # ★ 真正的机制判据：program 数要占到 SM 数的相当比例。
+    #   以前这条只断言了 `programs == 128`（硬编码）和"慢配置 < 170"——
+    #   而 128 < 170，所以测试名声称的"够铺满 170 个 SM"既没被断言、也并不成立；
+    #   真正兜住默认配置的是那个硬编码 128，不是机制。
+    min_fraction = 0.7
+
+    def programs_of(block_n: int, split: int) -> int:
         plan = launch_plan(
             _olmoe_fused(),
             top_k=OLMOE_TOP_K,
             config={"down_sum": {"BLOCK_N": block_n, "SPLIT_K": split}},
         )
-        programs = math.prod(plan["down_sum"]["grid"])
-        if split == 1 and block_n >= 128:
-            assert programs < sms, "这条正是慢配置的形状"
-        if block_n == 64 and split == 4:
-            assert programs == 128  # 默认：接近 170，够用
-    # 默认配置下两个 kernel 的 program 总数
-    plan = launch_plan(_olmoe_fused(), top_k=OLMOE_TOP_K)
-    import math as _m
+        return math.prod(plan["down_sum"]["grid"])
 
-    assert _m.prod(plan["down_sum"]["grid"]) == 128
+    # 已知慢的形状：SPLIT_K=1 时 grid 只有 cdiv(hidden, BLOCK_N) 个 program
+    for block_n in (32, 64, 128):
+        assert programs_of(block_n, 1) < min_fraction * sms, (
+            "SPLIT_K=1 / BLOCK_N=%d 的 program 数不足以铺满 SM —— 这正是第一版默认配置"
+            "（BLOCK_N=128,SPLIT_K=1: 16 个 program, 9%% occupancy, 比基线慢 2.17x）" % block_n
+        )
+    # 默认与切分配置必须达标
+    assert programs_of(64, 4) >= min_fraction * sms
+    assert programs_of(64, 8) >= min_fraction * sms
+
+    # plan 的算术仍要钉住（默认配置 down_sum 的 grid）
+    plan = launch_plan(_olmoe_fused(), top_k=OLMOE_TOP_K)
+    assert math.prod(plan["down_sum"]["grid"]) == 128
+    assert math.prod(plan["gate_up_act"]["grid"]) == OLMOE_TOP_K * (
+        plan["ffn"] // plan["gate_up_act"]["BLOCK_N"]
+    )
 
 
 def test_split_k_adds_the_reduction_kernels_and_sizes_the_partials():
@@ -402,21 +416,45 @@ def test_check_act_fn_refuses_a_non_silu_activation():
 # ---------------------------------------------------------------------------
 # 5) 分派：grouped 只作用于 decode，prefill 永远走逐专家循环
 # ---------------------------------------------------------------------------
-def test_prefill_never_uses_the_grouped_kernel():
-    """★ T > 1 时 `impl="grouped"` 仍然走逐专家循环 —— 而且这在无 triton 的机器上
-    必须**成功**。
+def _spy_on_grouped_kernels(monkeypatch) -> dict[str, int]:
+    """把 grouped 的两条 kernel 入口换成计数器，返回调用次数。
 
-    这条测试的强度来自这一点：如果 prefill 真的走到了 grouped 的 decode 路径，
-    在没有 triton 的机器上会抛 RuntimeError。它没抛，就证明没走。
+    ★ 为什么必须用 spy：旧写法靠"没有 triton 时会抛 RuntimeError"来反证"没走
+      grouped"，于是它 `if grouped_available(): pytest.skip(...)` —— 也就是说
+      这条防 128× 重读 / 慢 20 倍那个事故的测试，**在 5090 上从来没跑过**。
+      计数器不依赖 triton 是否存在，两边都能断言。
+    """
+    import lemoq.kernels.moe_grouped as mg
+    import lemoq.kernels.moe_grouped_quant as mgq
+
+    calls = {"fp16": 0, "quant": 0}
+    orig_f, orig_q = mg.grouped_moe_forward, mgq.grouped_moe_forward_quant
+
+    def spy_f(*a, **kw):
+        calls["fp16"] += 1
+        return orig_f(*a, **kw)
+
+    def spy_q(*a, **kw):
+        calls["quant"] += 1
+        return orig_q(*a, **kw)
+
+    monkeypatch.setattr(mg, "grouped_moe_forward", spy_f)
+    monkeypatch.setattr(mgq, "grouped_moe_forward_quant", spy_q)
+    return calls
+
+
+def test_prefill_never_uses_the_grouped_kernel(monkeypatch):
+    """★ T > 1 时 `impl="grouped"` 仍然走逐专家循环 —— **有 triton 也要成立**。
+
     为什么必须这样：grouped kernel 是"每 token 读 top-k 个专家"的写法，
     T=1024 时会对每个 token 重读一遍权重（上一轮实测多读 128 倍、慢 20 倍）。
+    这条现在用调用计数断言，不再靠"没抛异常"反证。
     """
+    calls = _spy_on_grouped_kernels(monkeypatch)
     block = _tiny_block()
     fused = fuse_experts(block.experts)
     x = torch.randn(4, 1, 32)  # 4 个 token → prefill
-    if grouped_available():
-        pytest.skip("本机有 triton；这条依赖'无 triton 时仍能成功'来证明分派")
-    out, logits = static_moe_forward(
+    out, _ = static_moe_forward(
         x, block.gate.weight.detach(), fused, top_k=block.top_k, impl="grouped"
     )
     assert out.shape == (4, 1, 32)
@@ -424,22 +462,50 @@ def test_prefill_never_uses_the_grouped_kernel():
         x, block.gate.weight.detach(), fused, top_k=block.top_k, impl="gather"
     )
     assert torch.allclose(out, reference, atol=1e-4, rtol=1e-4)
+    # ★ 真正的判据：grouped 的 kernel 一次都没被调用（无论本机有没有 triton）
+    assert calls == {"fp16": 0, "quant": 0}, calls
+
+    # 判别力自检：spy 必须真的装上了 —— 否则 `calls == 0` 是个天然成立的空转断言
+    # （monkeypatch 没生效时计数器本来就不会动）。
+    import lemoq.kernels.moe_grouped as mg
+
+    mg.grouped_moe_forward(
+        torch.randn(32),
+        fused,
+        torch.tensor([0, 1]),
+        torch.tensor([0.5, 0.5]),
+        backend="oracle",
+    )
+    assert calls["fp16"] == 1, "spy 没生效 —— 上面的 calls==0 等于什么都没断言"
 
 
-def test_decode_with_grouped_impl_needs_triton():
-    """T == 1 且 impl="grouped" 时必须真的去用 grouped —— 无 triton 就报错。"""
+def test_decode_with_grouped_impl_calls_the_grouped_kernel(monkeypatch):
+    """T == 1 且 impl="grouped" 时必须**真的**走到 grouped kernel。
+
+    有 triton：计数必须为 1（不能静默退回 gather —— 那样"grouped 臂"就成了假臂）。
+    无 triton：必须给可操作的 RuntimeError，而不是 AttributeError。
+    """
+    calls = _spy_on_grouped_kernels(monkeypatch)
     block = _tiny_block()
     fused = fuse_experts(block.experts)
-    if grouped_available():
-        pytest.skip("本机有 triton")
-    with pytest.raises(RuntimeError, match="triton"):
-        static_moe_forward(
-            torch.randn(1, 1, 32),
-            block.gate.weight.detach(),
-            fused,
-            top_k=block.top_k,
-            impl="grouped",
-        )
+    if not grouped_available():
+        with pytest.raises(RuntimeError, match="triton"):
+            static_moe_forward(
+                torch.randn(1, 1, 32),
+                block.gate.weight.detach(),
+                fused,
+                top_k=block.top_k,
+                impl="grouped",
+            )
+        return
+    static_moe_forward(
+        torch.randn(1, 1, 32),
+        block.gate.weight.detach(),
+        fused,
+        top_k=block.top_k,
+        impl="grouped",
+    )
+    assert calls["fp16"] == 1, calls
 
 
 def test_unknown_impl_is_rejected():

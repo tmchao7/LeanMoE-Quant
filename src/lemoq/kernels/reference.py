@@ -63,23 +63,53 @@ def dequant_gemm_separate_reference(
 def dequant_gemm_fused_reference(
     x, qweight, scale, zero, *, group_size: int, symmetric: bool = True, out_dtype=None
 ):
-    """The 'fused' arm, expressed in eager PyTorch.
+    """The 'fused' arm, expressed in eager PyTorch — **按组分块，不物化整块权重**。
 
-    ★ 诚实说明：这只是**参考实现**，它仍然物化了中间张量，因此**不代表真实的融合
-    kernel 的性能**。它的用途是：
-        (a) 给出融合路径必须匹配的**数值**；
-        (b) 作为 Phase 2 的接口契约。
-    真正的融合只在 Triton/CUDA 里实现（读 packed 权重 -> 寄存器/shared 内解压 -> MMA）。
+    ★ 为什么必须写成一条**不同的**代码路径：
+
+    第一版这里直接 `return dequant_gemm_separate_reference(...)`，于是
+    `test_kernel_parity.py` 里"fused 与 separate 数学等价"那条断言比的是
+    **同一个函数的两次调用**，`max_abs_err == 0.0` 在数学上不可能非 0 —— 一个
+    恒真的断言被摆在 K1 的位置上，看着像"E2 的前提已被证明"，其实什么都没测。
+
+    现在它按**每组一块**解压并累加（`y += x[:, tile] @ dequant(tile).T`），
+    从不物化 `[out, in]` 的整块 fp16 权重 —— 这才是"融合"的语义，与 Triton
+    kernel 里的做法同构。
+
+    ★ 仍然**不代表**真实融合 kernel 的**性能**：它只是 eager PyTorch，块内还是
+    会落 tile 级的中间张量。它的用途是（a）给出融合路径必须匹配的数值，
+    （b）作为 Phase 2 的接口契约。累加顺序与 separate 不同，所以两者相差
+    fp32 舍入量级（不是 0）—— 比较要用 `allclose`，不要断言精确相等。
     """
-    return dequant_gemm_separate_reference(
-        x,
-        qweight,
-        scale,
-        zero,
-        group_size=group_size,
-        symmetric=symmetric,
-        out_dtype=out_dtype,
-    )
+    torch = _torch()
+    if x.dim() != 2:
+        raise ValueError("x 必须是 (M, K) 二维，得到 %r" % (tuple(x.shape),))
+    out_features, in_features = qweight.shape
+    n_groups = int(scale.shape[1])
+    padded_in = n_groups * int(group_size)
+    q = qweight
+    if padded_in != in_features:
+        pad = torch.zeros(
+            (out_features, padded_in - in_features), dtype=qweight.dtype, device=qweight.device
+        )
+        q = torch.cat([qweight, pad], dim=1)
+
+    M, K = int(x.shape[0]), int(x.shape[1])
+    xf = x.to(torch.float32)
+    y = torch.zeros((M, out_features), dtype=torch.float32, device=x.device)
+    for k0 in range(0, padded_in, int(group_size)):
+        if k0 >= K:
+            break  # 全是补零列，x 没有对应分量
+        hi = min(k0 + int(group_size), K)
+        g = k0 // int(group_size)
+        codes = q[:, k0:hi].to(torch.float32)
+        sc = scale[:, g].to(torch.float32).unsqueeze(1)
+        if symmetric:
+            w_tile = codes * sc
+        else:
+            w_tile = (codes - zero[:, g].to(torch.float32).unsqueeze(1)) * sc
+        y += xf[:, k0:hi] @ w_tile.t()
+    return y.to(out_dtype) if out_dtype is not None else y
 
 
 def tolerance_report(y_ref, y_test) -> dict[str, Any]:

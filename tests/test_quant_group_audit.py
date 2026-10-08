@@ -36,9 +36,11 @@ for _p in (ROOT, os.path.join(ROOT, "src")):
 
 from lemoq.quant import rtn as qrtn  # noqa: E402
 from tools.quant_error_audit import (  # noqa: E402
+    check_nested_scales,
     error_stats,
     mse_monotonicity,
     nested_absmax_check,
+    nested_scale_check,
     qmax_for,
 )
 
@@ -194,7 +196,11 @@ def test_error_concentration_grows_with_an_outlier_column():
     dirty = error_stats(_w(shape=(512, 2048), outlier_col=7), bits=4, group_size=128)[
         "error_top1pct_share"
     ]
-    assert dirty >= clean
+    # ★ 旧写法是 `dirty >= clean`：植入的 40× 离群通道即使让这个量**毫无反应**
+    #   （dirty == clean）也会通过。本文件开头自己写着"一个从不失败的检查比没有
+    #   检查更糟"，那条正是反例。实测 clean=0.0053 / dirty=0.0446（8.5×），
+    #   所以阈值取 2× —— 既严格又留出数值余量。
+    assert dirty > clean * 2.0, (clean, dirty)
     assert 0.0 < dirty <= 1.0
 
 
@@ -226,21 +232,46 @@ def test_audit_detects_a_scale_misalignment_defect():
     assert float((bad.abs() - scale / 2.0).clamp(min=0.0).max()) > 0.0, "界违反没有被检出"
 
 
-def test_audit_detects_a_non_nested_partition():
-    """缺陷 B：分组起点错位（+1 偏移）会破坏嵌套性 —— `nested_scale_check` 必须报 False。"""
+def test_nested_absmax_check_is_structural_and_cannot_fail():
+    """★ `nested_absmax_check` 是**结构性恒真**的 —— 必须写下来，别当证据用。
+
+    它从同一个 `w` 直接重算 absmax，而细组恰好剖分粗组 ⇒ max(细组) == max(粗组)
+    恒成立，`all_nested` 不可能为 False。它是一个 shape/算术自检；把它当成
+    "分组划分与声称的一致"的判据，就得到了一个不可能失败的检查。
+    可证伪的判据是 `check_nested_scales` / `nested_scale_check`（见下一条）。
+    """
+    w = _w(shape=(128, 512))
+    rep = nested_absmax_check(w, (32, 64, 128))
+    assert rep["all_nested"] is True
+    assert rep["falsifiable"] is False
+
+
+def test_check_nested_scales_is_falsifiable():
+    """★ 可证伪的嵌套检查：真实 scale 报 True，**错位过的** scale 必须报 False。
+
+    旧测试在这里手写了 `scale.roll(1).reshape().amax()` 再自己做比较 —— 测的是
+    测试自己的张量算术，把 `nested_*_check` 换成恒 True 的实现它也全绿。
+    现在直接喂 scale 给 `check_nested_scales`，它必须能分辨。
+    """
     from lemoq.quant import rtn as _rtn
 
     w = _w(shape=(128, 512))
-    q = _rtn.quantize_rtn(w.float(), bits=8, group_size=32, symmetric=True)
-    scale = q["scale"].float()  # (128, 16)
-    # ★ 只在**同一个粗组内**交换细组不破坏嵌套性（检查取的是组内最大值）——
-    #   必须让 scale 跨行/跨粗组错位，才等价于"分组划分与声称的不一致"。
-    scrambled = scale.roll(1, dims=0)
-    coarse = _rtn.quantize_rtn(w.float(), bits=8, group_size=64, symmetric=True)["scale"].float()
-    fine_max = scrambled.reshape(128, 8, 2).amax(dim=2)
-    assert bool((fine_max > coarse + 1e-12).any()), "错位分组没有被检出来"
-    # 而 absmax 口径下，真实数据是嵌套的（roll 只是人造对照）
-    assert nested_absmax_check(w, (32, 64, 128))["all_nested"]
+    real = {
+        g: _rtn.quantize_rtn(w.float(), bits=8, group_size=g, symmetric=True)["scale"].float()
+        for g in (32, 64, 128)
+    }
+    assert check_nested_scales(real, (32, 64, 128))["all_nested"] is True
+
+    # 错位：细组 scale 跨粗组挪一格 ⇒ 细组的 max 不再被它所在的粗组包住
+    scrambled = dict(real)
+    scrambled[32] = real[32].roll(1, dims=1)
+    rep = check_nested_scales(scrambled, (32, 64, 128))
+    assert rep["all_nested"] is False, "错位分组没被检出来 —— 这条检查没有判别力"
+
+    # 幅度自曝：错到什么程度（不是只差一个 eps）
+    assert real[32].numel() > 0
+    # 端到端：从权重算的版本在干净数据上必须 True
+    assert nested_scale_check(w, (32, 64, 128), bits=8)["all_nested"] is True
 
 
 def test_bound_violation_is_positive_when_scale_is_wrong():

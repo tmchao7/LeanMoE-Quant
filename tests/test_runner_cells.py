@@ -624,8 +624,16 @@ def _fresh_olmoe():
     return OlmoeForCausalLM(cfg).eval()
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def tiny_olmoe():
+    """★ function scope，不是 module。
+
+    以前是 `scope="module"`，而 `test_quantize_for_cfg_replaces_and_model_still_forwards`
+    会**原地量化**这个模型（`quantize_model` 就是把 nn.Linear 换成 QuantLinear）。
+    于是它之后的任何测试拿到的都是一个已经满身 QuantLinear 的"fp16"模型 ——
+    只是恰好因为文件里 fp16 no-op 那条排在前面才没炸。任何重排、或新增一条
+    "拿 tiny_olmoe 当未量化模型用"的测试，都会在离原因很远的地方失败。
+    """
     return _fresh_olmoe()
 
 
@@ -738,9 +746,44 @@ def test_quantized_grouped_odd_group_size_is_refused(capsys, monkeypatch):
             "hf",
         ]
     )
-    out = capsys.readouterr()
     assert rc == 2
-    assert "偶数" in out.err or "门实测" in out.err
+    # ★ 原来写的是 `"偶数" in out.err or "门实测" in out.err` —— 127 同时满足
+    #   "奇数" 和 "没测过门"，而"没测过门"的拒绝排在前面，所以只要后者生效这条就绿，
+    #   "奇数 group_size 必须拒绝" 这条规则从来没被独立验证过（把 nibble 偶数检查
+    #   整段删掉，测试仍然绿）。所以这里 monkeypatch 掉门检查，单独钉它。
+    from benchmarks import runner as _runner
+
+    monkeypatch.setattr(
+        _runner,
+        "gate_for_cell",
+        lambda *a, **k: {
+            "kl": 0.0,
+            "top1": 1.0,
+            "rmsnorm": "hf",
+            "gate": "PASS",
+            "fake": "monkeypatched for this test",
+        },
+    )
+    rc2 = runner_main(
+        [
+            "--exp",
+            "EXP-p4b-01-truncation",
+            "--bit-width",
+            "w8a16",
+            "--group-size",
+            "127",
+            "--execution",
+            "eager",
+            "--ctx",
+            "1024",
+            "--force",
+            "--rmsnorm",
+            "hf",
+        ]
+    )
+    out2 = capsys.readouterr()
+    assert rc2 == 2
+    assert "偶数" in out2.err, "门检查被绕过之后，奇数 group_size 仍必须被拒绝"
 
 
 def test_dry_run_surfaces_the_in_graph_attention_cells(capsys):

@@ -55,14 +55,30 @@ def test_blocked_result_keeps_performance_unmeasured():
 
 
 def test_compare_logits_accepts_cpu_tensors_and_reports_graph_gate_metrics():
+    """CPU 张量要能过（cuda:0 / cpu 混设备的那个真实 bug），而且**必须能分辨差异**。
+
+    ★ 旧写法把 reference 和 candidate 写成**逐字相同**的两个张量，于是
+    `kl == 0` / `top1 == 1.0` 是输入恒等的必然后果 —— 把 `compare_logits` 改坏
+    （比如让 got_logp 直接用 ref_logp、或 agreement 恒返回 1.0）这条也全绿。
+    现在两组：一组恒等（应判 0 / 1.0），一组把两个位置对调（应判明显有差异）。
+    """
     torch = pytest.importorskip("torch")
     from benchmarks.cudagraph import compare_logits
 
     reference = [torch.tensor([[[2.0, 0.0]]]), torch.tensor([[[0.0, 2.0]]])]
-    candidate = [torch.tensor([[[2.0, 0.0]]]), torch.tensor([[[0.0, 2.0]]])]
-    report = compare_logits(reference, candidate)
-    assert report["top1_agreement"] == 1.0
-    assert report["kl"] == pytest.approx(0.0, abs=1e-7)
+
+    # 1) 恒等：kl 必须为 0、top-1 必须满分（CPU 张量能跑通 = 混设备 bug 没回来）
+    same = [torch.tensor([[[2.0, 0.0]]]), torch.tensor([[[0.0, 2.0]]])]
+    rep_same = compare_logits(reference, same)
+    assert rep_same["top1_agreement"] == 1.0
+    assert rep_same["kl"] == pytest.approx(0.0, abs=1e-7)
+
+    # 2) 对调：每一步的 argmax 都变了，kl 必须显著为正
+    swapped = [torch.tensor([[[0.0, 2.0]]]), torch.tensor([[[2.0, 0.0]]])]
+    rep_sw = compare_logits(reference, swapped)
+    assert rep_sw["top1_agreement"] == 0.0, "argmax 全变了，一致率必须是 0"
+    assert rep_sw["kl"] > 0.5, rep_sw  # 实测约 0.76
+    assert rep_sw["kl"] != pytest.approx(0.0, abs=1e-7)
 
 
 def test_runner_selects_cudagraph_arm_from_exp_id_and_rejects_unknown():

@@ -13,6 +13,8 @@ from conftest import requires_numpy, requires_torch
 
 pytestmark = requires_numpy
 
+import numpy as np  # noqa: E402
+
 from lemoq.quant import numpy_oracle as no  # noqa: E402
 
 CASES = [
@@ -164,6 +166,15 @@ def test_pack_roundtrip_is_exact(bits):
         assert packed.shape == (64, 128)
         assert packed.dtype.kind == "u"
         assert (un.astype("int32") == q["codes"]).all(), "4-bit 打包往返必须精确"
+    else:
+        # ★ 8-bit 这一格以前执行 0 条断言：参数化写了 [4, 8]，函数体却只有
+        #   `if bits == 4:` 而没有 else —— 于是 8-bit 的打包往返从来没被测过。
+        #   8-bit 的"打包"就是 int8 化，对称量化的 code 域是 -128..127，必须无损。
+        packed = q["codes"].astype("int8")
+        assert packed.dtype == np.int8
+        assert (packed.astype("int32") == q["codes"]).all(), "8-bit 打包往返必须精确"
+        # 判别力：真出现越界（例如 code 落到 int8 之外）必须被抓到
+        assert int(np.abs(q["codes"]).max()) <= 127, "对称 8-bit 的 code 必须在 int8 域内"
 
 
 def test_pack_rejects_odd_last_dim():

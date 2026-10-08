@@ -7,6 +7,10 @@
 
 当前状态：只测参考实现自身（fused 与 separate 的**数学等价性**），这是没有 GPU 也能做的
 部分。真正的 kernel 一旦落地，把 `_triton_fused_gemm` 的桩替换即可。
+
+★ 2026-10-08 修：上面那条"数学等价"曾经是空转断言（`fused_reference` 就是
+`separate_reference` 的别名）。现在 `reference.dequant_gemm_fused_reference` 是真正
+按组分块、不物化整块权重的路径，本文件也加了两条判别力自检。
 """
 
 from __future__ import annotations
@@ -41,12 +45,30 @@ def _case(m=4, k=256, n=512, bits=4, group_size=128, seed=0, device="cpu"):
 
 
 def test_fused_and_separate_are_mathematically_equal():
-    """两条路径的**数值必须相同** —— 差别只在是否物化中间张量（E2 的全部内容）。"""
+    """两条路径的**数值必须相同** —— 差别只在是否物化中间张量（E2 的全部内容）。
+
+    ★ 这条曾经是**空转**的：`dequant_gemm_fused_reference` 当时就是
+    `return dequant_gemm_separate_reference(...)`，于是 a/b 是同一函数的两次调用，
+    `max_abs_err == 0.0` 在数学上不可能非 0 —— 一个恒真断言占了 K1 的位置。
+    现在 fused 是真的一条按组分块、不物化整块权重的路径，累加顺序不同，
+    所以差值是非零的 fp32 舍入量级。下面两条自检就是为了防止它再退化。
+    """
     x, codes, scale, zero, gs = _case()
     a = dequant_gemm_separate_reference(x, codes, scale, zero, group_size=gs)
     b = dequant_gemm_fused_reference(x, codes, scale, zero, group_size=gs)
     rep = tolerance_report(a, b)
-    assert rep["max_abs_err"] == 0.0
+    assert rep["allclose_atol_1e-3"], rep
+
+    # 自检 1：两条路径必须真的是两条 —— 若 fused 又被改回 separate 的别名，
+    #   差值会塌成精确 0，断言会红。（实测差值是 1e-5 量级的 fp32 舍入。）
+    assert (
+        rep["max_abs_err"] > 1e-12
+    ), "fused 与 separate 的差值塌成 0 —— fused 又变成 separate 的别名了？"
+
+    # 自检 2：判别力 —— 把 scale 改坏，两条路径必须**不再**等价，否则上面那条
+    #   allclose 说明不了任何事（一个不可能失败的断言比没有断言更糟）。
+    bad = dequant_gemm_fused_reference(x, codes, scale * 1.5, zero, group_size=gs)
+    assert not tolerance_report(a, bad)["allclose_atol_1e-3"], "改坏 scale 却仍然判等价"
 
 
 def test_reference_matches_dense_matmul_of_dequantized_weight():

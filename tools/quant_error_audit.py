@@ -257,7 +257,85 @@ def nested_absmax_check(w: Any, groups: tuple[int, ...] = (32, 64, 128)) -> dict
         a_coarse = wp.reshape(out_features, padded_len // coarse, coarse).abs().amax(dim=2)
         fine_max = a_fine.reshape(out_features, -1, ratio).amax(dim=2)
         checks["%d<=%d" % (fine, coarse)] = bool((fine_max <= a_coarse + 1e-12).all())
-    return {"groups": list(groups), "nested": checks, "all_nested": all(checks.values())}
+    return {
+        "groups": list(groups),
+        "nested": checks,
+        "all_nested": all(checks.values()),
+        # ★ 必须写明：本函数是**结构性恒真**的。它从同一个 `w` 直接重算 absmax，
+        #   而细组恰好剖分粗组 ⇒ max(细组) == max(粗组) 恒成立，`all_nested` 不可能
+        #   为 False。它是一个 shape/arithmetic 自检，不是"分组划分是否一致"的判据。
+        #   真正可证伪的是 `nested_scale_check` —— 那个用**实现实际拿到的** scale。
+        "falsifiable": False,
+        "note": "结构性恒真（自同一 w 重算 absmax）；判据请用 nested_scale_check",
+    }
+
+
+def check_nested_scales(
+    scales: dict[int, Any], groups: tuple[int, ...] = (32, 64, 128)
+) -> dict[str, Any]:
+    """★ **可证伪**的嵌套检查：给定各档实测的 scale `(out, n_groups)`，判细组 ≤ 粗组。
+
+    为什么不直接用 `nested_absmax_check`：那个从同一个 `w` 重算 absmax，恒真
+    （见它的 note）。而这里比的是**实现真正拿到的** scale —— 如果分组划分、
+    reshape/permute 顺序、或 scale 的广播写错了，细组的 scale 就会大于包含它的
+    粗组，这条会报 False。
+
+    输入是 `{group_size: tensor(out, n_groups)}`，所以测试可以直接喂**错位过的**
+    scale 来证明这条检查有判别力（把 `all_nested` 换成恒 True 的实现会立刻红）。
+    """
+    ordered = [g for g in groups if g in scales]
+    checks: dict[str, bool] = {}
+    for fine, coarse in zip(ordered, ordered[1:]):
+        if coarse % fine != 0:
+            continue
+        ratio = coarse // fine
+        s_fine = scales[fine].float()
+        s_coarse = scales[coarse].float()
+        if s_fine.shape[1] != s_coarse.shape[1] * ratio:
+            checks["%d<=%d" % (fine, coarse)] = False
+            continue
+        fine_max = s_fine.reshape(s_coarse.shape[0], -1, ratio).amax(dim=2)
+        checks["%d<=%d" % (fine, coarse)] = bool((fine_max <= s_coarse + 1e-12).all())
+    return {
+        "groups": ordered,
+        "nested": checks,
+        "all_nested": all(checks.values()) if checks else None,
+        "falsifiable": True,
+    }
+
+
+def nested_scale_check(
+    w: Any, groups: tuple[int, ...] = (32, 64, 128), bits: int = 8
+) -> dict[str, Any]:
+    """用**实现实际拿到的** scale 做嵌套检查（可证伪）。
+
+    ★ `rtn` 对 absmax=0 的组用 `scale=1.0` 兜底，而 bf16→fp16 会让极小权重
+      （实测最小值 9.5e-12）下溢成精确的 0 —— 于是某些细组 absmax=0 但 scale=1.0，
+      比它所在粗组的 scale 还大，这里会**误报**。那是兜底约定的产物，不是划分问题
+      （那些组的反量化结果仍然是精确的 0），所以这些组必须**跳过**并计数。
+    """
+    import torch  # noqa: PLC0415
+
+    from lemoq.quant import rtn as _rtn  # noqa: PLC0415
+
+    wf = w.float()
+    scales: dict[int, Any] = {}
+    skipped = 0
+    for g in groups:
+        q = _rtn.quantize_rtn(wf, bits=bits, group_size=g, symmetric=True)
+        scale = q["scale"].float()
+        # 兜底组：scale 恰为 1.0 且该组权重全为 0（下溢）→ 不参与嵌套判定
+        absmax = wf.reshape(wf.shape[0], -1, g).abs().amax(dim=2)
+        underflowed = absmax == 0
+        if bool(underflowed.any()):
+            skipped += int(underflowed.sum())
+            scale = torch.where(
+                underflowed, torch.full_like(scale, float("-inf")), scale
+            )  # -inf 恒 ≤ 任何粗组 scale
+        scales[g] = scale
+    out = check_nested_scales(scales, groups)
+    out["n_underflowed_groups_skipped"] = skipped
+    return out
 
 
 def mse_monotonicity(w: Any, bits: int, groups: tuple[int, ...] = (32, 64, 128)) -> dict[str, Any]:
@@ -362,6 +440,10 @@ def audit_tensors(
             }
         # 嵌套性与位宽无关：每张量算一次
         entry["nested"] = nested_absmax_check(w, tuple(groups))
+        # ★ 上面那条是结构性恒真的（自同一 w 重算 absmax），所以**再算一条真正
+        #   可证伪的**：用实现实际拿到的 scale 判。只有这一条能回答"分组划分与
+        #   声称的是否一致"。
+        entry["nested_scales"] = nested_scale_check(w, tuple(groups), bits=bits_list[0])
         out["tensors"][name] = entry
     return out
 
