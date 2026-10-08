@@ -76,6 +76,11 @@ RESULT_SCHEMA: dict[str, dict[str, tuple[type, ...]]] = {
         "ppl_fp16": (float, int),
         "ppl_this": (float, int),
         "ppl_delta": (float, int),
+        # ★ `ppl_note` **刻意不**放在 RESULT_SCHEMA 的必需字段表里：
+        #   放进去会让已经落盘的 69 份历史工件全部判"缺少字段 ppl_note"。
+        #   它是一条**条件性**要求（只有 ppl_* 全 null 时才需要），由
+        #   `validate_ppl_declaration` 单独校验；`empty_result` 会为**新** payload
+        #   创建这个键。
         "gate": (str,),
         "thresholds": (dict,),
     },
@@ -175,7 +180,66 @@ def _type_name(types: tuple[type, ...]) -> str:
     return "/".join(t.__name__ for t in types)
 
 
-def validate_result(payload: Any) -> list[str]:
+# PPL 声明清单（离线生成；`tools/ppl_status.py`）。存在它是为了让**已经落盘的** 98 份
+# result.json 不必重写就能满足"ppl_* 要么有值、要么有声明"。
+PPL_STATUS_PATH = "results/PPL_STATUS.json"
+
+# 新 payload 自带的声明（与 `tools/ppl_status.REASON_NOT_MEASURED` 同一句）。
+PPL_NOT_MEASURED_NOTE = (
+    "未测：PPL 尚未写入本工件（`tools/quant_ppl.py` 已实现，见 docs/METRICS.md §6 待办 G5）。"
+    "现有 PPL 数字只存在于 EXP-p1-03 记录 §2 的表格里，不是工件级数据。"
+)
+
+
+def load_ppl_index(path: str = PPL_STATUS_PATH) -> dict[str, Any]:
+    """读 PPL 声明清单。文件不存在 => 空索引（那时校验只认 payload 自带的 ppl_note）。"""
+    import json
+    from pathlib import Path
+
+    p = Path(path)
+    if not p.exists():
+        return {}
+    try:
+        with open(p, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:  # noqa: BLE001
+        return {}
+    return (data.get("cells") or {}) if isinstance(data, dict) else {}
+
+
+def validate_ppl_declaration(payload: Any, ppl_index: dict[str, Any] | None = None) -> list[str]:
+    """`ppl_*` 三个全 null 时，必须有声明（本 payload 的 `ppl_note` 或清单里的记录）。
+
+    ★ 为什么需要这条：`docs/METRICS.md` §1 把 PPL 列为带门槛的指标，而历史上 98 份
+      result.json 的 `ppl_*` **全为 null 且没有任何说明** —— 那既可能是"未测"，也
+      可能是"漏记"，读者分不出来。硬规则 1 要求未测的值显式写成未测。
+    """
+    if not isinstance(payload, dict):
+        return []
+    # ★ `planned` 骨架**整份**都是 null（status=planned 就是"这个格子还没跑"），
+    #   它的声明就是它自己的 status，不该再要求一句 PPL 说明 —— 否则
+    #   `harness --dry-run` 产出的骨架会全部不合法。
+    if payload.get("status") == "planned":
+        return []
+    corr = payload.get("correctness") or {}
+    if not isinstance(corr, dict):
+        return []
+    if any(corr.get(k) is not None for k in ("ppl_fp16", "ppl_this", "ppl_delta")):
+        return []  # 有值 => 不需要声明
+    if isinstance(corr.get("ppl_note"), str) and corr["ppl_note"].strip():
+        return []
+    exp_id = payload.get("exp_id")
+    if ppl_index and isinstance(exp_id, str) and exp_id in ppl_index:
+        entry = ppl_index[exp_id] or {}
+        if str(entry.get("status") or "").strip() and str(entry.get("reason") or "").strip():
+            return []
+    return [
+        "correctness.ppl_* 全为 null 且无声明：必须写明'未测'及其原因"
+        "（写 ppl_note，或登记到 %s）—— 否则读者分不清是未测还是漏记" % PPL_STATUS_PATH
+    ]
+
+
+def validate_result(payload: Any, ppl_index: dict[str, Any] | None = None) -> list[str]:
     """Return a list of human-readable problems. Empty list means valid."""
     problems: list[str] = []
     if not isinstance(payload, dict):
@@ -241,6 +305,7 @@ def validate_result(payload: Any) -> list[str]:
             problems.append(
                 "correctness.gate == FAIL 却报了性能数字 %s —— 违反项目硬规则 2" % reported
             )
+    problems.extend(validate_ppl_declaration(payload, ppl_index))
     return problems
 
 
@@ -259,7 +324,7 @@ def empty_result(exp_id: str, *, status: str = "planned") -> dict[str, Any]:
     for section in RESULT_SCHEMA:
         payload[section] = fields(section)
     payload["verdict"] = {"verdict": "planned", "outcome": "inconclusive", "notes": None}
-    payload["correctness"] = dict(payload["correctness"], gate=None, thresholds=None)
+    payload["correctness"] = dict(payload["correctness"], gate=None, thresholds=None, ppl_note=None)
     payload["vram"] = dict(payload["vram"], method=None)
     payload["applicability"] = {"applies_to": None, "does_not_apply_to": None, "why": None}
     payload["bytes"]["breakdown"] = []

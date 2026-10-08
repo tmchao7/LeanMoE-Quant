@@ -12,7 +12,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from benchmarks.schema import empty_result
+from benchmarks.schema import PPL_NOT_MEASURED_NOTE, empty_result
 from benchmarks.timing import summarize
 
 VALID_EXECUTIONS = ("eager", "cudagraph")
@@ -197,6 +197,8 @@ def blocked_result(
         "ppl_fp16": None,
         "ppl_this": None,
         "ppl_delta": None,
+        # ★ 同上：ppl_* 全 null 必须带声明（schema 会校验）
+        "ppl_note": PPL_NOT_MEASURED_NOTE,
         "gate": "FAIL",
         "thresholds": {
             "kl_max_fp16_graph": 1e-5,
@@ -254,6 +256,8 @@ def failed_result(
         "ppl_fp16": None,
         "ppl_this": None,
         "ppl_delta": None,
+        # ★ 同上：ppl_* 全 null 必须带声明（schema 会校验）
+        "ppl_note": PPL_NOT_MEASURED_NOTE,
         "gate": "FAIL",
         "thresholds": {
             "kl_max_fp16_graph": 1e-5,

@@ -44,7 +44,7 @@ from benchmarks.cudagraph import (
     normalize_execution,
 )
 from benchmarks.harness import is_done, write_result
-from benchmarks.schema import empty_result
+from benchmarks.schema import PPL_NOT_MEASURED_NOTE, empty_result
 from benchmarks.timing import summarize
 
 PROBE_PATH = "results/machine_probe.json"
@@ -473,6 +473,9 @@ def correctness_for_cell(cfg: dict[str, Any], *, consistency_passed: bool) -> di
         "ppl_fp16": None,
         "ppl_this": None,
         "ppl_delta": None,
+        # ★ ppl_* 三个都是 null，就必须带一句"为什么是 null"—— 否则读者分不清
+        #   是"未测"还是"漏记"（schema 会校验这一条，见 validate_ppl_declaration）。
+        "ppl_note": PPL_NOT_MEASURED_NOTE,
     }
     if bit_width == "fp16":
         return dict(
@@ -1930,6 +1933,8 @@ def build_cudagraph_payload(
             "ppl_fp16": None,
             "ppl_this": None,
             "ppl_delta": None,
+            # ★ ppl_* 全 null 必须带声明（schema 会校验）
+            "ppl_note": PPL_NOT_MEASURED_NOTE,
             "gate": "PASS" if graph_pass else "FAIL",
             "thresholds": {
                 "kl_max_fp16_graph": 1e-5,

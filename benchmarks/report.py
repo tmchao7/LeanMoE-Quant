@@ -18,11 +18,12 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
-from benchmarks.schema import validate_result
+from benchmarks.schema import PPL_STATUS_PATH, load_ppl_index, validate_result
 
 RESULTS_GLOB = "results/*/result.json"
 
@@ -128,6 +129,7 @@ def byte_budget_section(results: list[dict[str, Any]]) -> str:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pattern", default=RESULTS_GLOB)
+    ap.add_argument("--results-dir", default="results", help="PPL 声明清单的查找目录")
     ap.add_argument("--stage", default=None, help="只显示该阶段（按 exp_id 前缀匹配）")
     ap.add_argument("--check", action="store_true", help="只做 schema 校验")
     args = ap.parse_args(argv)
@@ -136,12 +138,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.stage:
         results = [r for r in results if r.get("exp_id", "").startswith("EXP-%s" % args.stage)]
 
+    # ★ PPL 声明清单：历史工件的 ppl_* 是 null 但**没有** ppl_note，靠这份清单合规
+    #   （否则 `tools/ppl_status.py` 存在的意义就没了）。
+    ppl_index = load_ppl_index(os.path.join(args.results_dir, "PPL_STATUS.json"))
+    if not ppl_index:
+        print(
+            "note: 未找到 %s —— ppl_* 为 null 的格子会被判'无声明'（跑 "
+            "`python -m tools.ppl_status` 生成）" % PPL_STATUS_PATH,
+            file=sys.stderr,
+        )
+
     problems: list[str] = []
     for r in results:
         if "_load_error" in r:
             problems.append("%s: %s" % (r["_path"], r["_load_error"]))
             continue
-        for p in validate_result(r):
+        for p in validate_result(r, ppl_index):
             problems.append("%s: %s" % (r.get("exp_id", r["_path"]), p))
 
     if args.check:
