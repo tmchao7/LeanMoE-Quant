@@ -587,6 +587,25 @@ def fig2(inputs: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------------------
 
 
+def _not_measurable_label(rec: dict[str, Any]) -> str:
+    """`attainment_pct_cold_best` 为 None 时，图上该写什么。
+
+    ★ 成因不止一个，必须分别说，否则就是把"未测"写成具体结论（硬规则 1）：
+      - 压根没跑 cold（flush_mb == 0 ⇒ cold_single 为空）→ "not measured"；
+      - 真的低于事件地板 → 引用**实测**的地板值（`timing.event_floor_ms`），
+        不写死 5.5 µs —— 地板本身是量出来的，图上就该引它。
+    """
+    timing = rec.get("timing") or {}
+    if not timing:
+        return "not measured (no timing for this subject)"
+    if not timing.get("cold_single"):
+        return "not measured (cold pass was not run — flush_mb=0)"
+    floor_ms = timing.get("event_floor_ms")
+    if floor_ms is None:
+        return "below the event floor — not measurable"
+    return "below the %.1f µs event floor — not measurable" % (float(floor_ms) * 1000.0)
+
+
 def fig3(inputs: dict[str, Any]) -> str:
     subjects = inputs["kernel_attainment"]["value"]
     order = [
@@ -646,11 +665,17 @@ def fig3(inputs: dict[str, Any]) -> str:
         svg.text(left - 14, y + 13, pretty[key], size=11.5, color=INK, anchor="end")
         att = rec.get("attainment_pct_cold_best")
         if att is None:
+            # ★ `att is None` 有**不止一个**成因，不能一律写成同一句结论：
+            #   (a) cold_min − event_floor <= 0（真的小于事件地板）；
+            #   (b) flush_mb == 0 ⇒ cold 列表为空 ⇒ 压根没做 cold 计时。
+            #   旧文案对 (b) 也会写"低于 5.5 µs 事件地板 —— 不可测"，那是把"未测"
+            #   写成了具体结论（硬规则 1）。而且那个 5.5 µs 是写死的，事件地板本身
+            #   是**实测**的（同一份 isolated.json 里就有），应当引用而不是硬编码。
             svg.rect(left, y, 2, bar_h, COLORS["warn"], radius=3)
             svg.text(
                 left + 10,
                 y + 13,
-                "below the 5.5 µs event floor — not measurable",
+                _not_measurable_label(rec),
                 size=10.5,
                 color=COLORS["warn"],
             )

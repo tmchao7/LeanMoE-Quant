@@ -889,21 +889,29 @@ def _run_isolated(args: Any) -> int:
         )
         return 2
 
+    # ★ `ncu_attempted` 与 `ncu_blocked_by` 都必须是**本轮实测**的，不能抄。
+    #   旧代码把 `ncu_attempted` 写死 True，而 `--isolated` 这一段**根本不调用
+    #   ncu**（它只在 `_run_subject_inline` 里被动被测）；`ncu_blocked_by` 那串
+    #   CapEff（0xa80425fb）是另一台机器上另一次手动尝试读到的 —— 换台机器（例如
+    #   V100）重跑，产物里仍然写着一句从没在该机验证过的断言。违反"每个结论都要
+    #   有出处"。现在：available 实测，blocked_by 只在**本轮真的试过且失败**时才有值。
     ncu_status = {
-        "ncu_attempted": True,
+        "ncu_attempted": False,
         "ncu_available": _find_tool(args.ncu or "ncu") is not None,
-        "ncu_blocked_by": (
-            "ERR_NVGPUCTRPERM：宿主 `RmProfilingAdminOnly: 1` 且本容器 "
-            "CapEff 无 CAP_SYS_ADMIN（实测 0xa80425fb），连 "
-            "gpu__time_duration.sum 这种不需要计数器的指标也被拒。"
-            "见 docs/NCU_EVIDENCE.md §2 的原始报错。"
+        "ncu_blocked_by": None,
+        "note": (
+            "--isolated 这一段不用 ncu 计时（隔离计时取代了它），所以本轮既没有尝试"
+            "也没有被阻塞。计数器被宿主策略阻断的那条实测结论见 docs/NCU_EVIDENCE.md §2，"
+            "它是**在那台机器上**量出来的，不随本产物外推。"
         ),
     }
 
     results: dict[str, Any] = {}
     order = list(chosen)
+    canary_subject = None
     if order and order[0] not in args.canary_skip:
         order = order + [order[0]]  # 首尾同格金丝雀（与步级协议一致）
+        canary_subject = order[0]
 
     def build_one(subject: str):
         spec = SUBJECTS[subject]
@@ -913,7 +921,11 @@ def _run_isolated(args: Any) -> int:
         return fn, byte_info, meta
 
     for index, subject in enumerate(order):
-        is_canary = index == len(order) - 1 and len(chosen) > 0
+        # ★ `is_canary` 原来只看"是不是最后一个"，不看"最后一个是不是真的金丝雀副本"。
+        #   当 --canary-skip 正好跳过 chosen[0] 时 order == chosen，于是**最后一个
+        #   subject 被贴上 canary: 前缀**，results 里丢掉它的原名键（下游按 subject
+        #   名读 payload["subjects"][X] 会 KeyError）。现在按身份判，不再按位置判。
+        is_canary = canary_subject is not None and index == len(order) - 1
         label = "canary:" + subject if is_canary else subject
         fn, byte_info, meta = build_one(subject)
         timing = _time_subject(fn, args, flush_mb=args.flush_mb)

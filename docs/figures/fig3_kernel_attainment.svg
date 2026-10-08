@@ -31,7 +31,7 @@
 <text x="605.3" y="336.5" font-size="10.5" fill="#1f2328" font-weight="600" text-anchor="start">58.3%   0.0143 ms</text>
 <text x="216.0" y="384.2" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fused RMSNorm (H=2048)</text>
 <rect x="230.0" y="371.2" width="2.0" height="18.0" fill="#c92a2a" opacity="1.00" rx="3.0"/>
-<text x="240.0" y="384.2" font-size="10.5" fill="#c92a2a" font-weight="400" text-anchor="start">below the 5.5 µs event floor — not measurable</text>
+<text x="240.0" y="384.2" font-size="10.5" fill="#c92a2a" font-weight="400" text-anchor="start">below the 5.0 µs event floor — not measurable</text>
 <text x="230.0" y="462.0" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">expert GEMV — bytes ↓ / time ↓ (vs fp16):</text>
 <text x="480.0" y="462.0" font-size="10.5" fill="#1f2328" font-weight="400" text-anchor="start">fp16   1.00× / 1.00×</text>
 <text x="610.0" y="462.0" font-size="10.5" fill="#1f2328" font-weight="400" text-anchor="start">w8a16  1.97× / 1.52×</text>

@@ -136,13 +136,26 @@ def _find_tool(name: str) -> str | None:
     return None
 
 
+def _pct_index(n: int, q: float) -> int:
+    """与仓库其余五个 bench 工具**同一**的百分位索引口径。
+
+    ★ 旧写法是 `int(0.99 * n)`（截断、且基准是 n 而不是 n-1）：
+        n=100 → index 99 = **最大值**（实为 p100）；n=50 → index 49 = 最大值。
+      其余工具（`bench_quant_linear`、`bench_grouped_gemm_quant`、
+      `bench_dequant_gemm_graph`、`bench_fused_norm`、`bench_decode_attention`）
+      统一用 `int(round(q/100 * (n-1)))`。小样本下旧写法让 p99 恒等于 max，
+      跨工具不可比 —— 而 p99 正是"尾部噪声有多大"的判据。
+    """
+    return int(round((q / 100.0) * (n - 1)))
+
+
 def _summarize(samples: list[float]) -> dict[str, Any]:
     if not samples:
         return {"p50": None, "p99": None, "min": None, "n": 0, "samples": []}
     ordered = sorted(samples)
     return {
         "p50": round(statistics.median(ordered), 5),
-        "p99": round(ordered[min(len(ordered) - 1, int(0.99 * len(ordered)))], 5),
+        "p99": round(ordered[_pct_index(len(ordered), 99)], 5),
         "min": round(ordered[0], 5),
         "n": len(ordered),
         "samples": [round(s, 5) for s in samples],
