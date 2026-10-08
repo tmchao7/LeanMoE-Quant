@@ -189,27 +189,56 @@ def test_realized_bytes_match_the_w_formula_when_dimensions_divide():
             assert realized == predicted, (name, gs, realized, predicted)
 
 
-def test_w_formula_undercounts_scales_when_the_input_dim_does_not_divide():
-    """★ 发现：`_quantized_bytes` 的 `n_groups = ceil(n_params / group_size)`
-    只在**输入维能被 group_size 整除**时等于真实的 `out * ceil(in / group_size)`。
+def test_w_formula_needs_the_row_width_and_is_exact_once_given():
+    """★ 修好了：组数沿**输入维、每行一组**数，所以公式必须拿到行宽 `in_features`。
 
-    实测反例：`in=300, out=8, group_size=128`
-        真实 scale 数 = 8 * ceil(300/128) = 8 * 3 = 24
-        公式给出     = ceil(8*300/128)    = ceil(18.75) = 19
+    旧写法 `n_groups = ceil(n_params / group_size)` 只在"每个矩阵的输入维都被
+    group_size 整除"时等于真实的 `rows × ceil(in / group_size)`。实测反例
+    `in=300, out=8, group_size=128`：
+        真实 scale 数 = 8 × ceil(300/128) = 8 × 3 = 24
+        旧公式给出    = ceil(8*300/128)   = ceil(18.75) = 19   -> **低估**
 
-    所以对维度不整除的模型，公式会**低估** scale 开销。OLMoE 不受影响
-    （2048 / 1024 / 50304 对 32/64/128 都整除），但这条限制应当写下来而不是
-    等别人踩。这里断言**实测值**，并把差值记在测试里。
+    所以 `_quantized_bytes` / `pack.scale_nbytes` 现在都接受 `in_features`：
+    给了就精确，不给就退回旧近似（只在整除时成立，不静默假装正确）。
+    OLMoE 不受影响（2048 / 1024 / 50304 对 32/64/128 都整除），已发布的 [W]
+    逐格不变 —— 见 `test_realized_bytes_match_the_w_formula_when_dimensions_divide`。
     """
     from benchmarks.bytes import _quantized_bytes
 
     linear = nn.Linear(300, 8, bias=False)
     ql = QuantLinear(linear, _spec("w8a16", 128))
-    realized = realized_bytes(ql)["scale_bytes"]
+    realized = realized_bytes(ql)
     true_scales = 8 * ((300 + 127) // 128) * 2  # fp16
-    predicted = _quantized_bytes(8 * 300, 8, 128, 2) - (8 * 300 * 8 // 8)
-    assert realized == true_scales
-    assert predicted != true_scales, "公式若哪天修好了，这条测试会断 —— 那是好事"
+    assert realized["scale_bytes"] == true_scales
+
+    # ★ 只比 **scale 那一部分**：`_quantized_bytes` 刻意用**未补齐**的 n_params 算
+    #   packed（padding 膨胀由 `QuantizeReport.padding` 单独报），所以总和本来就不等。
+    packed = 8 * 300 * 8 // 8
+
+    def scale_part(**kw) -> int:
+        return _quantized_bytes(8 * 300, 8, 128, 2, **kw) - packed
+
+    # 给了行宽 -> 精确
+    assert scale_part(in_features=300) == realized["scale_bytes"]
+    # 不给行宽 -> 旧的近似口径，在非整除时低估（保留它只为兼容，不假装正确）
+    assert scale_part() != realized["scale_bytes"], "不传 in_features 时应当仍是近似值"
+    assert scale_part() < realized["scale_bytes"]
+
+
+def test_scale_nbytes_counts_groups_per_row_when_given_the_width():
+    """`lemoq.quant.pack.scale_nbytes` 与 `benchmarks.bytes` 同一口径。
+
+    实测反例 `out=2, in=130, group_size=128`：真实 4 组，旧的"整块参数"写法给 3 组。
+    """
+    from lemoq.quant import pack
+
+    n, gs = 2 * 130, 128
+    assert pack.scale_nbytes(n, gs, 2, in_features=130) == 2 * 2 * 2  # rows=2 × 2 组 × 2B
+    assert pack.scale_nbytes(n, gs, 2) == 3 * 2  # 旧近似（低估）
+    # 整除时两者必须相等 —— 这是 OLMoE 的情形
+    assert pack.scale_nbytes(2048 * 2048, 128, 2, in_features=2048) == pack.scale_nbytes(
+        2048 * 2048, 128, 2
+    )
 
 
 def test_padding_inflation_is_measured_not_assumed():

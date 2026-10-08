@@ -78,6 +78,14 @@ def quantize_rtn(
     grouped = padded.reshape(out_features, n_groups, group_size)
 
     qmax = qmax_for(bits, symmetric=symmetric)
+    # ★ 补零列不得参与 min/max —— 与 `lemoq.quant.rtn` 同一条规则（那里有完整理由）：
+    #   非对称量化下补的 0 会把整组值域拉到 0，白白损失末组的分辨率。
+    #   两份实现必须在这一点上一致，否则 `tests/test_quant_oracle.py` 的逐元素断言
+    #   会在非对称 + 非整除宽度上分叉。
+    # 同上：padding 在全局列 [orig_in, padded_in)，展开后落在末组的局部列
+    # [orig_in % group_size, group_size)。
+    valid = (np.arange(padded_in) < orig_in).reshape(1, n_groups, group_size)
+
     if symmetric:
         absmax = np.max(np.abs(grouped), axis=2, keepdims=True)
         scale = np.where(absmax > 0, absmax / qmax, 1.0).astype(np.float32)
@@ -85,9 +93,12 @@ def quantize_rtn(
         qmin = -(qmax + 1)
         codes = np.clip(np.round(grouped / scale), qmin, qmax)
     else:
-        gmax = np.max(grouped, axis=2, keepdims=True)
-        gmin = np.min(grouped, axis=2, keepdims=True)
-        scale = np.where((gmax - gmin) > 0, (gmax - gmin) / qmax, 1.0).astype(np.float32)
+        gmax = np.where(valid, grouped, -np.inf).max(axis=2, keepdims=True)
+        gmin = np.where(valid, grouped, np.inf).min(axis=2, keepdims=True)
+        gmax = np.where(np.isfinite(gmax), gmax, 0.0)
+        gmin = np.where(np.isfinite(gmin), gmin, 0.0)
+        rng = gmax - gmin
+        scale = np.where(rng > 0, rng / qmax, 1.0).astype(np.float32)
         zero = np.round(-gmin / scale)
         codes = np.clip(np.round(grouped / scale) + zero, 0, qmax)
 

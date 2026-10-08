@@ -140,13 +140,39 @@ def _bytes_for_params(n_params: int, dtype_bytes: int) -> int:
 
 
 def _quantized_bytes(
-    n_params: int, bits: int, group_size: int | None, scale_dtype_bytes: int
+    n_params: int,
+    bits: int,
+    group_size: int | None,
+    scale_dtype_bytes: int,
+    *,
+    in_features: int | None = None,
 ) -> int:
-    """Packed weights + per-group scales."""
+    """Packed weights + per-group scales.
+
+    ★ 组数沿**输入维、每行一组**数：`rows × ceil(in / group_size)`。
+    旧写法 `ceil(n_params / group_size)` 只在每个矩阵的输入维都被 `group_size`
+    整除时等于它 —— 否则**低估** scale 开销（实测 `out=8, in=300, g=128`：
+    真实 24 组，旧写法 19 组）。
+
+    所以 `in_features` 必须传。`in_features=None` 保留旧近似，只为兼容不了解
+    形状的调用点，且**不**假装它总是对的。
+    """
+    packed = n_params * bits // 8
     if group_size is None or group_size <= 0:
-        return n_params * bits // 8
-    n_groups = -(-n_params // group_size)  # ceil
-    return n_params * bits // 8 + n_groups * scale_dtype_bytes
+        return packed
+    if in_features is None:
+        n_groups = -(-n_params // group_size)  # ceil（近似口径）
+    else:
+        in_features = int(in_features)
+        if in_features <= 0:
+            raise ValueError("in_features 必须 > 0，得到 %r" % (in_features,))
+        if n_params % in_features != 0:
+            raise ValueError(
+                "n_params=%d 不能被 in_features=%d 整除：组数按行算，形状不自洽就没法数"
+                % (n_params, in_features)
+            )
+        n_groups = (n_params // in_features) * -(-in_features // group_size)
+    return packed + n_groups * scale_dtype_bytes
 
 
 def _item(name: str, params: int, byte_count: int, formula: str) -> dict[str, Any]:
@@ -163,21 +189,46 @@ def weight_budget(
     quant = quant or QuantSpec()
     items: list[dict[str, Any]] = []
 
-    def maybe_quant(name: str, params: int, dtype_b: int) -> int:
+    # ★ 按 **(rows, in_features)** 逐块算，而不是只给一个 n_params：
+    #   per-group scale 是"沿输入维、每行一组"，组数 = rows × ceil(in / group_size)。
+    #   只知道总参数量时这个数算不出来（旧写法 `ceil(n_params/gs)` 在非整除时低估），
+    #   所以每个 bucket 必须把它由哪些 (rows, in) 组成说清楚。
+    def maybe_quant(name: str, shapes: tuple[tuple[int, int], ...], dtype_b: int) -> int:
+        params = sum(r * c for r, c in shapes)
         if quant.enabled and name in quant.targets:
             if name == "lm_head" and quant.keep_lm_head_fp16:
                 return _bytes_for_params(params, dtype_b)
-            return _quantized_bytes(
-                params, int(quant.bits), quant.group_size, quant.scale_dtype_bytes
+            return sum(
+                _quantized_bytes(
+                    rows * in_f,
+                    int(quant.bits),
+                    quant.group_size,
+                    quant.scale_dtype_bytes,
+                    in_features=in_f,
+                )
+                for rows, in_f in shapes
             )
         return _bytes_for_params(params, dtype_b)
 
-    attn = spec.layers * spec.attn_params_per_layer()
+    def params_of(shapes: tuple[tuple[int, int], ...]) -> int:
+        return sum(r * c for r, c in shapes)
+
+    # ★ o_proj 的输入维是 heads*head_dim（不是 hidden）—— 四块投影的 (rows, in)
+    #   不一样，混成一个 n_params 会数错组数（改这里若算错，[W] 的 fp16 锚点
+    #   2,357,723,136 会立刻不对，tests/test_bytes.py 钉着它）。
+    q_rows = spec.layers * spec.num_attention_heads * spec.head_dim
+    kv_rows = spec.layers * spec.num_key_value_heads * spec.head_dim
+    attn_shapes = (
+        (q_rows, spec.hidden),  # q_proj:  (heads*hd, hidden)
+        (kv_rows, spec.hidden),  # k_proj
+        (kv_rows, spec.hidden),  # v_proj
+        (spec.layers * spec.hidden, spec.num_attention_heads * spec.head_dim),  # o_proj
+    )
     items.append(
         _item(
             "attention",
-            attn,
-            maybe_quant("attention", attn, dtype_bytes),
+            params_of(attn_shapes),
+            maybe_quant("attention", attn_shapes, dtype_bytes),
             "layers x (q + 2*kv + o)",
         )
     )
@@ -188,17 +239,24 @@ def weight_budget(
             _item(
                 "router",
                 router,
-                maybe_quant("router", router, dtype_bytes),
+                maybe_quant(
+                    "router", ((spec.layers * spec.num_experts, spec.hidden),), dtype_bytes
+                ),
                 "layers x hidden x num_experts",
             )
         )
 
-    experts = spec.layers * spec.ffn_params_per_layer_activated()
+    # ★ experts 必须拆成 gate_up（in = hidden）与 down（in = ffn）两块：
+    #   它们的输入维不同，混成一个 n_params 就数不出正确的组数。
+    mult = spec.top_k if spec.is_moe else 1
+    gu_shapes = ((spec.layers * mult * 2 * spec.expert_ffn_dim, spec.hidden),)
+    dn_shapes = ((spec.layers * mult * spec.hidden, spec.expert_ffn_dim),)
+    experts = params_of(gu_shapes) + params_of(dn_shapes)
     items.append(
         _item(
             "experts(top-k)",
             experts,
-            maybe_quant("experts", experts, dtype_bytes),
+            maybe_quant("experts", gu_shapes + dn_shapes, dtype_bytes),
             (
                 "layers x top_k x 3 x hidden x expert_ffn_dim (MoE streams only top-k)"
                 if spec.is_moe
@@ -208,12 +266,16 @@ def weight_budget(
     )
 
     if spec.shared_expert_ffn_dim:
-        shared = spec.layers * 3 * spec.hidden * spec.shared_expert_ffn_dim
+        sffn = spec.shared_expert_ffn_dim
+        shared_shapes = (
+            (spec.layers * 2 * sffn, spec.hidden),
+            (spec.layers * spec.hidden, sffn),
+        )
         items.append(
             _item(
                 "shared_expert",
-                shared,
-                maybe_quant("shared", shared, dtype_bytes),
+                params_of(shared_shapes),
+                maybe_quant("shared", shared_shapes, dtype_bytes),
                 "layers x 3 x hidden x shared_ffn_dim",
             )
         )
@@ -224,7 +286,7 @@ def weight_budget(
             _item(
                 "lm_head",
                 lm,
-                maybe_quant("lm_head", lm, dtype_bytes),
+                maybe_quant("lm_head", ((spec.vocab_size, spec.hidden),), dtype_bytes),
                 "vocab x hidden (untied -> streamed every token)",
             )
         )

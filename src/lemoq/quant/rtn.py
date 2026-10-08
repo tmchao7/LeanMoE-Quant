@@ -54,6 +54,17 @@ def quantize_rtn(
     grouped = padded.reshape(out_features, n_groups, group_size)
 
     qmax = qmax_for(bits, symmetric=symmetric)
+    # ★ 补零列**不得**参与 min/max。padding 只占 [orig_in, padded_in)，把它算进去
+    #   会把非对称量化的整组值域拉到 0（实测：末组真实值域 10~12 时，scale 从
+    #   0.01507 变成 0.04686 —— 分辨率损失 3.1 倍，误差 0.0039 -> 0.0233）。
+    #   对称量化不受影响（absmax 不受 0 影响），但两种模式都要按"只看真实列"写，
+    #   否则两份实现（`rtn` / `numpy_oracle`）会在非对称上分叉。
+    # padding 在**全局**列 [orig_in, padded_in) 上；按 `grouped` 的形状展开后，
+    # 它落在末组的局部列 [orig_in % group_size, group_size)。
+    valid = (torch.arange(padded_in, device=padded.device) < orig_in).reshape(
+        1, n_groups, group_size
+    )
+
     if symmetric:
         absmax = grouped.abs().amax(dim=2, keepdim=True)
         scale = torch.where(absmax > 0, absmax / qmax, torch.ones_like(absmax))
@@ -61,8 +72,13 @@ def quantize_rtn(
         qmin = -(qmax + 1)
         codes = (grouped / scale).round().clamp(qmin, qmax)
     else:
-        gmax = grouped.amax(dim=2, keepdim=True)
-        gmin = grouped.amin(dim=2, keepdim=True)
+        inf = torch.full_like(grouped, float("inf"))
+        gmax = torch.where(valid, grouped, -inf).amax(dim=2, keepdim=True)
+        gmin = torch.where(valid, grouped, inf).amin(dim=2, keepdim=True)
+        # 每组至少含一个真实列（padded_in = ceil(orig_in/gs)*gs ⇒ 末组起点 < orig_in），
+        # 所以 ±inf 不会漏出来；这里仍然兜一层，避免静默产生 inf scale。
+        gmax = torch.where(torch.isfinite(gmax), gmax, torch.zeros_like(gmax))
+        gmin = torch.where(torch.isfinite(gmin), gmin, torch.zeros_like(gmin))
         rng = gmax - gmin
         scale = torch.where(rng > 0, rng / qmax, torch.ones_like(rng))
         zero = (-gmin / scale).round()

@@ -76,16 +76,54 @@ def packed_nbytes(n_params: int, bits: int) -> int:
     return n_params * bits // 8
 
 
-def scale_nbytes(n_params: int, group_size: int, scale_bytes: int = 2) -> int:
-    """Per-group scale overhead. Groups are along the input dim, per output row."""
+def scale_nbytes(
+    n_params: int, group_size: int, scale_bytes: int = 2, *, in_features: int | None = None
+) -> int:
+    """Per-group scale overhead. Groups are along the input dim, **per output row**.
+
+    ★ `in_features`（每行的输入维）必须给，否则算出来的组数是错的：
+
+        正确   n_groups = rows × ceil(in / group_size)       rows = n_params / in
+        旧写法 n_groups = ceil(n_params / group_size)
+
+    两者只在"每个矩阵的输入维都被 group_size 整除"时相等。反例
+    `out=2, in=130, group_size=128`：真实 4 组，旧写法给 3 组 —— **低估** scale 开销。
+
+    `in_features=None` 保留旧行为只是为了兼容不了解形状的调用点；它会在下面
+    `bit_cost` 的文档里被明确标为"仅当整除时成立"，不静默假装正确。
+    """
     if group_size <= 0:
         return 0
-    n_groups = -(-n_params // group_size)
+    if in_features is None:
+        n_groups = -(-n_params // group_size)
+    else:
+        in_features = int(in_features)
+        if in_features <= 0:
+            raise ValueError("in_features 必须 > 0，得到 %r" % (in_features,))
+        if n_params % in_features != 0:
+            raise ValueError(
+                "n_params=%d 不能被 in_features=%d 整除：组数按行算，形状不自洽就没法数"
+                % (n_params, in_features)
+            )
+        rows = n_params // in_features
+        n_groups = rows * -(-in_features // group_size)
     return n_groups * scale_bytes
 
 
-def bit_cost(n_params: int, bits: int, group_size: int, scale_bytes: int = 2) -> dict[str, int]:
-    """Total quantized footprint — must agree with `benchmarks.bytes`."""
+def bit_cost(
+    n_params: int,
+    bits: int,
+    group_size: int,
+    scale_bytes: int = 2,
+    *,
+    in_features: int | None = None,
+) -> dict[str, int]:
+    """Total quantized footprint — must agree with `benchmarks.bytes`.
+
+    ★ `in_features=None` 时 scale 开销按"整块参数"近似，**仅在输入维被 group_size
+      整除时成立**（OLMoE 的 2048/1024/50304 对 32/64/128 都整除，所以本项目已发布的
+      字节账不受影响）。能给形状就必须给 —— 见 `scale_nbytes`。
+    """
     p = packed_nbytes(n_params, bits)
-    s = scale_nbytes(n_params, group_size, scale_bytes)
+    s = scale_nbytes(n_params, group_size, scale_bytes, in_features=in_features)
     return {"params": n_params, "packed_bytes": p, "scale_bytes": s, "total_bytes": p + s}
