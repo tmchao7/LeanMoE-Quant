@@ -1579,6 +1579,20 @@ def latency_section_for_gate(
     return null_latency, evidence
 
 
+def _rmsnorm_payload_fields(res: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
+    """P2i：decode 的 norm 实现必须进 payload。
+
+    ★ cell id 里**没有** norm 轴，可追溯性只能靠记录；而 payload 里有**两处**
+      `payload["config"] = {…}`（eager 与 cudagraph 各一处，后者会覆盖前者）——
+      把字段写成一个函数、两处都展开，才不会出现"加在会被覆盖的那一块"这种事
+      （第一版就是这么漏的：v3 轮第一遍的 payload 里 `config.rmsnorm` 是 None）。
+    """
+    return {
+        "rmsnorm": res.get("rmsnorm") or cfg.get("rmsnorm") or "hf",
+        "rms_norms_replaced": res.get("rms_norms_replaced"),
+    }
+
+
 def build_payload(
     exp_id: str, res: dict[str, Any], cfg: dict[str, Any], hypothesis: dict[str, str]
 ) -> dict[str, Any]:
@@ -1616,8 +1630,7 @@ def build_payload(
         "moe": cfg.get("moe") or "hf",
         "moe_blocks_replaced": res.get("moe_blocks_replaced"),
         # ★ P2i：decode 的 RMSNorm 实现（fused = 本仓库 kernel / hf = transformers 原链）
-        "rmsnorm": res.get("rmsnorm") or cfg.get("rmsnorm") or "hf",
-        "rms_norms_replaced": res.get("rms_norms_replaced"),
+        **_rmsnorm_payload_fields(res, cfg),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
         "batch": cfg.get("batch"),
@@ -1856,6 +1869,8 @@ def build_cudagraph_payload(
         "moe": res.get("moe", "hf"),
         "attn": res.get("attn"),
         "moe_blocks_replaced": res.get("moe_blocks_replaced"),
+        # ★ 这一块**覆盖**上面那块 —— 字段必须在这里也出现（见 `_rmsnorm_payload_fields`）
+        **_rmsnorm_payload_fields(res, cfg),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
         "batch": cfg.get("batch"),

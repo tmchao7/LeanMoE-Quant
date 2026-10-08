@@ -1083,3 +1083,21 @@ def test_dry_run_surfaces_the_rmsnorm_implementation(capsys):
     )
     out_hf = capsys.readouterr()
     assert rc_hf == 0 and "rmsnorm=hf" in out_hf.out, out_hf.out
+
+
+def test_rmsnorm_fields_reach_the_payload_from_both_config_blocks():
+    """★ P2i 的教训：payload 里有**两处** `payload["config"] = {…}`（eager / cudagraph），
+    后者会覆盖前者。把字段写成一个函数、两处都展开，才不会"加在会被覆盖的那一块"
+    （实测：v3 轮第一遍的单元格 payload 里 `config.rmsnorm` 是 None）。
+
+    这条测试同时钉住三件事：默认值、实现名优先于 cfg、以及 replaced 计数。
+    """
+    from benchmarks.runner import _rmsnorm_payload_fields
+
+    assert _rmsnorm_payload_fields({"rmsnorm": "fused", "rms_norms_replaced": 65}, {}) == {
+        "rmsnorm": "fused",
+        "rms_norms_replaced": 65,
+    }
+    # res 缺字段时退回 cfg；cfg 也缺时退回 "hf"（历史 payload 没有这个轴）
+    assert _rmsnorm_payload_fields({}, {"rmsnorm": "fused"})["rmsnorm"] == "fused"
+    assert _rmsnorm_payload_fields({}, {})["rmsnorm"] == "hf"
