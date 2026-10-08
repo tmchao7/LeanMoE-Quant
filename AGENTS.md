@@ -2,7 +2,7 @@
 
 Compact guide for agent sessions working in LeanMoE-Quant. Read this before editing.
 
-## 0. Sixty-second state (2026-10-07)
+## 0. Sixty-second state (2026-10-08)
 
 Phases 0, 1 (accuracy gate), 2 (kernels) and 4b (E7) are **executed**. Two headline results are
 settled — do not re-derive them and do not re-run their cells:
@@ -12,9 +12,11 @@ settled — do not re-derive them and do not re-run their cells:
   ~19k kernels/step). Isolated the fused kernel is 1.21× cheaper per call — Python/launch eats it.
 - **E7 (`EXP-p4b-01`) — judged.** The truncation is real and **only the fused arm cashes it in**.
   ★ Refreshed 2026-10-08 (P2j, fused RMSNorm): the graph cells now read `speedup_cudagraph`
-  **1.1927** (1024) / **1.0888** (4096) with fp16 3.5881/6.8269 and w8a16 3.0084/6.2702 ms
-  (canary +0.13%); the **eager** arm's 8 cells are **pre-P2i** — their refresh was VOID because a
-  co-tenant's CPU load inflated `host_p50` (evidence: the *old* implementation re-run now shows
+  **1.1911** (1024) / **1.0888** (4096) — the record's **adopted** p50s are fp16 3.5881/6.8269 and
+  w8a16 **3.0124**/6.2702 ms (earlier drafts divided by the canary's *first* reading 3.0084 to get
+  1.1927; the adopted value is the canary's last, 3.0124). Canary spread +0.13%; the **eager**
+  arm's 8 cells are **pre-P2i** — their refresh was VOID because a co-tenant's CPU load inflated
+  `host_p50` (evidence: the *old* implementation re-run now shows
   `host_p50` 35.2 ms vs 1.5 ms archived, while `kernels_per_call` and `gpu_busy` match exactly).
   Host_share drops 77.5% → 1.6%, and the weight stream is only 42% (1024) / 23% (4096) of a graph
   step ⇒ even a perfect weight path ≤ ~1.74× / ~1.30×.
@@ -68,9 +70,10 @@ settled — do not re-derive them and do not re-run their cells:
   (4.478 ms = **44.2%** of GPU busy) and **quantization-invariant** (4.478 / 4.512 / 4.526 / 4.555 ms
   for fp16 → w4a16) — the cap the plan predicted. The grouped path already removed it; see P2b.
 
-Read, in this order: **`configs/experiments.yaml`** (the only source of hypotheses and cells),
-the **record** of the experiment you are about to touch (`experiments/<EXP-ID>.md`), then
-**`docs/HANDOFF_P2_FUSION.md`** (the current handoff).
+Read, in this order: **`RESULTS.md`** (the one-page result with a citation per number),
+**`configs/experiments.yaml`** (the only source of hypotheses and cells), the **record** of the
+experiment you are about to touch (`experiments/<EXP-ID>.md`), then **`docs/HANDOFF_P2_FUSION.md`**
+(historical — the Phase-2 handoff, kept because its blocked-path reasoning is still accurate).
 
 Two rules come before everything else: **do not redo what §3 lists as done**, and **ask the user**
 before changing a matrix axis, a cell id, or overwriting a recorded `result.json` (§6).
@@ -138,7 +141,7 @@ in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`
 | E4 routing overhead | done — **supported**: 44.2% of GPU busy, and **quantization-invariant** (4.478/4.512/4.526/4.555 ms for fp16/w8a16/w8a8/w4a16) | `experiments/EXP-p4-01-moe-routing-overhead.md` |
 | The elementwise/copy tail (0.90 ms, "~330 kernels") | done — classified: it is **~13 named families × 16–83 calls/step**, not a flat tail; module-level attribution VOID (its own K1 failed) | `experiments/EXP-p4c-02-elementwise-tail.md` |
 | E5 expert sensitivity, E6 KV INT8, E8 cross-bandwidth, FP8/MXFP4, dense curves, batch sweep | **not run** | `configs/experiments.yaml`, `PLAN.md` §7 |
-| ncu evidence (a Phase 2 deliverable) | **not done** | `PLAN.md` §5 |
+| ncu evidence (a Phase 2 deliverable) | **partly delivered 2026-10-08** — the counter path is **blocked by the host** (`RmProfilingAdminOnly: 1` + no `CAP_SYS_ADMIN` in the container; even the counter-free `gpu__time_duration.sum` is refused). Substitute delivered: kernel/call-level bandwidth attainment from hand-computed necessary bytes ÷ isolated cold timing ÷ measured achievable bandwidth, with an L2 flush and an explicit event-floor subtraction. Headline: fp16 grouped GEMV **71.0%** of the wall, fused dequant-GEMM **94.9%**, and the expert GEMV alone accounts for **90%** of E7's step-level saving. Missing: stall/occupancy attribution | `docs/NCU_EVIDENCE.md`, `results/ncu_evidence/isolated.json`, `tools/ncu_evidence.py` |
 
 **Do not redo** (recorded): P0 / P1 gate / P2 / P3 wiring; the dense fused dequant kernel; the
 grouped quant expert kernel (8- and 4-bit); the split-KV attention kernel; the E2, E7 and p4c-01
@@ -160,11 +163,11 @@ that the science was not done — read the record first.
 | P2b | ✅ **classified 2026-10-07** (`EXP-p4c-02`): the 0.90 ms tail is **13 named families × 16–83 calls/step** — copies 0.17 (149 calls), RMSNorm mean+rsqrt 0.15–0.25, KV-cache write+cat 0.11, residual add 0.05, routing topK 0.05; **no single kernel >20%** | it was the largest non-weight bucket left | `experiments/EXP-p4c-02-elementwise-tail.md` | no |
 | P2f | ✅ **identified 2026-10-07** (`EXP-p4c-02` §5.5): the copy family is **`aten::_to_copy` ×150/step (0.185 ms)** — dtype casts from HF's RMSNorm (`to(fp32)` + `to(fp16)` per norm × 65 norms) plus the norm's `pow/mean/rsqrt/mul` chain ⇒ P2f and the norm question are **the same fix** | — | — | no |
 | P2i | ✅ **done 2026-10-08**: plumbing + `--aggregate-only` (interrupted-run finalisation by the tool's own aggregation code) + gate re-measured **under the fused norm** for both ctx + `GATE_CITATIONS`/artifacts/tests updated + `EXP-p4c-01`'s 8 cells re-run as **v3** (canary −0.067%, one contaminated cell re-run clean) | P2h passed K1+D but the gate on record was HF-norm | `EXP-p1-04` v2 section + `EXP-p4c-01` §5.7 + `results/EXP-p4c-01-run/v3_*` | done |
-| P2j | ✅ **done 2026-10-08** (31 cells re-run, canary +0.13%): **13 graph cells adopted** (host ≤5%) — e.g. p4b's cudagraph set (E7 now **1.1927/1.0888**), p2-02 4.08→3.68, p2-04 3.11/3.48→2.63/3.00, p2-05 3.01/3.24→2.51/2.75; **18 host-bound cells VOID** (co-tenant CPU load; proved by the `--rmsnorm hf` control: `kernels_per_call`/`gpu_busy` match the archive exactly while `host_p50` goes 1.5 → 35.2 ms) ⇒ their pre-P2i payloads were **restored as canonical** and the contended refresh copies are kept in `results/EXP-p2j-refresh/contended/`. `w8a8@4096`'s gate flip is documented as a re-adjudication (borderline) | the norm swap made every recorded ms stale | per-record "★ P2j 刷新" sections + `results/EXP-p2j-refresh/` | done |
+| P2j | ✅ **done 2026-10-08** (31 cells re-run, canary +0.13%): **13 graph cells adopted** (host ≤5%) — e.g. p4b's cudagraph set (E7 now **1.1911/1.0888**; 1.1927 was the canary-first denominator), p2-02 4.08→3.68, p2-04 3.11/3.48→2.63/3.00, p2-05 3.01/3.24→2.51/2.75; **18 host-bound cells VOID** (co-tenant CPU load; proved by the `--rmsnorm hf` control: `kernels_per_call`/`gpu_busy` match the archive exactly while `host_p50` goes 1.5 → 35.2 ms) ⇒ their pre-P2i payloads were **restored as canonical** and the contended refresh copies are kept in `results/EXP-p2j-refresh/contended/`. `w8a8@4096`'s gate flip is documented as a re-adjudication (borderline) | the norm swap made every recorded ms stale | per-record "★ P2j 刷新" sections + `results/EXP-p2j-refresh/` | done |
 | P2k | **Re-run the 18 host-bound cells on a quiet box** (p0-02 ×2, p0-04 ×2, p2-01 ×6, p4b eager ×8) | their refresh was VOID on the shared card; their conclusions don't depend on the norm (~0.4 ms in an 8–272 ms step) so this is about record hygiene, not science | the same protocol (archive → re-run → canary → per-record update); if the box is never quiet, keep the pre-P2i labels | no (just needs a quiet machine) |
 | P2c | Widen the routing classifier (torch `topk`/`sort`/`index_select`/`gather`/`scatter`) so the **grouped** path's routing cost can be quoted | `EXP-p4-01` §5.3: the classifier's 0.0% on the grouped path is a **blind spot**, not a measurement | new rules + tests; the number must be produced in its own round | **YES — it changes the meaning of the `routing_share_pct` field** |
 | P3 | Breadth: E5 (`EXP-p4-02`), E6 (`EXP-p5-01`), E8 (`EXP-p8-01`, needs the V100), E1's group axis under the corrected prompt set, dense curves, batch sweep (E3 — today it has **no** experiment), FP8/MXFP4 (`EXP-p3-01/02`), repairing the W4A16 gate | each closes a declared hypothesis or lever; several need a matrix entry that does not exist | per matrix entry; E8 only after the same protocol passes on the V100 | partial: new matrix entries need approval |
-| P4 | Publication: ncu evidence, E7 charts, final README/PLAN pass | closes Phase 2's last deliverable and Phase 7 | ncu metrics per `lemoq.kernels.NCU_METRICS`; charts regenerated from `result.json` | no |
+| P4 | ✅ **done 2026-10-08 (except the counters)**: `tools/ncu_evidence.py` (counter path written, blocked on this host) + `docs/NCU_EVIDENCE.md` + `RESULTS.md` + 3 charts generated from artifacts by `tools/make_figures.py` + README/HANDOFF corrections | closes Phase 2's last deliverable and Phase 7 | charts regenerate from `result.json` via `python -m tools.make_figures`; every number in RESULTS.md cites an artifact or record | no |
 
 ## 5. Wrap-up (docs/config only — **done 2026-10-07**)
 
@@ -274,10 +277,13 @@ the V100 box, the Mac) diverge, so:
 
 | File | For |
 | --- | --- |
+| `RESULTS.md` | the one-page result: five levers, the measured ceiling, negative results, gaps |
 | `PLAN.md` | the frozen plan: thesis, hypotheses, phases, budget, risks (not a status page) |
 | `configs/experiments.yaml` | the declarative matrix: the only source of hypotheses and cell ids |
 | `experiments/<EXP-ID>.md` | the authoritative record of each experiment (status, results, applicability) |
-| `docs/HANDOFF_P2_FUSION.md` | the current handoff (finished + next); `docs/HANDOFF*.md` are historical |
+| `docs/NCU_EVIDENCE.md` | kernel-level evidence; why ncu counters are blocked on this host and what replaced them |
+| `docs/figures/` | the three charts, regenerated from artifacts by `python -m tools.make_figures` |
+| `docs/HANDOFF_P2_FUSION.md` | **historical** Phase-2 handoff (banner at the top says so) |
 | `EXPERIMENTS.md` | mandatory record format and metric definitions |
 | `docs/METRICS.md` | metric definitions and the correctness thresholds |
 | `docs/MODELS.md` | model candidates and the verified OLMoE architecture (incl. the ctx≤4096 limit) |

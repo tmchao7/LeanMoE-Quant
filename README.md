@@ -2,18 +2,29 @@
 
 > **batch=1 单流 MoE 解码：字节预算（byte budget）驱动的量化与 kernel 优化**
 
-状态（2026-10-07）：**阶段 0 / 1（精度门）/ 2（kernel）/ 4b（E7）已执行**，两条头号结论已定：
+**一页纸结果（所有数字带出处）见 [RESULTS.md](RESULTS.md)；图在
+[docs/figures/](docs/figures/)。**
+
+状态（2026-10-08）：**阶段 0 / 1（精度门）/ 2（kernel）/ 4b（E7）已执行**，头号结论：
 
 - **E2 被否证**：融合反量化不是矩阵预期的 1.3–2×——在预注册的 eager 格里它反而比独立 kernel
-  **慢 5%**（`host_share` 71.7%、~19k kernel/步，那条路径是 host/launch 受限的）；
+  **慢 4.4%**（`host_share` 72.2%、**19,029 kernel/步**，那条路径是 host/launch 受限的）；
 - **E7 已判定**：截断效应成立，但**只有融合臂兑现**——同一个 `w8a16` **fused** 实现
-  `speedup_eager` 0.76 → `speedup_cudagraph` **1.11**（ctx=1024；4096 是 0.79 → 1.05），
-  `host_share` 77.5% → 1.2%。天花板是**实测**出来的：权重只占 graph 步的 42% / 23%，
-  完美权重路径的上限也只有 ~1.74× / ~1.30×。
+  `speedup_eager` 0.78 → `speedup_cudagraph` **1.1911**（ctx=1024）/ **1.0888**（4096），
+  `host_share` 77.5% → 1.6%。天花板是**实测**出来的：权重只占 graph 步的 42% / 23%，
+  完美权重路径的上限也只有 ~1.74× / ~1.30×。★ 2026-10-08 起**规范实现是融合 RMSNorm**
+  （`--rmsnorm fused`），绝对延迟已按新实现重测；
+- **E4 已判定**：路由/打包是 hf/gather 基线里最大的桶（**4.478 ms = GPU busy 的 44.2%**），
+  且**量化不变**（fp16 → w4a16 只差 1.7%）——它就是计划预测的那个上限；
+- **`EXP-p4c-01` 支持**：图内把 HF sdpa 换成自研 split-KV，量化格 **1.3034× / 1.2555×**，
+  最好格 **1.87× / 3.11×** vs fp16×sdpa；**`EXP-p4c-02`**：自研融合 RMSNorm 全步
+  **1.2358×**，kernel/步 **994 → 539**。
 
 进度、工件与"还没做什么"见 [AGENTS.md](AGENTS.md) 的 §0/§3；权威记录是
-`experiments/<EXP-ID>.md`。**未做**：E4 路由开销、E5 专家敏感度、E6 KV INT8、E8 跨带宽（V100）、
-FP8/MXFP4、dense 曲线、batch 扫描、ncu 证据。
+`experiments/<EXP-ID>.md`。**未做**：E5 专家敏感度、E6 KV INT8、E8 跨带宽（V100）、
+FP8/MXFP4、dense 曲线、batch 扫描。**ncu 性能计数器在本机被宿主策略阻断**
+（`RmProfilingAdminOnly: 1` + 容器无 `CAP_SYS_ADMIN`），已交出替代的 kernel 级证据：
+[docs/NCU_EVIDENCE.md](docs/NCU_EVIDENCE.md)。
 
 绝不把本机 Mac 的测试当成 GPU 实测；`results/` 是机器本地工件（gitignored），不进 git。
 
@@ -70,6 +81,7 @@ V100 上跑不了）；本项目需要"模型装得下 + 带宽越高越好"。�
 ```text
 LeanMoE-Quant/
 ├── PLAN.md                  # 计划书（唯一权威计划）
+├── RESULTS.md               # ★ 一页纸结果（每个数字带出处）
 ├── AGENTS.md                # 协作/agent 规则（含项目硬规则）
 ├── ENVIRONMENT.md           # 机器、环境、网络/镜像/代理、模型获取
 ├── EXPERIMENTS.md           # 实验记录格式与指标定义（强制）
@@ -77,6 +89,8 @@ LeanMoE-Quant/
 │   ├── SPECS.md             # 机器规格 + 跨代特性矩阵 + 选卡
 │   ├── MODELS.md            # 模型选型 + 已核实的 OLMoE 架构与字节预算
 │   ├── METRICS.md           # 指标口径（KL/PPL、[W]/[T]、达成率、host 占比）
+│   ├── NCU_EVIDENCE.md      # ★ kernel 级证据（计数器被阻断 + 替代口径）
+│   ├── figures/             # ★ 三张图（由 tools/make_figures.py 从工件生成）
 │   └── SERVER_RUNBOOK.md    # 服务器到手后的命令序列
 ├── configs/
 │   ├── models.yaml          # 模型清单（唯一来源）
@@ -87,7 +101,7 @@ LeanMoE-Quant/
 ├── results/                 # JSON/日志落盘（gitignored）
 ├── src/lemoq/               # quant/ 量化实现、kernels/ 反量化 kernel
 ├── benchmarks/              # timing / vram / hostgap / bytes / harness / report
-├── tools/                   # 设备探测、可达带宽标定
+├── tools/                    # 设备探测、可达带宽标定、ncu 证据、画图
 └── tests/                   # 正确性门槛（先于性能）
 ```
 
