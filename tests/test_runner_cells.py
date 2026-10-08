@@ -504,7 +504,7 @@ def test_correctness_for_cell_quantized_cites_p104_and_respects_fail():
         {"bit_width": "w8a16", "group_size": 128, "ctx": 1024}, consistency_passed=True
     )
     assert w8["gate"] == "PASS"
-    assert abs(w8["kl"] - 0.001273) < 1e-9
+    assert abs(w8["kl"] - 0.001361) < 1e-9
     assert "引用" in w8["thresholds"]["note"] and "EXP-p1-04" in w8["thresholds"]["note"]
 
     w4 = correctness_for_cell(

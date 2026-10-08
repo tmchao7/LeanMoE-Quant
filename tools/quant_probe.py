@@ -648,9 +648,79 @@ def _measure(
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
+def aggregate_windows(
+    result: dict[str, Any],
+    *,
+    kl_gate_w8: float,
+    kl_gate_w4: float,
+    top1_gate: float,
+) -> dict[str, Any]:
+    """跨窗口聚合：门建在 prompt **集** 上（`METRICS.md` §1 的口径）。
+
+    ★ 抽成函数是为了 `--aggregate-only`：一次长跑被中断时，用**它自己的代码**把已经量完的
+      窗口收尾 —— 而不是让人手算聚合值（手算值不能当引用：硬规则 1/7）。
+      所以这里的逻辑与长跑里那次**逐字相同**，唯一改动是把三个门槛从 `args` 变成参数。
+    """
+    print("\n=== 跨窗口聚合（ones* 是退化对照，不进 mean）===")
+    for arm_id, rec in result["arms"].items():
+        rows = rec.get("windows") or {}
+        real = {k: v for k, v in rows.items() if not k.startswith("ones")}
+        kls = [v["kl"] for v in real.values() if v.get("kl") is not None]
+        if not kls:
+            continue
+        mean = sum(kls) / len(kls)
+        top1s = [v["top1_agreement"] for v in real.values() if v.get("top1_agreement") is not None]
+        ones_kl = next((v.get("kl") for k, v in rows.items() if k.startswith("ones")), None)
+        rec["aggregate"] = {
+            "n_windows": len(kls),
+            "kl_mean": mean,
+            "kl_sd": statistics.pstdev(kls) if len(kls) > 1 else 0.0,
+            "kl_min": min(kls),
+            "kl_max": max(kls),
+            "kl_spread_x": (max(kls) / min(kls)) if min(kls) > 0 else None,
+            "top1_min": min(top1s) if top1s else None,
+            "ones_control_kl": ones_kl,
+        }
+        bits = 8
+        for v in real.values():
+            wb = (v.get("spec") or {}).get("weight_bits")
+            if wb:
+                bits = int(wb)
+                break
+        th = kl_gate_w8 if bits == 8 else kl_gate_w4
+        agg = rec["aggregate"]
+        rec["gate"] = {
+            "weight_bits": bits,
+            "kl_max": th,
+            "top1_min_required": top1_gate,
+            "kl_mean_pass": mean < th,
+            "all_windows_pass": all(k < th for k in kls),
+            "top1_min_pass": (agg["top1_min"] is None) or (agg["top1_min"] >= top1_gate),
+        }
+        if ones_kl is not None:
+            rec["gate"]["ones_control_pass"] = ones_kl < th
+        print(
+            "  %-30s kl mean=%-11.6g sd=%-9.4g [min %.6g max %.6g] spread=%-7s ones=%-11s mean_pass=%-5s all_pass=%s"
+            % (
+                arm_id,
+                mean,
+                agg["kl_sd"],
+                agg["kl_min"],
+                agg["kl_max"],
+                ("%.2fx" % agg["kl_spread_x"]) if agg["kl_spread_x"] else "-",
+                ("%.6g" % ones_kl) if ones_kl is not None else "-",
+                rec["gate"]["kl_mean_pass"],
+                rec["gate"]["all_windows_pass"],
+            ),
+            flush=True,
+        )
+
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--model", required=True)
+    ap.add_argument("--model", default=None, help="模型路径/ID；`--aggregate-only` 时不需要")
     ap.add_argument("--ctx", type=int, default=1024)
     ap.add_argument("--max-new-tokens", type=int, default=32)
     ap.add_argument(
@@ -659,6 +729,16 @@ def main(argv: list[str] | None = None) -> int:
         help="逗号分隔的组名（repro_attn,repro_doc,experts_only,layer0,noise,noop）或 all",
     )
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--aggregate-only",
+        default=None,
+        metavar="ARTIFACT",
+        help=(
+            "★ 只对**已存在的**工件做跨窗口聚合（不加载模型、不碰 GPU）。用来给"
+            "一次被中断的长跑收尾：聚合走 `aggregate_windows()` —— 与长跑里**同一段代码**，"
+            "所以数字不是手算的。默认写回原工件（`--json` 可覆盖输出路径）。"
+        ),
+    )
     ap.add_argument("--json", default=None)
     ap.add_argument(
         "--rmsnorm",
@@ -712,6 +792,53 @@ def main(argv: list[str] | None = None) -> int:
         help="从缓存 token 流的哪个位置取 prompt（换一个窗口 = 换一个 prompt，用于检查结论不是单个窗口的巧合）",
     )
     args = ap.parse_args(argv)
+
+    if args.aggregate_only:
+        # `json` 在模块顶部已经 import
+        path = str(args.aggregate_only)
+        with open(path, encoding="utf-8") as fh:
+            loaded = json.load(fh)
+        before = {k: bool(v.get("aggregate")) for k, v in (loaded.get("arms") or {}).items()}
+        aggregate_windows(
+            loaded,
+            kl_gate_w8=args.kl_gate_w8,
+            kl_gate_w4=args.kl_gate_w4,
+            top1_gate=args.top1_gate,
+        )
+        # ★ 自动记录出处：这次聚合是"给被中断的长跑收尾"，所以必须写明
+        #   （a）聚合是谁算的、（b）哪些臂的窗口其实不完整 —— 免得后人把
+        #   不完整臂的 aggregate 当成完整实测读。
+        import datetime as _dt  # noqa: PLC0415
+
+        thin = sorted(
+            k
+            for k, v in (loaded.get("arms") or {}).items()
+            if int((v.get("aggregate") or {}).get("n_windows") or 0) < 5
+        )
+        loaded["_aggregate_provenance"] = {
+            "by": "tools/quant_probe.py --aggregate-only",
+            "at": _dt.datetime.now().isoformat(timespec="seconds"),
+            "source": path,
+            "note": (
+                "聚合由本工具的 aggregate_windows() 计算（与长跑同一段代码），不是手算。"
+                "窗口数据来自 source 所指的原始长跑。"
+            ),
+            "arms_with_fewer_than_5_real_windows": thin,
+            "n_arms_fewer_than_5": len(thin),
+        }
+        out = args.json or path
+        os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump(loaded, fh, ensure_ascii=False, indent=2, default=str)
+        done = sum(1 for v in (loaded.get("arms") or {}).values() if v.get("aggregate"))
+        print(
+            "\n聚合写入 %s（%d 个臂有 aggregate；此前已有 %d 个）"
+            % (out, done, sum(before.values()))
+        )
+        return 0
+    if not args.model:
+        print("--model 必填（除非用 --aggregate-only）", file=sys.stderr)
+        return 2
 
     include = (
         None
@@ -1018,59 +1145,12 @@ def main(argv: list[str] | None = None) -> int:
     result["prompt_first_tokens"] = result["windows"][first_label]["prompt_first_tokens"]
     result["reference_self_kl"] = result["windows"][first_label]["reference_self_kl"]
 
-    print("\n=== 跨窗口聚合（ones* 是退化对照，不进 mean）===")
-    for arm_id, rec in result["arms"].items():
-        rows = rec.get("windows") or {}
-        real = {k: v for k, v in rows.items() if not k.startswith("ones")}
-        kls = [v["kl"] for v in real.values() if v.get("kl") is not None]
-        if not kls:
-            continue
-        mean = sum(kls) / len(kls)
-        top1s = [v["top1_agreement"] for v in real.values() if v.get("top1_agreement") is not None]
-        ones_kl = next((v.get("kl") for k, v in rows.items() if k.startswith("ones")), None)
-        rec["aggregate"] = {
-            "n_windows": len(kls),
-            "kl_mean": mean,
-            "kl_sd": statistics.pstdev(kls) if len(kls) > 1 else 0.0,
-            "kl_min": min(kls),
-            "kl_max": max(kls),
-            "kl_spread_x": (max(kls) / min(kls)) if min(kls) > 0 else None,
-            "top1_min": min(top1s) if top1s else None,
-            "ones_control_kl": ones_kl,
-        }
-        bits = 8
-        for v in real.values():
-            wb = (v.get("spec") or {}).get("weight_bits")
-            if wb:
-                bits = int(wb)
-                break
-        th = args.kl_gate_w8 if bits == 8 else args.kl_gate_w4
-        agg = rec["aggregate"]
-        rec["gate"] = {
-            "weight_bits": bits,
-            "kl_max": th,
-            "top1_min_required": args.top1_gate,
-            "kl_mean_pass": mean < th,
-            "all_windows_pass": all(k < th for k in kls),
-            "top1_min_pass": (agg["top1_min"] is None) or (agg["top1_min"] >= args.top1_gate),
-        }
-        if ones_kl is not None:
-            rec["gate"]["ones_control_pass"] = ones_kl < th
-        print(
-            "  %-30s kl mean=%-11.6g sd=%-9.4g [min %.6g max %.6g] spread=%-7s ones=%-11s mean_pass=%-5s all_pass=%s"
-            % (
-                arm_id,
-                mean,
-                agg["kl_sd"],
-                agg["kl_min"],
-                agg["kl_max"],
-                ("%.2fx" % agg["kl_spread_x"]) if agg["kl_spread_x"] else "-",
-                ("%.6g" % ones_kl) if ones_kl is not None else "-",
-                rec["gate"]["kl_mean_pass"],
-                rec["gate"]["all_windows_pass"],
-            ),
-            flush=True,
-        )
+    aggregate_windows(
+        result,
+        kl_gate_w8=args.kl_gate_w8,
+        kl_gate_w4=args.kl_gate_w4,
+        top1_gate=args.top1_gate,
+    )
 
     final_noop = next((a["id"] for a in arms if a["id"] == "noop_final"), None)
     if final_noop:
