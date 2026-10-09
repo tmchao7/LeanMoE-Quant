@@ -435,7 +435,9 @@ def _run(args: argparse.Namespace) -> int:
     fp16_traces: dict[str, list[dict[str, Any]]] | None = (
         {"mmlu": [], "gsm8k": []} if quant_arms else None
     )
-    fp16_result = _run_arm(model, tok, "fp16", data, max_new, traces_out=fp16_traces)
+    fp16_result = _run_arm(
+        model, tok, "fp16", data, max_new, traces_out=fp16_traces, tasks=task_list
+    )
 
     # 轨迹要重存一次：_run_arm 里没外存 prompt/gen —— 为了口径 B，fp16 跑完直接量化，
     # 口径 B 在量化臂循环内重算 fp16 的 prompt + gen。因此 fp16 臂要存轨迹。
