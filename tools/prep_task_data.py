@@ -36,11 +36,24 @@ def prep_mmlu(out_path: str, n: int) -> str:
     import random
 
     rng = random.Random(SEED)
-    quota = {s: max(1, round(n * len(idx) / len(ds))) for s, idx in by_subj.items()}
-    # 比例取整可能超出 n，按 quota 降序裁掉
+    total = len(ds)
+    # 比例分配 + 余数补齐（确定性）：round 会丢 5~6 题（57 个 subject 的取整损失），
+    # 余数按 subject 拥有的题数降序、同数按字母序补 1，直到恰好 n。
+    quota = {s: max(1, round(n * len(idx) / total)) for s, idx in by_subj.items()}
+    ranked = sorted(quota, key=lambda s: (-len(by_subj[s]), s))
+    i = 0
     while sum(quota.values()) > n:
-        s = max(quota, key=lambda k: quota[k])
-        quota[s] -= 1
+        s = ranked[i % len(ranked)]
+        if quota[s] > 1:
+            quota[s] -= 1
+        i += 1
+    i = 0
+    while sum(quota.values()) < n:
+        s = ranked[i % len(ranked)]
+        if quota[s] < len(by_subj[s]):
+            quota[s] += 1
+        i += 1
+    assert sum(quota.values()) == n, "分层配额没配平"
     rows = 0
     with open(out_path, "w", encoding="utf-8") as f:
         for s in sorted(quota):
