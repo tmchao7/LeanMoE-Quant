@@ -108,8 +108,8 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | 项 | 量 |
 | --- | --- |
 | 自研 kernel 族（全部过 K1 parity 门 1e-3） | **4**：grouped MoE GEMV（fp16 + 8/4-bit）、dense 融合反量化 GEMM、split-KV decode attention、融合 RMSNorm |
-| Python（不含虚拟环境） | **29,472 行 / 79 文件**（`src` + `tools` + `benchmarks` + `tests` + `scripts`，不含 `__pycache__`） |
-| 测试 | **23 个 `test_*.py`（+ `conftest.py`）**；Mac CPU **422 passed / 0 failed / 10 deselected**；服务器含 GPU 用例 **410 passed / 7 skipped / 0 failed**（★ 两个数字口径不同：deselected = `-m "not gpu"` 主动排除，skipped = GPU 用例在无 GPU 机上跳过） |
+| Python（不含虚拟环境） | **29779 行 / 80 文件**（`src` + `tools` + `benchmarks` + `tests` + `scripts`，不含 `__pycache__`） |
+| 测试 | **24 个 `test_*.py`（+ `conftest.py`）**；Mac CPU **428 passed / 0 failed / 10 deselected**；服务器含 GPU 用例 **410 passed / 7 skipped / 0 failed**（★ 两个数字口径不同：deselected = `-m "not gpu"` 主动排除，skipped = GPU 用例在无 GPU 机上跳过） |
 | 实验矩阵 | 21 条声明 / 64 格展开；**16 条已执行**，`results/**/result.json` 98 份（81 done / 13 planned / 4 blocked） |
 | 度量纪律 | 实测带宽而非规格值；KL/top-1 门先于性能；schema 强制"门失败 ⇒ latency 为 null"；首尾同格金丝雀；同租户记录不 kill；覆盖前先归档 |
 
