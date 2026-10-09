@@ -1,4 +1,4 @@
-"""ppl_status — 生成 / 校验 `results/PPL_STATUS.json`（PPL 的**声明清单**）。
+"""ppl_status — 生成 / 校验 / 合并 PPL 的声明与数值（`results/PPL_STATUS.json`）。
 
 ## 为什么需要这份清单
 
@@ -7,20 +7,14 @@
 说明** —— 那既可能是"未测"，也可能是"漏记"，读者分不出来。项目硬规则 1 要求
 未测的值显式写成未测，而"没有声明的 null"不满足这一点。
 
-两条路可以修：
-    1. 把 PPL 真的写进每份 result.json（要 GPU，见待办 G5）；
-    2. 给每份 result.json 一句声明，说明这三个字段为什么是 null。
+三条路对应三种用法：
+    1. 声明（离线）：`--dry-run` / 默认模式 —— 给每份 null 的格子一句统一声明；
+    2. 校验：`--check` —— 所有格子要么有值、要么有声明，退出码非 0 = 有缺失；
+    3. 合并（上机，G5）：`--merge <quant_ppl.json>` —— 把 `tools/quant_ppl.py`
+       的输出写进指定 cell 的 result.json（写前先归档，规则 9），然后重建清单。
 
-本工具走第 2 条，**通过新增一份清单文件而不是重写 98 份历史工件** ——
-`AGENTS.md` §6 规定覆盖已落盘的 result.json 必须先问用户并归档。
-
-## 用法
-
-    python -m tools.ppl_status --dry-run          # 只打印将要写什么
-    python -m tools.ppl_status                    # 写 results/PPL_STATUS.json
-    python -m tools.ppl_status --check            # 校验现有工件是否都有声明（退出码非 0 = 有缺失）
-
-★ 本工具**不产出任何 PPL 数值**。它只记录"哪些格子测了、哪些没测、为什么"。
+★ 模式 1 **不产出任何 PPL 数值**；模式 3 写入的数值必须来自 results/ 下
+`quant_ppl.json` 工件（它自带 fp16 参照臂与 noop 自检臂），不得手工填数。
 """
 
 from __future__ import annotations
@@ -29,6 +23,8 @@ import argparse
 import glob
 import json
 import os
+import shutil
+import time
 from typing import Any
 
 PPL_FIELDS = ("ppl_fp16", "ppl_this", "ppl_delta")
@@ -109,13 +105,162 @@ def check(cells: dict[str, Any]) -> int:
     return len(missing)
 
 
+# ---------------------------------------------------------------------------
+# G5：把 quant_ppl 的输出合并进 cell 工件
+# ---------------------------------------------------------------------------
+
+
+def _load_ppl_run(path: str, arm_id: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """读 quant_ppl.json，返回 (fp16 参照, 指定臂, 元信息)。"""
+    with open(path, encoding="utf-8") as fh:
+        run = json.load(fh)
+    fp16 = run.get("fp16") or {}
+    arms = run.get("arms") or {}
+    if arm_id not in arms:
+        raise SystemExit("quant_ppl.json 里没有臂 %r（有：%s）" % (arm_id, sorted(arms)))
+    arm = arms[arm_id]
+    for lbl, entry, key in (("fp16", fp16, "ppl"), ("arm", arm, "ppl")):
+        if not isinstance(entry.get(key), (int, float)):
+            raise SystemExit("%s 臂缺 %s 字段 —— quant_ppl.json 不完整，拒绝合并" % (lbl, key))
+    # noop 自检臂：ΔNLL 必须恰好为 0，否则恢复不干净，整份工件不可信
+    for nid, nentry in arms.items():
+        if nentry.get("kind") == "noop":
+            paired = nentry.get("paired") or {}
+            mean = paired.get("mean")
+            if mean is not None and abs(float(mean)) > 1e-9:
+                raise SystemExit(
+                    "noop 臂 %s 的 ΔNLL=%.3e ≠ 0 —— 快照恢复不干净，本次 PPL 运行不可信，"
+                    "拒绝合并（先修 quant_ppl 的快照/恢复）" % (nid, float(mean))
+                )
+    meta = {k: run.get(k) for k in ("model", "dataset", "n_tokens", "ctx_window", "metric")}
+    return fp16, arm, meta
+
+
+def _ppl_note(meta: dict[str, Any], arm_id: str, fields: list[str]) -> str:
+    scope = "ppl_fp16/ppl_this/ppl_delta" if "ppl_this" in fields else "仅 ppl_fp16（参照值）"
+    return (
+        "PPL 实测（%s <- tools/quant_ppl.py）：wikitext-2-raw-v1 test 前 %s token，"
+        "ctx=%s 不重叠窗口、每 token 计一次（窗口首 token 不计），fp16 与量化臂在同一串 "
+        "token 上 teacher forcing。ppl_delta = ppl_this/ppl_fp16 − 1（相对退化；"
+        "METRICS §1 门槛 <1%%）。arm=%s。本 cell 写入范围：%s。"
+        % (
+            meta.get("dataset") or "wikitext-2-raw-v1",
+            meta.get("n_tokens"),
+            meta.get("ctx_window"),
+            arm_id,
+            scope,
+        )
+    )
+
+
+def merge(
+    ppl_json: str,
+    arm_id: str,
+    quant_cells: list[str],
+    ref_cells: list[str],
+    results_dir: str = "results",
+    archive_dir: str | None = None,
+) -> int:
+    """把 quant_ppl.json 的数值写进 cell 的 result.json（写前归档，规则 9）。"""
+    fp16, arm, meta = _load_ppl_run(ppl_json, arm_id)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    archive_dir = archive_dir or os.path.join(results_dir, "ppl_merge_archive", ts)
+    os.makedirs(archive_dir, exist_ok=True)
+
+    written = 0
+    for exp_id, is_quant in [(c, True) for c in quant_cells] + [(c, False) for c in ref_cells]:
+        path = os.path.join(results_dir, exp_id, "result.json")
+        if not os.path.exists(path):
+            print("!! 跳过（找不到 %s）" % path)
+            continue
+        with open(path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        if payload.get("exp_id") != exp_id:
+            print("!! 跳过（%s 的 exp_id=%r 与目录名不符）" % (path, payload.get("exp_id")))
+            continue
+        # 规则 9：覆盖前归档
+        shutil.copy2(path, os.path.join(archive_dir, "%s.result.json" % exp_id))
+        corr = payload.setdefault("correctness", {})
+        corr["ppl_fp16"] = float(fp16["ppl"])
+        if is_quant:
+            corr["ppl_this"] = float(arm["ppl"])
+            corr["ppl_delta"] = float(arm["ppl"]) / float(fp16["ppl"]) - 1.0
+            fields = ["ppl_fp16", "ppl_this", "ppl_delta"]
+        else:
+            fields = ["ppl_fp16"]
+        corr["ppl_note"] = _ppl_note(meta, arm_id, fields)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        written += 1
+        print(
+            "wrote %s: ppl_fp16=%.4f%s"
+            % (
+                exp_id,
+                float(fp16["ppl"]),
+                (
+                    (" ppl_this=%.4f ppl_delta=%+.4f%%" % (arm["ppl"], corr["ppl_delta"] * 100))
+                    if is_quant
+                    else ""
+                ),
+            )
+        )
+    print("共写入 %d 份；原值归档在 %s" % (written, archive_dir))
+    if arm.get("paired") is not None:
+        p = arm["paired"]
+        print(
+            "  配对 ΔNLL/token = %+.6f (paired SE %.6f, n=%s) —— 该值**不**写进 cell，"
+            "只活在 quant_ppl.json 里" % (p.get("mean", 0.0), p.get("paired_se", 0.0), p.get("n"))
+        )
+    return written
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--results-dir", default="results")
     ap.add_argument("--out", default=None, help="默认 <results-dir>/PPL_STATUS.json")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--check", action="store_true", help="只校验，不写")
+    # G5 合并模式
+    ap.add_argument("--merge", metavar="QUANT_PPL_JSON", default=None)
+    ap.add_argument("--arm", default=None, help="quant_ppl.json 里作为 ppl_this 的臂 id")
+    ap.add_argument(
+        "--quant-cell",
+        action="append",
+        default=[],
+        help="写入 ppl_fp16/ppl_this/ppl_delta 的 cell（exp_id，可重复）",
+    )
+    ap.add_argument(
+        "--ref-cell", action="append", default=[], help="只写 ppl_fp16 的参照 cell（可重复）"
+    )
+    ap.add_argument("--archive-dir", default=None)
     args = ap.parse_args(argv)
+
+    if args.merge:
+        if not args.arm or not (args.quant_cell or args.ref_cell):
+            ap.error("--merge 需要 --arm 与至少一个 --quant-cell / --ref-cell")
+        n = merge(
+            args.merge,
+            args.arm,
+            args.quant_cell,
+            args.ref_cell,
+            results_dir=args.results_dir,
+            archive_dir=args.archive_dir,
+        )
+        if n == 0:
+            return 1
+        # 合并完顺手重建清单
+        cells = scan(args.results_dir)
+        index = build(cells)
+        out = args.out or os.path.join(args.results_dir, "PPL_STATUS.json")
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump(index, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        print(
+            "\nPPL 声明清单已重建：%d 格（已测 %d / 未测 %d）-> %s"
+            % (index["n_cells_total"], index["n_measured"], index["n_not_measured"], out)
+        )
+        return 0
 
     cells = scan(args.results_dir)
     index = build(cells)
