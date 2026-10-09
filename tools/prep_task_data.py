@@ -7,7 +7,9 @@
 
 产出（`--out-dir` 下）：
   mmlu_subset.jsonl   每行 {question, choices:[4], answer:int, subject:str, source_id}
+  mmlu_dev.jsonl      dev 分片全部 285 行（5/subject）—— 5-shot 的示例来源
   gsm8k_subset.jsonl  每行 {question, answer:str, answer_int:int, source_id}
+  gsm8k_shots.jsonl   train 前 8 行（去 <<>> 标注）—— 8-shot 的示例来源
 
 ★ 这是**数据准备**，不是测量：本脚本不做任何推理、不产出精度数字。
 """
@@ -18,13 +20,14 @@ import argparse
 import json
 import os
 import sys
+from typing import Any
 
 SEED = 42
 MMLU_N = 200  # 与 tools/task_accuracy.SUBSETS 对齐
 GSM8K_N = 100
 
 
-def prep_mmlu(out_path: str, n: int) -> str:
+def prep_mmlu(out_path: str, n: int, dev_path: str) -> str:
     from datasets import load_dataset  # noqa: PLC0415
 
     ds = load_dataset("cais/mmlu", "all", split="test")
@@ -74,10 +77,36 @@ def prep_mmlu(out_path: str, n: int) -> str:
                     + "\n"
                 )
                 rows += 1
-    return "mmlu: %d subjects, %d rows -> %s" % (len(subjects), rows, out_path)
+    # dev 分片（5/subject）→ 5-shot 的示例来源
+    dev = load_dataset("cais/mmlu", "all", split="dev")
+    by_subject: dict[str, list[dict[str, Any]]] = {}
+    for ex in dev:
+        by_subject.setdefault(ex["subject"], []).append(ex)
+    with open(dev_path, "w", encoding="utf-8") as f:
+        for s in sorted(by_subject):
+            for ex in by_subject[s]:
+                f.write(
+                    json.dumps(
+                        {
+                            "question": ex["question"],
+                            "choices": list(ex["choices"]),
+                            "answer": int(ex["answer"]),
+                            "subject": s,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+    return "mmlu: %d subjects, %d rows -> %s (+dev %d -> %s)" % (
+        len(subjects),
+        rows,
+        out_path,
+        len(dev),
+        dev_path,
+    )
 
 
-def prep_gsm8k(out_path: str, n: int) -> str:
+def prep_gsm8k(out_path: str, n: int, shots_path: str) -> str:
     from datasets import load_dataset  # noqa: PLC0415
 
     ds = load_dataset("openai/gsm8k", "main", split="test")
@@ -104,7 +133,17 @@ def prep_gsm8k(out_path: str, n: int) -> str:
                 + "\n"
             )
             rows += 1
-    return "gsm8k: %d rows -> %s" % (rows, out_path)
+    # 8-shot 示例：train 前 8 条（去掉 <<...>> 计算标注），标准 CoT 形态
+    import re
+
+    tr = load_dataset("openai/gsm8k", "main", split="train")
+    with open(shots_path, "w", encoding="utf-8") as f:
+        for ex in list(tr)[:8]:
+            sol = re.sub(r"<<[^>]*>>", "", ex["answer"])
+            f.write(
+                json.dumps({"question": ex["question"], "solution": sol}, ensure_ascii=False) + "\n"
+            )
+    return "gsm8k: %d rows -> %s (+8 shots -> %s)" % (rows, out_path, shots_path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -124,8 +163,8 @@ def main(argv: list[str] | None = None) -> int:
 
     out_mmlu = os.path.join(args.out_dir, "mmlu_subset.jsonl")
     out_gsm = os.path.join(args.out_dir, "gsm8k_subset.jsonl")
-    print(prep_mmlu(out_mmlu, MMLU_N))
-    print(prep_gsm8k(out_gsm, GSM8K_N))
+    print(prep_mmlu(out_mmlu, MMLU_N, os.path.join(args.out_dir, "mmlu_dev.jsonl")))
+    print(prep_gsm8k(out_gsm, GSM8K_N, os.path.join(args.out_dir, "gsm8k_shots.jsonl")))
     print("done. 记得把 out-dir 传给 tools/task_accuracy --data-dir")
     return 0
 

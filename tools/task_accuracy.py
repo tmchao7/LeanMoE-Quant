@@ -44,8 +44,20 @@ import sys
 from typing import Any
 
 PLANNED_SUBSETS = {
-    "mmlu": {"n": 200, "shots": 5, "note": "分层抽样子集（不是全量 MMLU）"},
-    "gsm8k": {"n": 100, "shots": 0, "note": "子集（不是全量 GSM8K）"},
+    "mmlu": {
+        "n": 200,
+        "shots": 5,
+        "note": "分层抽样子集（不是全量 MMLU）；5-shot 示例取自 dev 分片",
+    },
+    "gsm8k": {
+        "n": 100,
+        "shots": 8,
+        "note": (
+            "子集（不是全量 GSM8K）。★ 计划原本写 0-shot，上机时改为 8-shot（示例取自 "
+            "train 前 8 条）：本仓库的 OLMoE 是**基座**模型，0-shot 直答 GSM8K 会贴地板，"
+            "delta 失去意义。这一改动发生在上机时，在此显式记录。"
+        ),
+    },
 }
 
 # 只跑已过门的配置（GATE_CITATIONS 里 gate == PASS 的）
@@ -108,6 +120,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", default=None)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--max-new-tokens", type=int, default=256)
+    ap.add_argument(
+        "--smoke",
+        action="store_true",
+        help="每数据集只跑 2 题，验证通路。smoke 的结果不是测量，不得引用。",
+    )
     args = ap.parse_args(argv)
 
     args.arms = [a.strip() for a in str(args.arms).split(",") if a.strip()]
@@ -147,19 +164,300 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    # ★ 到这一步仍**没有实现**生成/评分循环：这是**故意的**。
-    #   在没有 GPU 的环境里写一个跑不了的评测循环，只会产出一个看起来能跑、
-    #   实际上从未被验证过的脚本 —— 那正是本项目反对的"未测装成已测"。
-    #   上机第一步就是补这里，并且第一件事是跑 smoke（每数据集 2 题）验证通路。
-    print(
-        "task_accuracy 的评测循环**尚未实现**（刻意留白）。\n"
-        "理由：无 GPU 环境下写出来的循环无法验证，等价于未测装成已测。\n"
-        "上机后的第一步：补 `_run_arm()`（greedy 生成 + 答案抽取 + 计分），\n"
-        "先跑 --smoke（每数据集 2 题）验证通路，再跑完整子集。\n"
-        "在那之前，本项的 status 一律是 **planned**。",
-        file=sys.stderr,
+    # ★ 评测循环（2026-10-09 于 5090 上机时补齐并验证：先 --smoke 每数据集 2 题，
+    #   再跑完整子集。快照/恢复复用 tools/quant_ppl 的实现，保证与 PPL/KL 同一套
+    #   扰动机制。）
+    return _run(args)
+
+
+# ---------------------------------------------------------------------------
+# 评测循环
+# ---------------------------------------------------------------------------
+
+MMLU_PROMPT_HEADER = (
+    "The following are multiple choice questions (with answers) about {subject}.\n\n"
+)
+LETTERS = ("A", "B", "C", "D")
+
+
+def _fmt_mmlu_q(ex: dict[str, Any]) -> str:
+    lines = ["Question: " + ex["question"].strip()]
+    for letter, choice in zip(LETTERS, ex["choices"]):
+        lines.append("%s. %s" % (letter, str(choice).strip()))
+    lines.append("Answer:")
+    return "\n".join(lines)
+
+
+def _mmlu_prompt(ex: dict[str, Any], shots: list[dict[str, Any]]) -> str:
+    parts = [MMLU_PROMPT_HEADER.format(subject=ex["subject"])]
+    for s in shots:
+        parts.append(_fmt_mmlu_q(s))
+        parts.append(" " + LETTERS[int(s["answer"])] + "\n\n")
+    parts.append(_fmt_mmlu_q(ex))
+    return "".join(parts)
+
+
+def _gsm8k_prompt(ex: dict[str, Any], shots: list[dict[str, Any]]) -> str:
+    parts = []
+    for s in shots:
+        parts.append(
+            "Question: " + s["question"].strip() + "\nSolution: " + s["solution"].strip() + "\n\n"
+        )
+    parts.append("Question: " + ex["question"].strip() + "\nSolution:")
+    return "".join(parts)
+
+
+def _parse_mmlu(text: str) -> str | None:
+    t = text.strip()
+    for ch in t:
+        if ch in LETTERS:
+            return ch
+    return None
+
+
+def _parse_gsm8k(text: str) -> str | None:
+    """优先 `#### N`；否则取最后一个数（含小数/负数/逗号）。"""
+    if "####" in text:
+        tail = text.split("####")[-1]
+        for tok in tail.replace(",", "").split():
+            tok = tok.strip(".")
+            if tok.lstrip("-").replace(".", "", 1).isdigit():
+                return tok
+    import re
+
+    nums = re.findall(r"-?\d[\d,]*\.?\d*", text)
+    if not nums:
+        return None
+    return nums[-1].replace(",", "").strip(".")
+
+
+def _num_eq(pred: str | None, gold: str) -> bool:
+    if pred is None:
+        return False
+    try:
+        return abs(float(pred) - float(gold)) < 1e-4
+    except ValueError:
+        return False
+
+
+def _gen(model: Any, tok: Any, prompt: str, max_new: int) -> list[int]:
+    """greedy 生成，返回**新生成的** token id 列表。"""
+    import torch
+
+    ids = tok(prompt, return_tensors="pt").input_ids.to(model.device)
+    with torch.no_grad():
+        out = model.generate(
+            ids,
+            do_sample=False,
+            num_beams=1,
+            max_new_tokens=max_new,
+            pad_token_id=tok.eos_token_id or tok.pad_token_id or 0,
+        )
+    return out[0][ids.shape[1] :].tolist()
+
+
+def _teacher_forcing_agreement(
+    model: Any, tok: Any, prompt: str, gen_ids: list[int]
+) -> dict[str, Any] | None:
+    """口径 B：把 fp16 的生成 token 强制喂给本臂，逐位置比较 argmax。
+
+    一个前向拿全部位置的 logits（teacher forcing = KV 对齐的并行打分）。
+    返回 {n_positions, n_agree, first_token_agree}；生成序列为空时返回 None。
+    """
+    import torch
+
+    if not gen_ids:
+        return None
+    ids = tok(prompt, return_tensors="pt").input_ids.to(model.device)
+    full = torch.cat([ids, torch.tensor([gen_ids], device=model.device)], dim=1)
+    with torch.no_grad():
+        logits = model(full).logits  # (1, L, V)
+    # 位置 i 的 logits 预测第 i+1 个 token → 生成段从 len(ids)-1 起读
+    start = ids.shape[1] - 1
+    seg = logits[0, start : start + len(gen_ids)]
+    pred = seg.argmax(dim=-1)
+    gold = torch.tensor(gen_ids, device=model.device)
+    n_agree = int((pred == gold).sum())
+    first_agree = bool(pred[0].item() == gold[0].item())
+    return {
+        "n_positions": len(gen_ids),
+        "n_agree": n_agree,
+        "agreement_rate": n_agree / len(gen_ids),
+        "first_token_agree": first_agree,
+    }
+
+
+def _run_arm(
+    model: Any,
+    tok: Any,
+    arm: str,
+    data: dict[str, list[dict[str, Any]]],
+    max_new: dict[str, int],
+    fp16_traces: dict[str, list[dict[str, Any]]] | None = None,
+    traces_out: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """一条臂的完整评测。
+
+    fp16 臂先跑，传 `traces_out` 顺手把每题的 (prompt, gen) 存下来 —— 轨迹**必须**
+    在量化前收集，量化之后再生成的就不是 fp16 的轨迹了。量化臂传 `fp16_traces`
+    做口径 B。
+    """
+    import time
+
+    out: dict[str, Any] = {"arm": arm, "tasks": {}}
+    for task in ("mmlu", "gsm8k"):
+        rows = data[task]
+        n = len(rows)
+        correct = 0
+        parse_fail = 0
+        agreements: list[float] = []
+        first_agree = 0
+        first_total = 0
+        t0 = time.time()
+        for i, ex in enumerate(rows):
+            if task == "mmlu":
+                prompt = _mmlu_prompt(ex, data["mmlu_dev"])
+            else:
+                prompt = _gsm8k_prompt(ex, data["gsm8k_shots"])
+            gen = _gen(model, tok, prompt, max_new[task])
+            if traces_out is not None:
+                traces_out[task].append({"prompt": prompt, "gen": gen})
+            text = tok.decode(gen, skip_special_tokens=True)
+            if task == "mmlu":
+                pred = _parse_mmlu(text)
+                ok = pred is not None and pred == LETTERS[int(ex["answer"])]
+            else:
+                pred = _parse_gsm8k(text)
+                ok = _num_eq(pred, ex["answer"])
+            if pred is None:
+                parse_fail += 1
+            correct += int(ok)
+            # 口径 B：只对量化臂（fp16 轨迹已存）
+            if fp16_traces is not None and arm != "fp16":
+                trace = fp16_traces[task][i]
+                rep = _teacher_forcing_agreement(model, tok, trace["prompt"], trace["gen"])
+                if rep is not None:
+                    agreements.append(rep["agreement_rate"])
+                    first_total += 1
+                    first_agree += int(rep["first_token_agree"])
+            if (i + 1) % 25 == 0 or i + 1 == n:
+                print(
+                    "    [%s/%s] %d/%d  acc=%.3f (%.0fs)"
+                    % (arm, task, i + 1, n, correct / (i + 1), time.time() - t0),
+                    flush=True,
+                )
+        entry: dict[str, Any] = {
+            "n": n,
+            "n_correct": correct,
+            "accuracy": correct / n,
+            "binomial_se": (correct / n * (1 - correct / n) / n) ** 0.5,
+            "parse_fail": parse_fail,
+            "subset_note": PLANNED_SUBSETS[task]["note"],
+        }
+        if fp16_traces is not None and arm != "fp16" and agreements:
+            entry["protocol_B"] = {
+                "口径": "fp16 轨迹 teacher forcing（quant_gate.py:72 的任务级对应物）",
+                "n_questions_with_trace": len(agreements),
+                "token_agreement_mean": sum(agreements) / len(agreements),
+                "first_token_agreement": first_agree / first_total if first_total else None,
+            }
+        out["tasks"][task] = entry
+    return out
+
+
+def _run(args: argparse.Namespace) -> int:
+
+    from benchmarks.runner import _load_model
+    from tools.quant_ppl import _candidate_names, _restore, _snapshot
+
+    # ---- 数据 ----
+    def _jsonl(name: str) -> list[dict[str, Any]]:
+        path = os.path.join(args.data_dir, name)
+        if not os.path.exists(path):
+            raise SystemExit("缺 %s（用 tools.prep_task_data 生成）" % path)
+        with open(path, encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    data = {
+        "mmlu": _jsonl("mmlu_subset.jsonl"),
+        "gsm8k": _jsonl("gsm8k_subset.jsonl"),
+        "mmlu_dev": _jsonl("mmlu_dev.jsonl"),
+        "gsm8k_shots": _jsonl("gsm8k_shots.jsonl"),
+    }
+    if args.smoke:
+        data["mmlu"] = data["mmlu"][:2]
+        data["gsm8k"] = data["gsm8k"][:2]
+        print("★ SMOKE：每数据集只跑 2 题 —— 验证通路，不是测量结果。", flush=True)
+
+    max_new = {"mmlu": 8, "gsm8k": args.max_new_tokens}
+
+    # ---- 模型 ----
+    model, _ = _load_model(args.model, "float16", "cuda")
+    model.eval()
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(args.model)
+
+    # fp16 先跑（参照 + 口径 B 的轨迹来源），然后量化臂
+    print("=== arm fp16（参照）===", flush=True)
+    quant_arms = [a for a in args.arms if a != "fp16"]
+    fp16_traces: dict[str, list[dict[str, Any]]] | None = (
+        {"mmlu": [], "gsm8k": []} if quant_arms else None
     )
-    return 3
+    fp16_result = _run_arm(model, tok, "fp16", data, max_new, traces_out=fp16_traces)
+
+    # 轨迹要重存一次：_run_arm 里没外存 prompt/gen —— 为了口径 B，fp16 跑完直接量化，
+    # 口径 B 在量化臂循环内重算 fp16 的 prompt + gen。因此 fp16 臂要存轨迹。
+    result: dict[str, Any] = {
+        "tool": "tools/task_accuracy.py",
+        "model": args.model,
+        "status": "done",
+        "smoke": bool(args.smoke),
+        "subsets": PLANNED_SUBSETS,
+        "protocol": {
+            "A_end_to_end": "各臂各自 greedy 生成 → accuracy",
+            "B_teacher_forcing": "fp16 生成的 token 强制喂给量化臂 → 逐位置 argmax 一致率",
+        },
+        "gate": {"threshold": "<2 个点（METRICS §1，自定建议值）", "per_task": {}},
+        "arms": {"fp16": fp16_result},
+    }
+
+    # ---- 量化臂 ----
+    if quant_arms:
+        # 快照 fp16 权重（量化臂之间共享一次快照）
+        all_names: list[str] = []
+        for arm in quant_arms:
+            all_names.extend(_candidate_names(model, targets=["attention", "experts"], layers=None))
+        all_names = sorted(set(all_names))
+        snapshot = _snapshot(model, all_names)
+        from lemoq.quant.linear import SchemeSpec, quantize_model
+
+        for arm in quant_arms:
+            _restore(model, snapshot)
+            bits = 4 if arm.startswith("w4") else 8
+            spec = SchemeSpec.from_flags("w%da16" % bits, 128, targets=("attention", "experts"))
+            print("=== arm %s（quantize in-place）===" % arm, flush=True)
+            quantize_model(model, spec, names=None)
+            res = _run_arm(model, tok, arm, data, max_new, fp16_traces=fp16_traces)
+            result["arms"][arm] = res
+            for task in ("mmlu", "gsm8k"):
+                a = fp16_result["tasks"][task]["accuracy"]
+                b = res["tasks"][task]["accuracy"]
+                result["gate"]["per_task"]["%s@%s" % (arm, task)] = {
+                    "fp16": a,
+                    "arm": b,
+                    "delta_pp": (b - a) * 100,
+                    "pass": (b - a) * 100 > -2.0,
+                }
+
+    out_path = args.json or "results/task_accuracy.json"
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump(result, fh, ensure_ascii=False, indent=2, default=str)
+    print("\nwrote %s" % out_path)
+    if args.smoke:
+        print("★ SMOKE 结果只证明通路可用，不得引用任何数字（硬规则 1）。")
+    return 0
 
 
 if __name__ == "__main__":
