@@ -21,10 +21,16 @@
 ## 口径
 
 - 与 `benchmarks/runner.py` 同样的 warmup ≥ 5 / 计次 ≥ 20 / 报 p50 + p99 + stddev；
+- **冷态守卫（2026-10-09 加）**：任何测量之前先做一次**全局预热**（最小与最大 batch
+  各一遍，不计时）；每个 batch 的**前 `--discard-repeats` 轮计时丢弃**（默认 1），
+  丢弃值仍落盘到 `discarded_ms`。加它的原因见 `_warmup_pass` 的 docstring ——
+  前两轮就是因为 batch=1 冷启（142 ms vs 稳态 92 ms）被判 VOID；
 - 每个 batch 都是**同一轮**、同一 shape / dtype / GPU / warmup / 计次；
 - 报三件东西：`tok/s`（实测吞吐）、`per-step p50/p99`（decode 步延迟）、
   `per-token = per-step / batch`（便于与 batch=1 的 per-token 口径对照）；
-- 首格与末格跑**同格金丝雀**（batch=1），漂移 >5% ⇒ 整轮 VOID。
+- 首格与末格跑**同格金丝雀**（batch=1），漂移 >5% ⇒ 整轮 VOID；VOID 轮的实测值
+  落进 `void_evidence`（标注 `must_not_be_cited`），`rows` 为空 —— 与 runner 对
+  gate FAIL 格的处理同款。
 
 ## 用法
 
@@ -57,6 +63,11 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
         "warmup": args.warmup,
         "timed": args.timed,
         "repeats": args.repeats,
+        "discard_repeats": args.discard_repeats,
+        "cold_start_guard": (
+            "测量前对最小/最大 batch 各做一遍全局预热（不计时）；每个 batch 丢弃前 "
+            "%d 轮计时（值仍落盘 discarded_ms）" % args.discard_repeats
+        ),
         "include_batch_1_in_this_round": bool(args.include_batch_1),
         "per_batch_outputs": [
             "tok_per_s（实测吞吐）",
@@ -87,25 +98,54 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _time_decode(model: Any, ids: Any, *, batch: int, warmup: int, timed: int, repeats: int):
-    """跑一个 batch 的 decode 计时。返回每 repeat 的 per-step ms。"""
+def _warmup_pass(model: Any, ids: Any, *, steps: int) -> None:
+    """一次**不计时**的完整预热：prefill + `steps` 个 decode 步。
+
+    ★ 为什么要它（2026-10-09 两轮 VOID 的根因）：HF 路径的**第一个**被计时的
+      batch 会撞上三重冷态 —— CUDA 时钟还没拉到稳态、allocator 还在扩张、首次
+      decode 走的是没被 CUDA Graph / cudnn 命中过的 kernel。实测 batch=1 首轮
+      **142.26 ms**，而同一轮里 batch=2/4/8 只有 92–98 ms ⇒ 金丝雀漂移 56%。
+      预热必须发生在**任何一次测量之前**，且要覆盖最小与最大 batch（显存布局不同）。
+    """
     import torch
 
-    for _ in range(max(warmup, 5)):
-        with torch.no_grad():
-            out = model(ids, use_cache=True)
+    with torch.no_grad():
+        out = model(ids, use_cache=True)
         tok = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
         past = out.past_key_values
-        for _ in range(2):
-            with torch.no_grad():
-                out = model(tok, past_key_values=past, use_cache=True)
+        for _ in range(max(int(steps), 1)):
+            out = model(tok, past_key_values=past, use_cache=True)
             tok = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
             past = out.past_key_values
     torch.cuda.synchronize()
 
-    per_repeat: list[float] = []
+
+def _time_decode(
+    model: Any,
+    ids: Any,
+    *,
+    batch: int,
+    warmup: int,
+    timed: int,
+    repeats: int,
+    discard: int = 1,
+):
+    """跑一个 batch 的 decode 计时。
+
+    返回 `(kept_ms, discarded_ms, peak_bytes)`：`discarded_ms` 是前 `discard` 个
+    repeat 的耗时，**不进统计**（冷态守卫），但落盘供诊断 —— 丢掉不等于不知道它多少。
+    """
+    import torch
+
+    # 预热：prefill 相位 + 若干 decode 步，全部不计时
+    for _ in range(max(int(warmup), 1)):
+        _warmup_pass(model, ids, steps=max(int(warmup), 5))
+
+    kept: list[float] = []
+    discarded: list[float] = []
     peak = 0
-    for _ in range(max(repeats, 1)):
+    n_repeats = max(int(repeats), 1) + max(int(discard), 0)
+    for i in range(n_repeats):
         torch.cuda.reset_peak_memory_stats()
         with torch.no_grad():
             out = model(ids, use_cache=True)
@@ -113,15 +153,19 @@ def _time_decode(model: Any, ids: Any, *, batch: int, warmup: int, timed: int, r
         past = out.past_key_values
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        for _ in range(max(timed, 20)):
+        for _ in range(max(int(timed), 20)):
             with torch.no_grad():
                 out = model(tok, past_key_values=past, use_cache=True)
             tok = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
             past = out.past_key_values
         torch.cuda.synchronize()
-        per_repeat.append((time.perf_counter() - t0) * 1000.0 / max(timed, 20))
+        ms = (time.perf_counter() - t0) * 1000.0 / max(int(timed), 20)
+        if i < max(int(discard), 0):
+            discarded.append(ms)
+        else:
+            kept.append(ms)
         peak = max(peak, int(torch.cuda.max_memory_allocated()))
-    return per_repeat, peak
+    return kept, discarded, peak
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -130,9 +174,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ctx", type=int, default=1024)
     ap.add_argument("--batch", default=",".join(str(b) for b in DEFAULT_BATCHES))
     ap.add_argument("--max-new-tokens", type=int, default=32)
-    ap.add_argument("--warmup", type=int, default=5)
+    ap.add_argument("--warmup", type=int, default=10, help="预热轮数（含 decode 步）；不计时")
     ap.add_argument("--timed", type=int, default=20)
-    ap.add_argument("--repeats", type=int, default=3)
+    ap.add_argument(
+        "--repeats", type=int, default=5, help="保留的计时轮数（另有 --discard-repeats 个丢弃轮）"
+    )
+    ap.add_argument(
+        "--discard-repeats",
+        type=int,
+        default=1,
+        help="每个 batch 前几轮计时**丢弃**（冷态守卫）；丢弃值仍落盘到 discarded_ms 供诊断",
+    )
     ap.add_argument(
         "--include-batch-1",
         action="store_true",
@@ -176,17 +228,35 @@ def main(argv: list[str] | None = None) -> int:
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.float16)
     model = model.to("cuda").eval()
 
+    # ★ 全局预热**在任何测量之前**：覆盖最小 batch 与最大 batch（显存布局不同），
+    #   把时钟拉到稳态。见 `_warmup_pass` 的 docstring（两轮 VOID 的教训）。
+    for b in sorted({min(args.batch), max(args.batch)}):
+        _warmup_pass(
+            model,
+            torch.full((b, args.ctx), 1, dtype=torch.long, device="cuda"),
+            steps=max(int(args.warmup), 5),
+        )
+    print("  预热完成（batch=%s，不计时）" % sorted({min(args.batch), max(args.batch)}), flush=True)
+
     rows: list[dict[str, Any]] = []
     canary_first = None
     for b in args.batch:
         ids = torch.full((b, args.ctx), 1, dtype=torch.long, device="cuda")
-        samples, peak = _time_decode(
-            model, ids, batch=b, warmup=args.warmup, timed=args.timed, repeats=args.repeats
+        samples, discarded, peak = _time_decode(
+            model,
+            ids,
+            batch=b,
+            warmup=args.warmup,
+            timed=args.timed,
+            repeats=args.repeats,
+            discard=args.discard_repeats,
         )
         st = summarize(samples)
         row = {
             "batch": b,
             "n_samples": st["n"],
+            "n_discarded": len(discarded),
+            "discarded_ms": [round(x, 4) for x in discarded],
             "per_step_p50_ms": round(st["p50"], 4),
             "per_step_p99_ms": round(st["p99"], 4),
             "per_step_stddev_ms": round(st["stddev"], 4),
@@ -199,15 +269,28 @@ def main(argv: list[str] | None = None) -> int:
         if b == 1 and canary_first is None:
             canary_first = st["p50"]
         print(
-            "  batch=%d  step_p50=%.4f ms  tok/s=%s" % (b, st["p50"], row["tok_per_s"]), flush=True
+            "  batch=%d  step_p50=%.4f ms  tok/s=%s%s"
+            % (
+                b,
+                st["p50"],
+                row["tok_per_s"],
+                ("   [丢弃首轮 %s]" % row["discarded_ms"]) if discarded else "",
+            ),
+            flush=True,
         )
 
     # 金丝雀：末尾再测一次 batch=1
     canary_last = None
     if canary_first is not None:
         ids = torch.full((1, args.ctx), 1, dtype=torch.long, device="cuda")
-        samples, _ = _time_decode(
-            model, ids, batch=1, warmup=args.warmup, timed=args.timed, repeats=args.repeats
+        samples, _, _ = _time_decode(
+            model,
+            ids,
+            batch=1,
+            warmup=args.warmup,
+            timed=args.timed,
+            repeats=args.repeats,
+            discard=args.discard_repeats,
         )
         canary_last = summarize(samples)["p50"]
 
@@ -224,6 +307,8 @@ def main(argv: list[str] | None = None) -> int:
         "warmup": args.warmup,
         "timed": args.timed,
         "repeats": args.repeats,
+        "discard_repeats": args.discard_repeats,
+        "global_warmup_batches": sorted({min(args.batch), max(args.batch)}),
         "dtype": "float16",
         "device": torch.cuda.get_device_name(0),
         "canary": {
@@ -235,10 +320,22 @@ def main(argv: list[str] | None = None) -> int:
         },
         "cross_round_comparison_allowed": False,
         "cross_round_note": "本轮数字不得与历史 batch=1 数字混表或相除（硬规则 3）。",
+        # ★ VOID 轮的实测值**不**进 `rows`（那会看起来像可引用的数字），
+        #   但也不能凭空丢掉 —— 与 runner 对 gate FAIL 格的处理同款，放进
+        #   `void_evidence` 并显式标注"不得引用"。它正是诊断漂移来源的唯一材料。
         "rows": [] if void else rows,
+        "void_evidence": (
+            {
+                "why": "金丝雀漂移 %.3f%% > %.1f%% ⇒ 整轮 VOID" % (drift, CANARY_MAX_DRIFT_PCT),
+                "must_not_be_cited": True,
+                "rows": rows,
+            }
+            if void
+            else None
+        ),
         "note": (
-            "金丝雀漂移 %.3f%% 超过 %.1f%% ⇒ 整轮 VOID，不发布任何数字。"
-            % (drift, CANARY_MAX_DRIFT_PCT)
+            "金丝雀漂移 %.3f%% 超过 %.1f%% ⇒ 整轮 VOID，不发布任何数字"
+            "（原始值只在 `void_evidence` 里，仅用于诊断）。" % (drift, CANARY_MAX_DRIFT_PCT)
             if void
             else "同轮测量；'随 batch 的衰减'只能用本轮自己的 batch=1 做基准。"
         ),
