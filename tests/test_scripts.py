@@ -105,7 +105,15 @@ def test_bootstrap_dry_run_accepts_both_python_forms():
     用 `--no-preflight` 避免真实网络探测 —— 单元测试不该依赖网络，也不该跑几十秒。
     """
     script = os.path.join(SCRIPTS, "bootstrap.sh")
+    import shutil
+
     import sys
+
+    # ★ bootstrap 在参数解析前就检查 uv（缺了直接 rc=3 + 安装指引 —— 设计行为）。
+    #   这条测试验证的是**参数解析**，不是 uv 是否在；在没装 uv 的机器（如纯
+    #   conda 镜像）上跳过，而不是要求所有机器都装 uv。
+    if shutil.which("uv") is None:
+        pytest.skip("bootstrap 要求 uv 在 PATH（本机没有；rc=3 是它的设计行为）")
 
     # 复用解释器时必须带 torch，所以显式指向当前测试的 Python（venv）；
     # 裸 `--python` 的情形用 LEMOQ_PYTHON 注入。

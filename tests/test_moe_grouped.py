@@ -545,6 +545,11 @@ def test_decode_with_grouped_impl_calls_the_grouped_kernel(monkeypatch):
 
     有 triton：计数必须为 1（不能静默退回 gather —— 那样"grouped 臂"就成了假臂）。
     无 triton：必须给可操作的 RuntimeError，而不是 AttributeError。
+
+    ★ triton 分支用 **fp16 + CUDA** 真启动：kernel 的 store 硬编码 fp16
+      （`moe_grouped.grouped_moe_forward` 的 dtype 守卫会拒绝 fp32 —— 这是
+      5090 上实测抓到的：本测试曾用 fp32 的 tiny block，守卫上线后立刻红），
+      且 triton kernel 不能在 CPU 张量上启动。
     """
     calls = _spy_on_grouped_kernels(monkeypatch)
     block = _tiny_block()
@@ -559,13 +564,17 @@ def test_decode_with_grouped_impl_calls_the_grouped_kernel(monkeypatch):
                 impl="grouped",
             )
         return
+    if not torch.cuda.is_available():
+        pytest.skip("triton 在但无 CUDA：triton kernel 无法在 CPU 张量上启动")
+    block16 = _tiny_block().half().cuda()
     static_moe_forward(
-        torch.randn(1, 1, 32),
-        block.gate.weight.detach(),
-        fused,
-        top_k=block.top_k,
+        torch.randn(1, 1, 32, device="cuda", dtype=torch.float16),
+        block16.gate.weight.detach(),
+        fuse_experts(block16.experts),
+        top_k=block16.top_k,
         impl="grouped",
     )
+    torch.cuda.synchronize()
     assert calls["fp16"] == 1, calls
 
 
