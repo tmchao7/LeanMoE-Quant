@@ -59,6 +59,50 @@
 
 ---
 
+## 2b. 简历定稿（可直接粘贴，**字数很短**）
+
+> 规则：**只写已实测的数字**。上机待跑的两项（batch 曲线、occupancy 上界）在下面留了
+> 占位符 `[待测]`——测完再填。**不要**把预估数字写进简历：面试官一追问"这个数怎么来的"
+> 就崩，而这个项目最值钱的恰恰是"每个数都能追到工件"。
+
+**中文（4 条，约 170 字）**
+
+> **MoE 大模型单卡推理优化**（OLMoE-1B-7B，RTX 5090，自研 Triton kernel）
+> - 自研 **4 个 Triton kernel**（grouped MoE GEMV / 融合反量化 GEMM / split-KV decode attention /
+>   融合 RMSNorm），全部通过 `1e-3` 数值 parity 门。
+> - **融合 RMSNorm：HF 的 7 个 kernel 合成 1 个**，全步 **1.24×**、kernel 数 **994→539**，
+>   同进程交错 A/B **15/15 轮获胜**；torch 原生 `F.rms_norm` 对照反而慢 5%。
+> - **无 gather 的 MoE decode kernel**（expert id 只做指针算术，保持 CUDA Graph 可捕获）：
+>   消除 **3.22 GB/token** 的 gather 复制，per-token **5.26→4.07 ms（1.29×）**。
+> - **W8A16 量化端到端 1.19×**，并**实测出上限只有 1.74×**（权重仅占一步 42%），
+>   把 **90%** 收益归因到单个 kernel（专家 GEMV **1.52×**）；
+>   精度三链闭合：KL **0.00136**、PPL **+0.067%**、MMLU 200 题 **−1.0 个点**。
+
+**English (4 lines)**
+
+> - Built **4 custom Triton kernels** (grouped-MoE GEMV, fused-dequant GEMM, split-KV decode
+>   attention, fused RMSNorm), all gated by `1e-3` numerical parity checks.
+> - **Fused 7 HF RMSNorm kernels into 1**: **1.24×** decode-step speedup, kernel count
+>   **994→539**, won **15/15** interleaved A/B rounds (torch's native `F.rms_norm` was 5% slower).
+> - **Gather-free MoE decode kernel** (expert id as pointer arithmetic, CUDA-Graph safe):
+>   removed **3.22 GB/token** of copying, **5.26→4.07 ms/token (1.29×)**.
+> - **W8A16 quantization: 1.19×** end-to-end; measured the **ceiling of 1.74×** (weights = 42% of a
+>   step) and attributed **90%** of the gain to one kernel; accuracy closed with KL **0.00136**,
+>   PPL **+0.067%**, MMLU **−1.0 pt** (200-q subset).
+
+**上机后可以再加的两条（现在留空，别提前写）**
+
+- `batch 曲线：量化收益随 batch 从 1.19× 衰减到 [待测]×（同轮 4 点，金丝雀 ≤5%）`
+- `occupancy 上界：融合 RMSNorm / grouped kernel 的 blocks/SM = [待测]（解析上界，非 ncu 实测）`
+
+⚠️ 示例写法（**数值是编的，切勿抄**）：`blocks/SM 上界 = 4（寄存器受限）` —— 若上机测出
+不是 4，简历立刻变成假话。**先测，再填。**
+
+**不要写进简历的**：`82.6 ms → 3.59 ms` 这类跨轮合并的"总加速"（那是五条不同轮次的杠杆，
+本项目的纪律是只报同轮 A/B）；以及任何 batch>1、FP8、ncu 相关的数字（都没测）。
+
+
+
 ## 3. 面试必问三题（照这个答）
 
 ### Q1「你省了 4 倍内存，为什么延迟只快 19%？」
