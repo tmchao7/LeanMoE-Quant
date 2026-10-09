@@ -222,13 +222,17 @@ def _parse_mmlu(text: str) -> str | None:
 
 
 def _parse_gsm8k(text: str) -> str | None:
-    """优先 `#### N`；否则取最后一个数（含小数/负数/逗号）。"""
+    """优先**第一个** `#### N`；否则取最后一个数（含小数/负数/逗号）。
+
+    ★ 上机实测：基座模型答完 `#### N` 后不吐 EOS，会继续自编下一轮
+      Question/Solution —— 取"最后一个数"会抓到幻觉续写里的值。
+    """
     if "####" in text:
-        tail = text.split("####")[-1]
-        for tok in tail.replace(",", "").split():
-            tok = tok.strip(".")
-            if tok.lstrip("-").replace(".", "", 1).isdigit():
-                return tok
+        head = text.split("####", 1)[1]
+        for tok_ in head.replace(",", "").split():
+            tok_ = tok_.strip(".")
+            if tok_.lstrip("-").replace(".", "", 1).isdigit():
+                return tok_
     import re
 
     nums = re.findall(r"-?\d[\d,]*\.?\d*", text)
@@ -246,12 +250,22 @@ def _num_eq(pred: str | None, gold: str) -> bool:
         return False
 
 
-def _gen(model: Any, tok: Any, prompt: str, max_new: int) -> list[int]:
-    """greedy 生成，返回**新生成的** token id 列表。"""
+def _gen(
+    model: Any, tok: Any, prompt: str, max_new: int, stop: list[str] | None = None
+) -> list[int]:
+    """greedy 生成，返回**新生成的** token id 列表。
+
+    `stop`：字符串停止条件（基座模型答完不吐 EOS，会自编下一轮题目；
+    GSM8K 用 ["\\nQuestion:"] 截断到第一份答案）。
+    """
     import torch
 
     ids = tok(prompt, return_tensors="pt").input_ids.to(model.device)
     mask = torch.ones_like(ids)
+    kw: dict[str, Any] = {}
+    if stop:
+        kw["stop_strings"] = stop
+        kw["tokenizer"] = tok
     with torch.no_grad():
         out = model.generate(
             ids,
@@ -260,6 +274,7 @@ def _gen(model: Any, tok: Any, prompt: str, max_new: int) -> list[int]:
             num_beams=1,
             max_new_tokens=max_new,
             pad_token_id=tok.eos_token_id or tok.pad_token_id or 0,
+            **kw,
         )
     return out[0][ids.shape[1] :].tolist()
 
@@ -327,7 +342,8 @@ def _run_arm(
                 prompt = _mmlu_prompt(ex, data["mmlu_dev"])
             else:
                 prompt = _gsm8k_prompt(ex, data["gsm8k_shots"])
-            gen = _gen(model, tok, prompt, max_new[task])
+            stop = ["\nQuestion:"] if task == "gsm8k" else None
+            gen = _gen(model, tok, prompt, max_new[task], stop=stop)
             if traces_out is not None:
                 traces_out[task].append({"prompt": prompt, "gen": gen})
             text = tok.decode(gen, skip_special_tokens=True)
