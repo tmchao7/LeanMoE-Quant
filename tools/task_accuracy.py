@@ -188,7 +188,13 @@ def _fmt_mmlu_q(ex: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _mmlu_prompt(ex: dict[str, Any], shots: list[dict[str, Any]]) -> str:
+def _mmlu_prompt(ex: dict[str, Any], dev: list[dict[str, Any]]) -> str:
+    """5-shot：取**同 subject** 的 dev 示例（dev 分片恰好每 subject 5 条）。
+
+    ★ 上机实测抓到的 bug：最初直接把整个 dev 列表（285 条）传进来当 shots，
+      prompt 膨胀到 ~29k token（模型上限 4096），生成被完全截断、parse_fail 全满。
+    """
+    shots = [s for s in dev if s["subject"] == ex["subject"]][:5]
     parts = [MMLU_PROMPT_HEADER.format(subject=ex["subject"])]
     for s in shots:
         parts.append(_fmt_mmlu_q(s))
@@ -245,9 +251,11 @@ def _gen(model: Any, tok: Any, prompt: str, max_new: int) -> list[int]:
     import torch
 
     ids = tok(prompt, return_tensors="pt").input_ids.to(model.device)
+    mask = torch.ones_like(ids)
     with torch.no_grad():
         out = model.generate(
             ids,
+            attention_mask=mask,
             do_sample=False,
             num_beams=1,
             max_new_tokens=max_new,
