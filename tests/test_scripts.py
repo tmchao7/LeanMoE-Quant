@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
+
+import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS = os.path.join(ROOT, "scripts")
@@ -106,7 +109,6 @@ def test_bootstrap_dry_run_accepts_both_python_forms():
     """
     script = os.path.join(SCRIPTS, "bootstrap.sh")
     import shutil
-
     import sys
 
     # ★ bootstrap 在参数解析前就检查 uv（缺了直接 rc=3 + 安装指引 —— 设计行为）。
