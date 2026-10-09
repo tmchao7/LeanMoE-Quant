@@ -342,7 +342,7 @@ def _run_arm(
                 prompt = _mmlu_prompt(ex, data["mmlu_dev"])
             else:
                 prompt = _gsm8k_prompt(ex, data["gsm8k_shots"])
-            stop = ["\nQuestion:"] if task == "gsm8k" else None
+            stop = ["Question:"] if task == "gsm8k" else None
             gen = _gen(model, tok, prompt, max_new[task], stop=stop)
             if traces_out is not None:
                 traces_out[task].append({"prompt": prompt, "gen": gen})
