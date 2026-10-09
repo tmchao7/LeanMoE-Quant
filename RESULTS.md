@@ -16,8 +16,8 @@
 > | --- | --- |
 > | 并发度 / 多请求 | 无排队、无 batching 调度，也就没有"服务吞吐"这一说 |
 > | **req/s** | 全项目零条 req/s 数据（只有 `tok/s = 1000/p50` 的**单流反推值**) |
-> | 吞吐-延迟曲线 | `docs/METRICS.md` §2 声明的 `throughput @ batch ∈ {1,2,4,8}` **未测**（待办 G2） |
-> | 任务级精度 | MMLU / GSM8K **未测**（待办 G1）；PPL 有数字但未进工件（待办 G5） |
+> | 吞吐-延迟曲线 | `docs/METRICS.md` §2 声明的 `throughput @ batch ∈ {1,2,4,8}`：**2026-10-09 两轮均 VOID**（金丝雀漂移 6.3% / 56.3% > 5%），未发表任何数字，待重试（待办 G2） |
+> | 任务级精度 | **MMLU 已测**（fp16 53.50% / w8a16 52.50%，delta −1.0 点 ⇒ PASS，n=200 子集，2026-10-09）；**GSM8K 是 floor**（基座模型 8-shot 生成式 fp16 0/15，已放弃）；**PPL 已进工件**（fp16 9.1985 / w8a16 9.2047 = +0.067%） |
 > | 长上下文 | ctx 只测了 1024 / 4096；该模型的上限就是 4096（`docs/MODELS.md`） |
 >
 > 这句话同时也写进了**每一份** `result.json` 的 `applicability.does_not_apply_to`
@@ -74,6 +74,18 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 **读法**：量化确实兑现了，但它能兑现的天花板**不是 4×，是 1.74×** —— 因为权重只占一步的 42%。
 而且我们已经把这个上限的**九成**拿到了，并且能定位到具体 kernel。
 
+### 3.1 量化"能不能用"：任务级证据（2026-10-09 新测）
+
+| 口径 | fp16 | w8a16 | 判据 | 出处 |
+| --- | --- | --- | --- | --- |
+| **MMLU 5-shot**（分层抽样 200 题子集，n=200，二项 SE 3.5 点） | **53.50%** | **52.50%** | delta **−1.0 个点** < 2 点门槛 ⇒ **PASS** | `results/task_accuracy.json` |
+| 口径 B：fp16 轨迹 teacher forcing | — | token 一致率 **99.0%** / 首 token **95.5%** | 与 KL/top-1 门同一口径 | 同上 |
+| **PPL**（wikitext-2 test 前 8192 token，不重叠窗口） | 9.1985 | 9.2047（**+0.067%**） | < 1% 门槛 ⇒ PASS | 3 份 cell 的 `correctness.ppl_*` |
+| GSM8K（8-shot 生成式） | **0/15（floor）** | — | 基座模型直答能力不足，**放弃该口径并如实记录** | `results/task_accuracy.json` |
+
+读法：三条独立证据链（分布级 KL/top-1、token 级 PPL、任务级 MMLU）指向同一结论 ——
+**w8a16 在这个 MoE 上是"能用的"**；而它的延迟收益只有 1.19×，瓶颈不在精度而在权重占一步 42%。
+
 ![kernel 级证据：必要字节 vs 实测时间](docs/figures/fig3_kernel_attainment.svg)
 
 > 这三张图的每一个输入都带来源，见 [`docs/figures/inputs.json`](docs/figures/inputs.json)；
@@ -106,9 +118,11 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | 缺口 | 状态 |
 | --- | --- |
 | **ncu 性能计数器** | **宿主策略阻断**（`RmProfilingAdminOnly: 1` + 容器无 `CAP_SYS_ADMIN`），连 `gpu__time_duration.sum` 都被拒。已交出替代口径（解析字节 / 隔离计时）与可复核的工具；缺的是 stall/occupancy 归因。见 [docs/NCU_EVIDENCE.md](docs/NCU_EVIDENCE.md) §1 |
-| FP8 / MXFP4（sm_120 的 block-scale） | 矩阵已声明（`EXP-p3-01/02`），**未跑** |
+| FP8 / MXFP4（sm_120 的 block-scale） | 矩阵已声明（`EXP-p3-01/02`），**未跑**（假设已补前置条件：需先切 `tl.dot` 路径） |
 | E5 专家敏感度 / E6 KV INT8 / E8 跨带宽（V100） | 矩阵已声明，**未跑** |
-| batch > 1 的吞吐轴 | 本项目是**有意**的 batch=1 单流课题；E3 在矩阵里没有条目 |
+| **occupancy / register 下限估计** | **未跑**（G3；ncu 阻断后的替代口径，工具已就绪，待一次上机窗口） |
+| **batch 曲线** | 2026-10-09 两轮 **VOID**（金丝雀漂移 6.3% / 56.3%），未发表数字；待重试（G2）。本项目仍是有意的 batch=1 单流课题 |
+| **任务级精度（GSM8K）** | 生成式口径在基座模型上贴地板（fp16 8-shot 0/15）⇒ **放弃并如实记录**；MMLU 已测并过门（§3.1） |
 | 18 个 host 主导格子的刷新 | 刷新值 VOID（共租 CPU），规范 payload 保留 pre-P2i 版本；列为 P2k。结论不依赖它 |
 | 一处口径不一致（在修） | `AGENTS.md` §0 写的 `1.1927` 用了金丝雀首值 3.0084 做分母；**记录采用值 3.0124 ⇒ 1.1911**。本文用 1.1911 |
 
