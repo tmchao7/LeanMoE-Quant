@@ -121,6 +121,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--max-new-tokens", type=int, default=256)
     ap.add_argument(
+        "--tasks",
+        default="mmlu,gsm8k",
+        help="跑哪些任务（逗号分隔）。GSM8K 生成式在基座模型上贴地板（实测 0/15），可只跑 mmlu。",
+    )
+    ap.add_argument(
         "--smoke",
         action="store_true",
         help="每数据集只跑 2 题，验证通路。smoke 的结果不是测量，不得引用。",
@@ -318,6 +323,7 @@ def _run_arm(
     max_new: dict[str, int],
     fp16_traces: dict[str, list[dict[str, Any]]] | None = None,
     traces_out: dict[str, list[dict[str, Any]]] | None = None,
+    tasks: tuple[str, ...] = ("mmlu", "gsm8k"),
 ) -> dict[str, Any]:
     """一条臂的完整评测。
 
@@ -328,7 +334,7 @@ def _run_arm(
     import time
 
     out: dict[str, Any] = {"arm": arm, "tasks": {}}
-    for task in ("mmlu", "gsm8k"):
+    for task in tasks:
         rows = data[task]
         n = len(rows)
         correct = 0
@@ -413,6 +419,7 @@ def _run(args: argparse.Namespace) -> int:
         data["gsm8k"] = data["gsm8k"][:2]
         print("★ SMOKE：每数据集只跑 2 题 —— 验证通路，不是测量结果。", flush=True)
 
+    task_list = tuple(t.strip() for t in str(args.tasks).split(",") if t.strip())
     max_new = {"mmlu": 8, "gsm8k": args.max_new_tokens}
 
     # ---- 模型 ----
@@ -462,9 +469,9 @@ def _run(args: argparse.Namespace) -> int:
             spec = SchemeSpec.from_flags("w%da16" % bits, 128, targets=("attention", "experts"))
             print("=== arm %s（quantize in-place）===" % arm, flush=True)
             quantize_model(model, spec, names=None)
-            res = _run_arm(model, tok, arm, data, max_new, fp16_traces=fp16_traces)
+            res = _run_arm(model, tok, arm, data, max_new, fp16_traces=fp16_traces, tasks=task_list)
             result["arms"][arm] = res
-            for task in ("mmlu", "gsm8k"):
+            for task in task_list:
                 a = fp16_result["tasks"][task]["accuracy"]
                 b = res["tasks"][task]["accuracy"]
                 result["gate"]["per_task"]["%s@%s" % (arm, task)] = {
