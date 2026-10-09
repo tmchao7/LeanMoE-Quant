@@ -12,11 +12,13 @@
 #   ./scripts/run_gpu_suite.sh --dry-run
 #   ./scripts/run_gpu_suite.sh --model <MODEL_PATH> --data-dir <DIR>
 #   ./scripts/run_gpu_suite.sh --model <M> --only batch_sweep
+#   ./scripts/run_gpu_suite.sh --model <M> --gate-cells "EXP-x,EXP-y"
 #
 set -uo pipefail
 
 MODEL=""
 DATA_DIR=""
+GATE_CELLS="EXP-p4b-01-truncation__bit_width=w8a16_execution=cudagraph_ctx=1024,EXP-p4b-01-truncation__bit_width=w8a16_execution=eager_ctx=1024"
 DRY_RUN=0
 ONLY=""
 SKIP=""
@@ -31,6 +33,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --model) MODEL="$2"; shift 2 ;;
     --data-dir) DATA_DIR="$2"; shift 2 ;;
+    --gate-cells) GATE_CELLS="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --only) ONLY="$2"; shift 2 ;;
     --skip) SKIP="$2"; shift 2 ;;
@@ -85,7 +88,7 @@ meta() {
 
 cmd_for() {
   case "$1" in
-    gate) echo "$PY -m benchmarks.runner --exp \${EXP_ID} --model $MODEL --force" ;;
+    gate) printf '%s\n' "$PY -m benchmarks.runner --exp <每格逐一> --model $MODEL --force  [覆盖前自动归档]" "  gate-cells: $(echo "$GATE_CELLS" | tr ',' '\n' | sed 's/^/    - /')" ;;
     ppl) echo "$PY -m tools.quant_ppl --model $MODEL --ctx 1024 --json results/quant_ppl.json" ;;
     task_accuracy) echo "$PY -m tools.task_accuracy --model $MODEL --data-dir $DATA_DIR --json results/task_accuracy.json" ;;
     batch_sweep) echo "$PY -m tools.batch_sweep --model $MODEL --ctx 1024 --json results/batch_sweep.json" ;;
@@ -144,10 +147,16 @@ for s in "${STEPS[@]}"; do
 
   case "$s" in
     gate)
-      # 门禁：跑矩阵里声明的 p4b 量化格（示例；上机时按需要改 EXP_ID）
-      for EXP_ID in \
-        "EXP-p4b-01-truncation__bit_width=w8a16_execution=cudagraph_ctx=1024" \
-        "EXP-p4b-01-truncation__bit_width=w8a16_execution=eager_ctx=1024"; do
+      # 门禁：默认跑 p4b 的两个 w8a16 格（已过门的那一档）；可用 --gate-cells 覆盖。
+      # ★ 覆盖已落盘 result.json 之前**自动归档**（规则 9）—— 上机时最容易忘的一步。
+      ARCH="results/EXP-p4b-01-run/pre_suite_$(date +%Y%m%d-%H%M%S)"
+      mkdir -p "$ARCH"
+      IFS=',' read -r -a _cells <<< "$GATE_CELLS"
+      for EXP_ID in "${_cells[@]}"; do
+        [ -z "$EXP_ID" ] && continue
+        if [ -f "results/$EXP_ID/result.json" ]; then
+          cp -r "results/$EXP_ID" "$ARCH/" && echo "  [archived] $EXP_ID -> $ARCH/"
+        fi
         echo "  -> $EXP_ID"
         $PY -m benchmarks.runner --exp "$EXP_ID" --model "$MODEL" --force || {
           echo "[FAIL] gate: $EXP_ID" >&2
