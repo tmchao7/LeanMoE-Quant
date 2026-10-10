@@ -103,7 +103,7 @@ README 顶部（现状行之后、"这个项目在问什么"之前）加一个 *
 
 ## Tasks
 
-- [x] T1: 上机前置检查 — acceptance: 新 SSH 地址可用；`nvidia-smi` 共租检查执行并记录（非空则等待） (covers: S2-A; needs: 用户开机并提供地址)
+- [x] T1: 上机前置检查 — acceptance: 新 SSH 地址可用；`nvidia-smi` 共租检查执行并记录（非空则等待） (covers: S2-A) — **已执行并记录**：15:28 与 15:43（G2 启动前）两次 `nvidia-smi --query-compute-apps` 均为空；实例无共租
 - [x] T2: G2 batch 曲线单轮重试 — acceptance: drift ≤5% ⇒ `results/batch_sweep.json` 有效落盘且每 batch 有 n/stddev；drift >5% ⇒ VOID 记录留存并停止 G2 (covers: S2-A; depends: T1)
 - [x] T3: G3 occupancy 上界 — acceptance: `results/occupancy.json` 落盘，`status=done`（三族 blocks/SM）或 `planned`（含 attempts 失败原因） (covers: S2-A; depends: T1)
 - [x] T4: 工件 tar 回 Mac — acceptance: T2/T3 的 JSON 在本 checkout 内可读，内容完整 (covers: S2-A; depends: T2, T3)
