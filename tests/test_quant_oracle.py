@@ -120,6 +120,49 @@ def test_torch_path_matches_oracle_exactly(bits, group_size, symmetric):
 
 
 @requires_torch
+@pytest.mark.parametrize("seed", [0, 1, 7, 2026])
+@pytest.mark.parametrize("shape", [(64, 500), (3, 130), (1, 1)])
+@pytest.mark.parametrize("bits,group_size", [(4, 128), (8, 64)])
+def test_torch_path_matches_oracle_seeds_and_nondivisible(seed, shape, bits, group_size):
+    """多 seed + 非整除形状（2026-10-10 评审补的覆盖缺口）：
+    补零 padding 路径上 torch 快路径与 oracle 仍必须逐位一致。"""
+    import torch
+
+    from lemoq.quant import rtn as tr
+
+    w = _weights(shape=shape, seed=seed)
+    qn = no.quantize_rtn(w, bits=bits, group_size=group_size, symmetric=True)
+    qt = tr.quantize_rtn(torch.from_numpy(w), bits=bits, group_size=group_size, symmetric=True)
+    assert np.array_equal(qn["codes"], qt["codes"].numpy())
+    assert np.array_equal(qn["scale"], qt["scale"].numpy())
+    assert np.allclose(no.dequantize_rtn(qn), tr.dequantize_rtn(qt).numpy(), atol=0.0, rtol=0.0)
+
+
+@requires_torch
+@pytest.mark.parametrize(
+    "w",
+    [
+        np.zeros((16, 40), dtype=np.float32),
+        np.full((16, 40), np.finfo(np.float32).max, dtype=np.float32),
+        np.full((16, 40), np.finfo(np.float32).tiny, dtype=np.float32),
+    ],
+    ids=["zeros", "finfo_max", "finfo_tiny"],
+)
+def test_torch_path_matches_oracle_edge_values(w):
+    """极端值（全零 / 最大 / 最小正规数）不许出现两条路径分叉。"""
+    import torch
+
+    from lemoq.quant import rtn as tr
+
+    for bits, group_size in ((4, 128), (8, 32)):
+        qn = no.quantize_rtn(w, bits=bits, group_size=group_size, symmetric=True)
+        qt = tr.quantize_rtn(torch.from_numpy(w), bits=bits, group_size=group_size, symmetric=True)
+        assert np.array_equal(qn["codes"], qt["codes"].numpy())
+        assert np.array_equal(qn["scale"], qt["scale"].numpy())
+        assert np.allclose(no.dequantize_rtn(qn), tr.dequantize_rtn(qt).numpy(), atol=0.0, rtol=0.0)
+
+
+@requires_torch
 def test_api_layer_matches_oracle():
     import numpy as np
     import torch
