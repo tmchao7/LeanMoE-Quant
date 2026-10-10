@@ -122,15 +122,24 @@ def _load_ppl_run(path: str, arm_id: str) -> tuple[dict[str, Any], dict[str, Any
     for lbl, entry, key in (("fp16", fp16, "ppl"), ("arm", arm, "ppl")):
         if not isinstance(entry.get(key), (int, float)):
             raise SystemExit("%s 臂缺 %s 字段 —— quant_ppl.json 不完整，拒绝合并" % (lbl, key))
-    # noop 自检臂：ΔNLL 必须恰好为 0，否则恢复不干净，整份工件不可信
+    # noop 自检臂：ΔNLL 必须恰好为 0，否则恢复不干净，整份工件不可信。
+    # ★ 键名是 `paired_vs_fp16.delta_nll_per_token`（quant_ppl.py 的实际产出）；
+    #   2026-10-10 评审前这里读的是不存在的 `paired.mean`，防呆从未触发过。
     for nid, nentry in arms.items():
         if nentry.get("kind") == "noop":
-            paired = nentry.get("paired") or {}
-            mean = paired.get("mean")
-            if mean is not None and abs(float(mean)) > 1e-9:
+            paired = nentry.get("paired_vs_fp16")
+            if not isinstance(paired, dict) or not isinstance(
+                paired.get("delta_nll_per_token"), (int, float)
+            ):
+                raise SystemExit(
+                    "noop 臂 %s 缺 paired_vs_fp16.delta_nll_per_token —— 无法验证快照"
+                    "恢复是否干净，拒绝合并（先跑 tools/quant_ppl.py 重新生成）" % nid
+                )
+            mean = float(paired["delta_nll_per_token"])
+            if abs(mean) > 1e-9:
                 raise SystemExit(
                     "noop 臂 %s 的 ΔNLL=%.3e ≠ 0 —— 快照恢复不干净，本次 PPL 运行不可信，"
-                    "拒绝合并（先修 quant_ppl 的快照/恢复）" % (nid, float(mean))
+                    "拒绝合并（先修 quant_ppl 的快照/恢复）" % (nid, mean)
                 )
     meta = {k: run.get(k) for k in ("model", "dataset", "n_tokens", "ctx_window", "metric")}
     return fp16, arm, meta
@@ -206,11 +215,16 @@ def merge(
             )
         )
     print("共写入 %d 份；原值归档在 %s" % (written, archive_dir))
-    if arm.get("paired") is not None:
-        p = arm["paired"]
+    paired = arm.get("paired_vs_fp16")
+    if isinstance(paired, dict) and isinstance(paired.get("delta_nll_per_token"), (int, float)):
         print(
-            "  配对 ΔNLL/token = %+.6f (paired SE %.6f, n=%s) —— 该值**不**写进 cell，"
-            "只活在 quant_ppl.json 里" % (p.get("mean", 0.0), p.get("paired_se", 0.0), p.get("n"))
+            "  配对 ΔNLL/token = %+.6f (paired SE %s, n=%s) —— 该值**不**写进 cell，"
+            "只活在 quant_ppl.json 里"
+            % (
+                float(paired["delta_nll_per_token"]),
+                paired.get("paired_se", "—"),
+                paired.get("n_pairs", "—"),
+            )
         )
     return written
 
