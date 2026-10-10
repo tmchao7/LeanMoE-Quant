@@ -44,7 +44,12 @@ from benchmarks.cudagraph import (
     normalize_execution,
 )
 from benchmarks.harness import is_done, write_result
-from benchmarks.schema import PPL_NOT_MEASURED_NOTE, SCOPE_NOT_APPLICABLE, empty_result
+from benchmarks.schema import (
+    PPL_NOT_MEASURED_NOTE,
+    SCOPE_NOT_APPLICABLE,
+    empty_result,
+    sanitize_gate_failed_perf,
+)
 from benchmarks.timing import summarize
 
 PROBE_PATH = "results/machine_probe.json"
@@ -500,11 +505,18 @@ def correctness_for_cell(cfg: dict[str, Any], *, consistency_passed: bool) -> di
         )
     cited_pass = cite["gate"] == "PASS"
     ctx = int(cfg.get("ctx") or 0)
-    artifact = (
-        "EXP-p1-04-prompt-set-gate/probe_prompt_set_ctx4096.json"
-        if ctx == 4096
-        else "EXP-p1-04-prompt-set-gate/probe_prompt_set.json"
-    )
+    artifact = {
+        1024: "EXP-p1-04-prompt-set-gate/probe_prompt_set.json",
+        4096: "EXP-p1-04-prompt-set-gate/probe_prompt_set_ctx4096.json",
+    }.get(ctx)
+    if artifact is None:
+        # 与 cite is None 同款的最后一道闸：该 ctx 没有门实测引用文件，
+        # 不得静默套用 1024 的工件（2026-10-10 评审发现的映射缺口）。
+        return dict(
+            base,
+            gate="FAIL",
+            thresholds={"note": "ctx=%d 没有 EXP-p1-04 的门实测引用文件 —— 不得报性能数字。" % ctx},
+        )
     return dict(
         base,
         kl=cite["kl"],
@@ -1838,6 +1850,9 @@ def build_payload(
             "activity": res.get("dequant_activity"),
             "interleaved_ab": res.get("dequant_ab"),
         }
+    # 硬规则 2 的 builder 出口：gate FAIL 格子的 attribution/bottleneck/attainment
+    # 实测值挪进 evidence（latency 段上面已单独处理；这里是全字段收口）。
+    sanitize_gate_failed_perf(payload)
     return payload
 
 
@@ -2134,6 +2149,8 @@ def build_cudagraph_payload(
             "4D mask 仍然每步更新（eager 臂需要它），但 kernel 不读它："
             "kernel 只读 [0, filled_len)，未填充槽位根本不参与计算。"
         )
+    # 硬规则 2 的 builder 出口（与 build_payload 同款收口）。
+    sanitize_gate_failed_perf(payload)
     return payload
 
 

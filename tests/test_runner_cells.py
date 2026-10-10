@@ -599,6 +599,24 @@ def test_correctness_for_cell_quantized_cites_p104_and_respects_fail():
     assert "没有" in uncited["thresholds"]["note"]
 
 
+def test_correctness_for_cell_unknown_ctx_never_falls_back_to_1024_artifact(monkeypatch):
+    """引用工件映射只认 ctx ∈ {1024, 4096}（2026-10-10 评审补的闸）：
+    若引用表将来出现新 ctx，不得静默套用 1024 的工件路径。"""
+    from benchmarks import runner as runner_mod
+
+    monkeypatch.setattr(
+        runner_mod,
+        "gate_for_cell",
+        lambda *a, **k: {"gate": "PASS", "kl": 0.001, "top1": 0.99},
+    )
+    out = correctness_for_cell(
+        {"bit_width": "w8a16", "group_size": 128, "ctx": 2048}, consistency_passed=True
+    )
+    assert out["gate"] == "FAIL"
+    assert "2048" in out["thresholds"]["note"]
+    assert out["kl"] is None
+
+
 # ---------------------------------------------------------------------------
 # 量化 hook：CPU tiny OLMoE
 # ---------------------------------------------------------------------------

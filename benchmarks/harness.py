@@ -23,11 +23,12 @@ import itertools
 import json
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from benchmarks.schema import empty_result, validate_result
+from benchmarks.schema import empty_result, sanitize_gate_failed_perf, validate_result
 
 DEFAULT_MATRIX = "configs/experiments.yaml"
 RESULTS_DIR = "results"
@@ -183,13 +184,31 @@ def is_done(exp_id: str, root: str = RESULTS_DIR) -> bool:
 
 
 def write_result(payload: dict[str, Any], root: str = RESULTS_DIR) -> tuple[Path, list[str]]:
-    """Validate then write. Returns (path, problems). Problems are advisory but recorded."""
+    """Sanitize then validate then write. Returns (path, problems).
+
+    - gate == FAIL 的实测性能值先挪进 `_measurement.gate_failed_evidence`（硬规则 2）；
+    - 覆盖已存在的 result.json 前先归档旧文件到同目录 `archive/result_<UTC>.json`
+      （规则 9 的机械执行点：不再依赖各轮脚本自觉）；
+    - problems 仍是 advisory（落盘后由调用方决定退出码），但 sanitize 之后
+      硬规则 2 类问题不应再出现。
+    """
+    sanitize_gate_failed_perf(payload)
     problems = validate_result(payload)
     p = result_path(payload["exp_id"], root)
     p.parent.mkdir(parents=True, exist_ok=True)
+    serialized = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    if p.exists() and p.read_text(encoding="utf-8") != serialized:
+        archive_dir = p.parent / "archive"
+        archive_dir.mkdir(exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        target = archive_dir / ("result_%s.json" % stamp)
+        n = 1
+        while target.exists():  # 同秒多次覆盖：后缀递增，绝不覆盖归档本身
+            target = archive_dir / ("result_%s_%d.json" % (stamp, n))
+            n += 1
+        target.write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
     with open(p, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2, ensure_ascii=False)
-        fh.write("\n")
+        fh.write(serialized)
     return p, problems
 
 

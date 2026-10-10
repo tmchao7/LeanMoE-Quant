@@ -99,6 +99,79 @@ def test_failed_gate_with_no_performance_is_fine():
     assert validate_result(payload) == []
 
 
+def test_failed_gate_rejects_perf_in_every_section():
+    """硬规则 2 的全字段清单（2026-10-10 评审补洞）：attribution / bottleneck /
+    attainment / ttft / samples 里的实测值在 gate FAIL 时同样不许存在。"""
+    from benchmarks.schema import GATE_FAIL_MUST_BE_NULL
+
+    cases = [
+        ("attribution", "host_share_pct", 61.5),
+        ("attribution", "kernels_per_call", 43221.0),
+        ("bottleneck", "measured_p50_ms", 382.97),
+        ("bottleneck", "gpu_total_ms_per_step", 147.0),
+        ("attainment", "quant_attainment_pct", 0.1),
+        ("latency", "ttft_p50_ms", 10.0),
+        ("latency", "samples", {"step": [1.0]}),
+    ]
+    for section, field, value in cases:
+        assert (section, field) in [
+            (s, f) for s, fs in GATE_FAIL_MUST_BE_NULL.items() for f in fs
+        ], (section, field)
+        payload = empty_result("EXP-test-01")
+        payload["correctness"]["gate"] = "FAIL"
+        payload[section][field] = value
+        problems = validate_result(payload)
+        assert any("硬规则 2" in p and field in p for p in problems), (section, field, problems)
+
+
+def test_sanitize_moves_gate_failed_perf_into_evidence():
+    from benchmarks.schema import sanitize_gate_failed_perf
+
+    payload = empty_result("EXP-test-01")
+    payload["correctness"]["gate"] = "FAIL"
+    payload["latency"]["per_token_p50_ms"] = 9.9
+    payload["attribution"]["host_share_pct"] = 55.0
+    payload["bottleneck"]["measured_p50_ms"] = 12.3
+    payload["attainment"]["bw_attainment_pct"] = 0.2
+
+    moved = sanitize_gate_failed_perf(payload)
+    assert moved == {
+        "per_token_p50_ms": 9.9,
+        "host_share_pct": 55.0,
+        "measured_p50_ms": 12.3,
+        "bw_attainment_pct": 0.2,
+    }
+    assert payload["latency"]["per_token_p50_ms"] is None
+    assert payload["attribution"]["host_share_pct"] is None
+    ev = payload["_measurement"]["gate_failed_evidence"]
+    assert ev["per_token_p50_ms"] == 9.9
+    assert ev["host_share_pct"] == 55.0
+    assert validate_result(payload) == []
+
+
+def test_sanitize_is_noop_for_passing_gate_and_keeps_existing_evidence():
+    from benchmarks.schema import sanitize_gate_failed_perf
+
+    # PASS 格：一动不动
+    ok = empty_result("EXP-test-02")
+    ok["correctness"]["gate"] = "PASS"
+    ok["attribution"]["host_share_pct"] = 12.0
+    assert sanitize_gate_failed_perf(ok) == {}
+    assert ok["attribution"]["host_share_pct"] == 12.0
+
+    # runner 已经暂存过的 latency 字段：不覆盖 evidence 里的原值
+    payload = empty_result("EXP-test-03")
+    payload["correctness"]["gate"] = "FAIL"
+    payload["latency"]["per_token_p50_ms"] = 9.9
+    payload["_measurement"] = {
+        "gate_failed_evidence": {"per_token_p50_ms": 1.0, "note": "runner 已存"}
+    }
+    sanitize_gate_failed_perf(payload)
+    ev = payload["_measurement"]["gate_failed_evidence"]
+    assert ev["per_token_p50_ms"] == 1.0  # setdefault：不覆盖
+    assert ev["note"] == "runner 已存"
+
+
 def test_schema_version_is_enforced():
     payload = empty_result("EXP-test-01")
     payload["schema_version"] = SCHEMA_VERSION + 1

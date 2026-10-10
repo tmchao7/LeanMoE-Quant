@@ -251,6 +251,83 @@ def validate_ppl_declaration(payload: Any, ppl_index: dict[str, Any] | None = No
     ]
 
 
+# 项目硬规则 2 的**完整**字段清单：`correctness.gate == FAIL` 时这些字段必须为 None。
+# 实测值先由 `sanitize_gate_failed_perf` 挪进 `_measurement.gate_failed_evidence`。
+# 历史校验只盯 latency 三个字段；2026-10-10 评审用真实 FAIL payload 实证
+# `bottleneck.measured_p50_ms` / `attribution.host_share_pct` / `attainment.*`
+# 同样可被当"性能数字"引用，故一并钉死（字段名跨 section 唯一，便于平铺暂存）。
+GATE_FAIL_MUST_BE_NULL: dict[str, tuple[str, ...]] = {
+    "latency": (
+        "ttft_p50_ms",
+        "ttft_p99_ms",
+        "per_token_p50_ms",
+        "per_token_p99_ms",
+        "tok_per_s",
+        "samples",
+    ),
+    "attribution": (
+        "gpu_p50_ms",
+        "gpu_busy_ms",
+        "host_p50_ms",
+        "host_share_pct",
+        "host_share_pct_residual",
+        "kernels_per_call",
+        "dequant_share_pct",
+        "routing_share_pct",
+    ),
+    "bottleneck": (
+        "measured_p50_ms",
+        "slack_factor",
+        "gpu_total_ms_per_step",
+        "kernels_per_step",
+        "bucket_ms",
+        "bucket_share_pct",
+        "top_kernels",
+        "moe_block",
+    ),
+    "attainment": ("quant_attainment_pct", "bw_attainment_pct"),
+}
+
+
+def _reports_perf(value: Any) -> bool:
+    """None = 未测；空 dict/list（如 latency.samples 的默认 {}）同样 = 没有数据。
+    只有非空容器或标量（含 0.0）才算"报了性能数字"。"""
+    if value is None:
+        return False
+    if isinstance(value, (dict, list)) and len(value) == 0:
+        return False
+    return True
+
+
+def sanitize_gate_failed_perf(payload: Any) -> dict[str, Any]:
+    """硬规则 2 的写盘执行点：gate == FAIL 时把实测性能值挪进
+    `_measurement.gate_failed_evidence` 并在原位置置 None（= 未测，不得引用）。
+
+    只在 gate == FAIL 时动作；已由 runner 暂存过的字段（setdefault）不覆盖。
+    返回被挪走的 `{字段: 值}`（空 dict = 无需动作）。
+    """
+    if not isinstance(payload, dict) or (payload.get("correctness") or {}).get("gate") != "FAIL":
+        return {}
+    moved: dict[str, Any] = {}
+    for section, fields in GATE_FAIL_MUST_BE_NULL.items():
+        sec = payload.get(section)
+        if not isinstance(sec, dict):
+            continue
+        for field in fields:
+            value = sec.get(field)
+            if _reports_perf(value):
+                moved[field] = value
+                sec[field] = None
+    if moved:
+        measurement = payload.setdefault("_measurement", {})
+        if isinstance(measurement, dict):
+            evidence = measurement.setdefault("gate_failed_evidence", {})
+            if isinstance(evidence, dict):
+                for field, value in moved.items():
+                    evidence.setdefault(field, value)
+    return moved
+
+
 def validate_result(payload: Any, ppl_index: dict[str, Any] | None = None) -> list[str]:
     """Return a list of human-readable problems. Empty list means valid."""
     problems: list[str] = []
@@ -304,18 +381,20 @@ def validate_result(payload: Any, ppl_index: dict[str, Any] | None = None) -> li
             % (list(VALID_OUTCOME), verdict.get("outcome"))
         )
 
-    # 项目硬规则 2：正确性门槛不过，不得报性能数字
+    # 项目硬规则 2：正确性门槛不过，不得报性能数字（全字段清单见
+    # GATE_FAIL_MUST_BE_NULL；写盘前用 sanitize_gate_failed_perf 挪值即可通过）
     gate = (payload.get("correctness") or {}).get("gate")
     if gate == "FAIL":
-        lat = payload.get("latency") or {}
         reported = [
-            k
-            for k in ("per_token_p50_ms", "per_token_p99_ms", "tok_per_s")
-            if lat.get(k) is not None
+            "%s.%s" % (section, field)
+            for section, fields in GATE_FAIL_MUST_BE_NULL.items()
+            for field in fields
+            if isinstance(payload.get(section), dict) and _reports_perf(payload[section].get(field))
         ]
         if reported:
             problems.append(
-                "correctness.gate == FAIL 却报了性能数字 %s —— 违反项目硬规则 2" % reported
+                "correctness.gate == FAIL 却报了性能数字 %s —— 违反项目硬规则 2"
+                "（实测值只能存在于 _measurement.gate_failed_evidence）" % reported
             )
     problems.extend(validate_ppl_declaration(payload, ppl_index))
     return problems

@@ -23,17 +23,33 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from benchmarks.schema import PPL_STATUS_PATH, load_ppl_index, validate_result
+from benchmarks.schema import (
+    PPL_STATUS_PATH,
+    load_ppl_index,
+    sanitize_gate_failed_perf,
+    validate_result,
+)
 
 RESULTS_GLOB = "results/*/result.json"
+
+
+def _is_archive_path(path: str) -> bool:
+    """归档目录（`v1_archive/` 等）不是规范工件，不进汇总表（规则 9：归档 = 旧版本）。"""
+    return any(seg == "archive" or seg.endswith("_archive") for seg in Path(path).parts)
 
 
 def load_results(pattern: str = RESULTS_GLOB) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for p in sorted(glob.glob(pattern)):
+        if _is_archive_path(p):
+            continue
         try:
             with open(p, encoding="utf-8") as fh:
                 data = json.load(fh)
+            # 存量 gate==FAIL 工件里滞留的实测值（2026-10-10 评审实证）在读取时
+            # 统一挪进 evidence 并置 None —— 展示与校验都按硬规则 2 的口径走，
+            # 磁盘上的历史文件本体不改写。
+            sanitize_gate_failed_perf(data)
             data["_path"] = p
             out.append(data)
         except Exception as exc:  # noqa: BLE001
