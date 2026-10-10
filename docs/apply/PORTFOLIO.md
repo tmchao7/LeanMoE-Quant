@@ -3,7 +3,7 @@
 > 用途：**投递与面试**。写简历时从这里挑句子，面试前用 §3 的三问自检。
 > 规矩不变：本文不引入任何新数字，每个数字都指向本仓库里的记录或工件；
 > 没测的东西一律写"未测"（与 [`RESULTS.md`](../../RESULTS.md) §6 同一口径）。
-> 生成时间：2026-10-09。
+> 生成时间：2026-10-09；**更新：2026-10-11**（新增 §2a 数据总表与 §2b 第 5 条候选）。
 
 ---
 
@@ -59,6 +59,62 @@
 
 ---
 
+## 2a. 量化数据总表（每个数字 → 出处 → 简历状态）
+
+> 用法：写简历只取 ✅ 行；⚠️ 行只在面试深挖时展开；❌ 行永远不写。
+> 状态含义：**可直接引用**（同轮 A/B / 有工件）；**带限定**（口径必须跟着数字一起出现）。
+
+### 起点、上限与五条杠杆（已采纳进默认路径）
+
+| # | 数字 | 口径 | 出处 | 简历 |
+|---|---|---|---|---|
+| 1 | 起手 **82.6436 ms**/token → 字节下限 **1.5982 ms**（**≈52×**） | fp16 eager，ctx=1024，实测带宽 1561.9 GB/s | `RESULTS.md` §1；`experiments/EXP-p0-02*` | ✅ 带限定（host 主导的起点，不是精确基线） |
+| 2 | 执行轴 **2.43×**@1024 / **1.35×**@4096 | 同实现同轮 eager→cudagraph；host 67.3%→1.4% | `EXP-p4b-01` §2.8.2（归档 payload） | ✅ |
+| 3 | 量化 **1.1911×**@1024 / **1.0888×**@4096 | w8a16 vs fp16，图内，canary ±0.13% | `EXP-p4b-01` §P2j | ✅ |
+| 4 | **结构性上限 1.74×**（权重仅占步 **42%**；@4096 1.30×/23%） | 实测，非推演 | `EXP-p4b-01` §4 | ✅ 项目最值钱的数字 |
+| 5 | 注意力实现 **1.3034×**@1024 / **1.2555×**@4096；最好格 **1.87×/3.11×** | 图内 w8a16 sdpa→split-KV，vs 同格 fp16 | `EXP-p4c-01` §5.7 | ✅ |
+| 6 | 融合 RMSNorm **1.2358×**；kernel/步 **994→539**；**15/15** 轮赢 | 同进程交错 A/B；`F.rms_norm` 对照 **0/15、慢 5%** | `EXP-p4c-02` §5.5/§5.6 | ✅ |
+| 7 | 投影 kernel **8.14→5.15 µs/call**（**523→826 GB/s**） | 图内配置扫描；桶 0.5245→0.3254 ms | `EXP-p4c-01` §5.4 | ✅ |
+| 8 | 专家 GEMV **96.3→63.5 µs（1.52×）**，解释步级收益 **90.4%** | 隔离测；占步 42.9% | `docs/reference/NCU_EVIDENCE.md` §3/§4.3 | ✅ |
+| 9 | 无 gather kernel **5.2637→4.0715 ms（1.293×）**，省 **3.22 GB/token** | 同轮 A/B | `EXP-p2-02` 记录 | ✅ |
+
+### 精度三链（w8a16 全过门）
+
+| 数字 | 口径 | 出处 | 简历 |
+|---|---|---|---|
+| KL **0.001361** / top-1 **0.9758**（门 <0.01 / ≥0.95） | 165 位置，fp16 参考 | `EXP-p1-04` v2 | ✅ |
+| PPL **9.1985 → 9.2047（+0.067%）**（门 <1%） | wikitext-2 前 8192 token | `results/PPL_STATUS.json` | ✅ |
+| MMLU 5-shot **53.50% → 52.50%（−1.0 点）**（门 <2 点） | n=200 分层子集 | `results/task_accuracy.json` | ✅ 带 n=200 |
+| GSM8K fp16 **0/15** | 8-shot 生成式，基座 floor | `results/task_accuracy.json` | ❌ 不写（放弃的口径） |
+
+### ★ 本轮新增：profile 驱动的三连融合候选（**A/B 实测、env 默认关、未采纳**）
+
+| 候选 | 同轮 A/B | 金丝雀 | 正确性 | 出处 | 简历 |
+|---|---|---|---|---|---|
+| **fused RoPE**（160→32 kernel/步，rope 链 ≈0.216 ms≈11.5% busy） | wall **1.9655→1.8007 ms = +8.39%**；busy **1.872→1.679（−0.194 ms）** | +3.661% ≤5% | 4 run token 逐位同；GPU K1 parity 过 | `results/fused_rope_ab.json`；`docs/compose/spec/fused-rope.md`（第 1 轮金丝雀 5.923% VOID 留档 `*.void1.*`） | ✅ 写"A/B 实测 +8.4%"，注明候选未采纳 |
+| **routing softmax+topk 融合** | **1.9521→1.8935 ms = +3.0%**（busy +4.2%） | 2.215% ≤5% | token 逐位同 | `results/routing_ab.json`；spec `routing-fusion` | ✅ 同上 |
+| **skip mask-fill**（graph 臂省 2 fill/步） | **2.0111→1.9844 ms = +1.33%**（busy 不变，省的是 host ≈27 µs） | −1.905% ≤5% | token 逐位同 | `results/skip_mask_fill_ab.json`；spec `skip-mask-fill` | ⚠️ 数字小，写方法不写数字 |
+| in-graph kernel 分解工具 | wall 1.94 ms / busy 1.876 / **539 kernel/步** 的 top-25 归因表 | — | — | `results/graph_profile.json` | ✅ 方法论卖点 |
+
+### 其余可引用（G2/G3 与工程量）
+
+| 数字 | 出处 | 简历 |
+|---|---|---|
+| batch 1→8：step p50 **87.20→86.29 ms 近平坦**，tok/s **11.47→92.71（8.08×）**，canary −3.448% | `results/batch_sweep.json` | ✅ 带"fp16 单臂、同轮"限定 |
+| occupancy 上界：三族 kernel blocks/SM ≤12/≤12/≤6，**上界 100%**（解析值非 ncu） | `results/occupancy.json` | ⚠️ 必须注明"解析上界" |
+| 测试 **501 passed**（Mac CPU，`-m "not gpu"`，2026-10-11 在 `opt/fused-rope`）；main 为 480 | 本地 pytest | ✅ 写"500+ 单测" |
+| 自研 Triton kernel 族：**4 已采纳 + fused-RoPE 候选（第 5 个）** | `src/lemoq/kernels/` | ✅ "4–5 个自研 kernel" |
+| 实验矩阵 64 格 / 98 份 result.json / 三轮 VOID 不发数 | `configs/experiments.yaml`、`results/` | ✅ 方法论 |
+
+### ❌ 永远不写
+
+- **`82.6 → 3.59 ms` 之类的跨轮"总加速"**（五条不同轮杠杆相乘，违反硬规则 3）；
+- 量化 × batch 衰减、FP8/MXFP4、ncu stall/occupancy **实测**（全未测）；
+- 任何 req/s 或"服务吞吐"（零条数据，batch=1 单流课题）；
+- 把三个候选写成"已上线/已采纳"（env 默认关，采纳需重测已录格）。
+
+---
+
 ## 2b. 简历定稿（可直接粘贴，**字数很短**）
 
 > 规则：**只写已实测的数字**。上机待跑的两项（batch 曲线、occupancy 上界）已于
@@ -96,6 +152,22 @@
   tok/s 11.47→92.71（8.08×）；金丝雀 −3.448% ≤5%，n=5 丢 1 轮`
 - `occupancy 上界（G3，解析上界非 ncu 实测）：fused RMSNorm blocks/SM ≤12（threads 限，
   n_regs=38）、grouped gate_up ≤12、down_sum ≤6（regs 限），occupancy 上界 100%`
+
+**第 5 条候选（2026-10-11 已测：profile 驱动的三连融合，可替换或叠加使用）**
+
+> 中文：**自研 in-graph kernel 分解 → 三连融合候选**：定位 RoPE 链 **160 kernel/步
+> ≈11.5% busy**（neg/cat/mul/add 散在四个 family），融合后同轮 A/B **端到端 +8.4%**
+> （busy −0.194 ms）；另得路由融合 **+3.0%**、去 mask-fill **+1.3%**。三项全部过
+> **金丝雀 ≤5% + 跨臂 token 逐位一致**双验收，env 开关默认关、已录路径零回归。
+
+> EN: **Profile-driven fusion**: built an in-graph kernel-decomposition tool; traced the
+> **160-kernel/step RoPE chain (~11.5% busy)**, fused it for **+8.4%** end-to-end
+> (−0.194 ms busy) in same-round A/B; plus routing **+3.0%** and mask-fill removal
+> **+1.3%** — all pass ≤5% canary + bitwise-identical token gates, env-gated (default off,
+> zero regression).
+
+⚠️ 写这条必须带"候选 / 未采纳 / 同轮 A/B"三个限定中的至少前两个——面试官追问
+"采纳了吗"时，诚实答案是"默认关，采纳需重测已录格（预算约束）"，这本身也是答点。
 
 ⚠️ 示例写法（**数值是编的，切勿抄**）：`blocks/SM 上界 = 4（寄存器受限）` —— 若上机测出
 不是 4，简历立刻变成假话。**先测，再填。**
