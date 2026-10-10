@@ -479,6 +479,18 @@ def measure_graph_gap(
     }
 
 
+def _skip_mask_fill_enabled() -> bool:
+    """候选开关：graph 臂每步跳过两次 attention_mask 更新（默认关）。
+
+    只在 `replay()` / `replay_at_position()`（图**外**、每步）读取，因此不进
+    capture 烘焙；eager `decode_eager()` 与 capture warmup 不读它 —— eager 臂
+    依赖新鲜 mask，capture 期保持与已录路径逐字节一致。采纳为默认需另行批准。
+    """
+    import os
+
+    return os.environ.get("LEMOQ_SKIP_MASK_FILL", "0") == "1"
+
+
 class StaticCacheDecodeSession:
     """One-token decode session backed by a captured CUDA Graph.
 
@@ -599,7 +611,7 @@ class StaticCacheDecodeSession:
             self.torch.cuda.synchronize()
         return logits
 
-    def _set_step_inputs(self) -> None:
+    def _set_step_inputs(self, *, skip_mask: bool = False) -> None:
         if self.current_token_id is None:
             raise RuntimeError("prefill must run before decode")
         torch = self.torch
@@ -607,14 +619,19 @@ class StaticCacheDecodeSession:
         self.buffers.token.fill_(self.current_token_id)
         self.buffers.cache_position.fill_(self.position)
         self.buffers.position_ids.fill_(self.position)
-        self.buffers.attention_mask.fill_(min_dtype)
-        if self.position >= self.config.max_cache_len:
+        if not skip_mask:
+            # kernel 不读 mask（只读 filled_len），但 eager 臂需要它。默认两条臂
+            # 都填以保持 host 开销相同；跳过是 graph 臂的候选优化，由
+            # `replay()` 按 `LEMOQ_SKIP_MASK_FILL` 每步在图外决定（见 spec
+            # skip-mask-fill [S2]）。eager/capture 路径永远走默认 False。
+            self.buffers.attention_mask.fill_(min_dtype)
+            if self.position >= self.config.max_cache_len:
+                raise RuntimeError("decode position exceeded StaticCache capacity")
+            self.buffers.attention_mask[..., : self.position + 1].zero_()
+        elif self.position >= self.config.max_cache_len:
             raise RuntimeError("decode position exceeded StaticCache capacity")
-        self.buffers.attention_mask[..., : self.position + 1].zero_()
         # ★ 长度唯一来源：设备端 int32。它在图**外**更新，图里只有它的地址。
-        #   注意 mask 仍然每步更新：kernel 不读 mask，但 **eager 臂需要它**，
-        #   而两条臂的 host 侧开销必须相同，否则交错对照量到的是 host 差异。
-        #   去掉这两次 fill_ 是后续单独的改动（一次一个变量）。
+        #   attention_mask 与 filled_len 同步，因此 skip_mask 不破坏长度语义。
         self.buffers.filled_len.fill_(self.position + 1)
 
     def capture(self, *, warmup: int = 5) -> dict[str, Any]:
@@ -680,7 +697,7 @@ class StaticCacheDecodeSession:
             raise RuntimeError("capture must succeed before replay")
         try:
             with self.torch.cuda.stream(self.stream), self.torch.no_grad():
-                self._set_step_inputs()
+                self._set_step_inputs(skip_mask=_skip_mask_fill_enabled())
                 self.graph.replay()
             if synchronize:
                 self.stream.synchronize()
@@ -715,7 +732,7 @@ class StaticCacheDecodeSession:
         self.set_position(position)
         try:
             with self.torch.cuda.stream(self.stream), self.torch.no_grad():
-                self._set_step_inputs()
+                self._set_step_inputs(skip_mask=_skip_mask_fill_enabled())
                 self.graph.replay()
             if synchronize:
                 self.stream.synchronize()
