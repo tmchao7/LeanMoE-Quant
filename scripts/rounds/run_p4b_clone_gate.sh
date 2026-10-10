@@ -76,18 +76,13 @@ cell w8a16 cudagraph 1024 w8a16_cg_fused_1024 fused
 cell w8a16 eager     1024 w8a16_eager_1024
 cell fp16  eager     1024 canaryB_fp16_eager_1024
 
-# ---- 金丝雀漂移验收（≤5% 否则整轮 VOID）----
-$PY - "$OUT" <<'PYEOF' >> "$LOG" 2>&1
-import json, sys
-out = sys.argv[1]
-a = json.load(open(out + "/clone1_canaryA_fp16_eager_1024_result.json"))
-b = json.load(open(out + "/clone1_canaryB_fp16_eager_1024_result.json"))
-pa = a["latency"]["per_token_p50_ms"]; pb = b["latency"]["per_token_p50_ms"]
-if pa is None or pb is None:
-    print("    [canary] !! 金丝雀 p50 缺失 A=%s B=%s -> 整轮 VOID" % (pa, pb))
-else:
-    drift = abs(pb - pa) / pa * 100
-    print("    [canary] A=%.4f ms B=%.4f ms drift=%.2f%% -> %s" % (
-        pa, pb, drift, "PASS" if drift <= 5 else "VOID (>5%)"))
-PYEOF
+# ---- 金丝雀漂移验收（机械：>5% ⇒ 非零退出，整轮 VOID）----
+# 2026-10-10 起改用公共工具 tools/round_canary.py（原为只打印不拦截的内联脚本）。
+if ! $PY -m tools.round_canary \
+    "$OUT/clone1_canaryA_fp16_eager_1024_result.json" \
+    "$OUT/clone1_canaryB_fp16_eager_1024_result.json" \
+    --out "$OUT/canary_verdict.json" >> "$LOG" 2>&1; then
+  echo "[canary] VOID —— 整轮作废，任何数字不得发布；verdict: $OUT/canary_verdict.json" >> "$LOG"
+  exit 1
+fi
 echo "ALL DONE $(date -Is)" >> "$LOG"

@@ -67,8 +67,11 @@ def _fmt(value: Any, spec: str = "%.3f", dash: str = "—") -> str:
 
 
 def _tristate(payload: dict[str, Any]) -> str:
-    """三态标注：已实测 / 待跑 / 待标定。"""
-    if payload.get("status") != "done":
+    """标注：已实测 / 待跑 / 待标定 / 作废。"""
+    status = payload.get("status")
+    if status == "void":
+        return "作废"  # 金丝雀判整轮 VOID —— 数字在档（诊断用）但不得引用
+    if status != "done":
         return "待跑"
     corr = (payload.get("correctness") or {}).get("gate")
     if corr == "FAIL":

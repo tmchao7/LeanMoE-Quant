@@ -183,7 +183,9 @@ REQUIRED_TOP = (
     "applicability",
 )
 
-VALID_STATUS = ("planned", "running", "done", "blocked", "failed")
+# "void" = 金丝雀漂移判整轮作废（tools/round_canary.py --mark）；可引用性的开关是
+# status——report 不计入"已完成"、is_done 为 False（下轮重跑），latency 保留作诊断。
+VALID_STATUS = ("planned", "running", "done", "blocked", "failed", "void")
 VALID_VERDICT = ("PASS", "CASCADE", "FAIL", "planned")
 VALID_OUTCOME = ("supported", "refuted", "inconclusive")
 
@@ -231,7 +233,9 @@ def validate_ppl_declaration(payload: Any, ppl_index: dict[str, Any] | None = No
     # ★ `planned` 骨架**整份**都是 null（status=planned 就是"这个格子还没跑"），
     #   它的声明就是它自己的 status，不该再要求一句 PPL 说明 —— 否则
     #   `harness --dry-run` 产出的骨架会全部不合法。
-    if payload.get("status") == "planned":
+    # ★ `void` 同理：整轮作废的 payload 里任何数字都不得引用，"PPL 是未测还是漏记"
+    #   对读者已无意义 —— status=void 本身就是最强烈的声明（tools/round_canary.py）。
+    if payload.get("status") in ("planned", "void"):
         return []
     corr = payload.get("correctness") or {}
     if not isinstance(corr, dict):
