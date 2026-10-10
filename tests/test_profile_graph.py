@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+
+import pytest
 
 from tools import profile_graph as pg
 
@@ -110,3 +113,53 @@ def test_ab_routing_verdict(monkeypatch, capsys, tmp_path):
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["status"] == "invalid"
     assert any("token" in r for r in payload["reasons"])
+
+
+def test_ab_mask_fill_verdict_and_env_restored(monkeypatch, tmp_path):
+    """--ab-mask-fill：off/on 交替、env 用后还原、键名与验收齐全。"""
+    calls = {"n": 0}
+    seen_env: list[str | None] = []
+
+    def fake_invoke(args):
+        calls["n"] += 1
+        i = calls["n"] - 1
+        seen_env.append(os.environ.get("LEMOQ_SKIP_MASK_FILL"))
+        arm_on = i % 2 == 1
+        wall = 1.94 if arm_on else 1.98  # on 臂快 ~2%
+        return {
+            "gap": {"wall_p50_ms": wall, "gpu_busy_ms": wall - 0.04, "host_share_pct": 2.0},
+            "correctness": {"graph_output_tokens": [21, 22, 23], "graph_seed_token": 21},
+        }
+
+    monkeypatch.setattr(pg, "_invoke", fake_invoke)
+    monkeypatch.delenv("LEMOQ_SKIP_MASK_FILL", raising=False)
+    out = tmp_path / "ab_mask.json"
+    rc = pg.main(["--model", "m", "--ab-mask-fill", "--json", str(out)])
+    assert rc == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["status"] == "measured"
+    assert payload["generated_by"].endswith("--ab-mask-fill")
+    assert payload["env_var"] == "LEMOQ_SKIP_MASK_FILL"
+    assert payload["tokens_equal"] is True
+    assert abs(payload["canary_drift_pct"]) <= 5.0
+    assert payload["treatment_faster_pct"] > 0
+    assert len(payload["runs"]) == 4
+    assert [r["arm"] for r in payload["runs"]] == ["off", "on", "off", "on"]
+    # 臂间 env 正确交替，且结束后还原（原环境没有这个变量 ⇒ 被删除）
+    assert seen_env == ["0", "1", "0", "1"]
+    assert "LEMOQ_SKIP_MASK_FILL" not in os.environ
+
+
+def test_ab_modes_are_mutually_exclusive(tmp_path):
+    with pytest.raises(SystemExit) as excinfo:
+        pg.main(
+            [
+                "--model",
+                "m",
+                "--ab-fused-route",
+                "--ab-mask-fill",
+                "--json",
+                str(tmp_path / "x.json"),
+            ]
+        )
+    assert excinfo.value.code == 2  # argparse.error

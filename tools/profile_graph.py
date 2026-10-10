@@ -30,6 +30,7 @@ from typing import Any
 from benchmarks.runner import run_cudagraph
 
 ABLATE_ARM_ENV = "LEMOQ_FUSED_ROUTE"
+MASK_FILL_ARM_ENV = "LEMOQ_SKIP_MASK_FILL"
 
 
 def _invoke(args: argparse.Namespace) -> dict[str, Any]:
@@ -71,21 +72,29 @@ def _extract_ab(res: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def run_routing_ab(args: argparse.Namespace) -> dict[str, Any]:
-    """aten→fused 交替 N 轮的同进程 A/B（routing 融合候选专用）。
+def _run_env_ab(
+    args: argparse.Namespace,
+    *,
+    env_var: str,
+    arm_a: str,
+    arm_b: str,
+    generated_by: str,
+    note: str,
+) -> dict[str, Any]:
+    """env=0/env=1 交替 N 轮的同进程 A/B（通用核心）。
 
-    验收三件套（spec routing-fusion [S2]）：
-      ① 金丝雀 = 首尾两次 aten 的 wall 漂移 ≤5%（超了整轮无效）；
-      ② 全部 run 的 token 序列逐位相同（融合不改变贪心轨迹）；
-      ③ fused 臂 wall 对 aten 臂的同进程 MAD 口径差（方向如实记录）。
+    验收三件套（spec skip-mask-fill [S2.3]，routing-fusion 同款）：
+      ① 金丝雀 = 基线臂（arm_a）首尾 wall 漂移 ≤5%（超了整轮无效）；
+      ② 全部 run 的 token 序列逐位相同（候选不得改变贪心轨迹）；
+      ③ arm_b 臂 wall 对 arm_a 臂的同进程均值差（方向如实记录）。
     """
     rounds = max(int(args.ab_rounds), 1)
-    seq = ["aten", "fused"] * rounds
+    seq = [arm_a, arm_b] * rounds
     runs: list[dict[str, Any]] = []
-    saved = os.environ.get(ABLATE_ARM_ENV)
+    saved = os.environ.get(env_var)
     try:
         for i, arm in enumerate(seq):
-            os.environ[ABLATE_ARM_ENV] = "1" if arm == "fused" else "0"
+            os.environ[env_var] = "1" if arm == arm_b else "0"
             one = _extract_ab(_invoke(args))
             one.update({"i": i, "arm": arm})
             runs.append(one)
@@ -95,53 +104,79 @@ def run_routing_ab(args: argparse.Namespace) -> dict[str, Any]:
             )
     finally:
         if saved is None:
-            os.environ.pop(ABLATE_ARM_ENV, None)
+            os.environ.pop(env_var, None)
         else:
-            os.environ[ABLATE_ARM_ENV] = saved
+            os.environ[env_var] = saved
 
-    aten = [r for r in runs if r["arm"] == "aten"]
-    fused = [r for r in runs if r["arm"] == "fused"]
+    base = [r for r in runs if r["arm"] == arm_a]
+    treat = [r for r in runs if r["arm"] == arm_b]
     reasons: list[str] = []
     drift = None
-    if len(aten) >= 2 and aten[0]["wall_p50_ms"] and aten[-1]["wall_p50_ms"]:
+    if len(base) >= 2 and base[0]["wall_p50_ms"] and base[-1]["wall_p50_ms"]:
         drift = round(
-            100.0
-            * (aten[-1]["wall_p50_ms"] - aten[0]["wall_p50_ms"])
-            / aten[0]["wall_p50_ms"],
+            100.0 * (base[-1]["wall_p50_ms"] - base[0]["wall_p50_ms"]) / base[0]["wall_p50_ms"],
             3,
         )
         if abs(drift) > 5.0:
-            reasons.append("aten 金丝雀漂移 %.3f%% > 5%%" % drift)
+            reasons.append("%s 金丝雀漂移 %.3f%% > 5%%" % (arm_a, drift))
     else:
-        reasons.append("aten 臂不足两次，金丝雀缺失")
+        reasons.append("%s 臂不足两次，金丝雀缺失" % arm_a)
     token_sets = {json.dumps(r["tokens"]) for r in runs}
     tokens_equal = len(token_sets) == 1
     if not tokens_equal:
-        reasons.append("跨臂 token 序列不一致（融合改变了贪心轨迹）")
-    mean_aten = sum(r["wall_p50_ms"] for r in aten) / len(aten) if aten else None
-    mean_fused = (
-        sum(r["wall_p50_ms"] for r in fused) / len(fused) if fused else None
-    )
-    delta_pct = (
-        round(100.0 * (mean_aten - mean_fused) / mean_aten, 2)
-        if mean_aten and mean_fused
-        else None
-    )
+        reasons.append("跨臂 token 序列不一致（%s→%s 改变了贪心轨迹）" % (arm_a, arm_b))
+    mean_a = sum(r["wall_p50_ms"] for r in base) / len(base) if base else None
+    mean_b = sum(r["wall_p50_ms"] for r in treat) / len(treat) if treat else None
+    delta_pct = round(100.0 * (mean_a - mean_b) / mean_a, 2) if mean_a and mean_b else None
     return {
-        "generated_by": "tools/profile_graph.py --ab-fused-route",
+        "generated_by": generated_by,
+        "env_var": env_var,
         "status": "measured" if not reasons else "invalid",
         "reasons": reasons,
-        "canary_aten_drift_pct": drift,
+        "canary_drift_pct": drift,
         "tokens_equal": tokens_equal,
-        "mean_wall_aten_ms": round(mean_aten, 4) if mean_aten else None,
-        "mean_wall_fused_ms": round(mean_fused, 4) if mean_fused else None,
-        "fused_faster_pct": delta_pct,
+        "mean_wall_baseline_ms": round(mean_a, 4) if mean_a else None,
+        "mean_wall_treatment_ms": round(mean_b, 4) if mean_b else None,
+        "treatment_faster_pct": delta_pct,
         "runs": runs,
-        "note": (
+        "note": note,
+    }
+
+
+def run_routing_ab(args: argparse.Namespace) -> dict[str, Any]:
+    """aten→fused 交替 A/B（routing 融合候选专用；键名保持历史契约）。"""
+    payload = _run_env_ab(
+        args,
+        env_var=ABLATE_ARM_ENV,
+        arm_a="aten",
+        arm_b="fused",
+        generated_by="tools/profile_graph.py --ab-fused-route",
+        note=(
             "同进程交替 A/B；fused_faster_pct>0 = 融合臂更快。"
             "候选结论：采纳需重测 grouped 路径已录格（P2d 同款），本工具不写 result.json。"
         ),
-    }
+    )
+    payload["canary_aten_drift_pct"] = payload["canary_drift_pct"]
+    payload["mean_wall_aten_ms"] = payload["mean_wall_baseline_ms"]
+    payload["mean_wall_fused_ms"] = payload["mean_wall_treatment_ms"]
+    payload["fused_faster_pct"] = payload["treatment_faster_pct"]
+    return payload
+
+
+def run_mask_fill_ab(args: argparse.Namespace) -> dict[str, Any]:
+    """off→on 交替 A/B（skip-mask-fill 候选专用）。"""
+    return _run_env_ab(
+        args,
+        env_var=MASK_FILL_ARM_ENV,
+        arm_a="off",
+        arm_b="on",
+        generated_by="tools/profile_graph.py --ab-mask-fill",
+        note=(
+            "同进程交替 A/B；treatment_faster_pct>0 = 跳过 mask fill 更快。"
+            "tokens_equal 必须为 True —— 若为 False 说明图内有代码读 mask，候选否决。"
+            "低于噪声的收益也如实记录；本工具不写 result.json。"
+        ),
+    )
 
 
 def build_payload(res: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
@@ -214,8 +249,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="routing 融合候选 A/B：aten→fused 交替 N 轮（同进程），金丝雀+跨臂 token 比对",
     )
-    ap.add_argument("--ab-rounds", type=int, default=2, help="A/B 的 (aten,fused) 对数；2 ⇒ 4 次 run")
+    ap.add_argument(
+        "--ab-mask-fill",
+        action="store_true",
+        help="skip-mask-fill 候选 A/B：off→on 交替 N 轮（同进程），金丝雀+跨臂 token 比对",
+    )
+    ap.add_argument("--ab-rounds", type=int, default=2, help="A/B 的 (off,on) 对数；2 ⇒ 4 次 run")
     args = ap.parse_args(argv)
+    if args.ab_fused_route and args.ab_mask_fill:
+        ap.error("--ab-fused-route 与 --ab-mask-fill 互斥（一次一个变量）")
+    ab_mode = "fused_route" if args.ab_fused_route else ("mask_fill" if args.ab_mask_fill else None)
     cfg = {
         "model": args.model,
         "ctx": args.ctx,
@@ -231,12 +274,16 @@ def main(argv: list[str] | None = None) -> int:
         "group_size": args.group_size,
         "rmsnorm": args.rmsnorm,
         "ab_fused_route": bool(args.ab_fused_route),
-        "ab_rounds": args.ab_rounds if args.ab_fused_route else None,
+        "ab_mask_fill": bool(args.ab_mask_fill),
+        "ab_rounds": args.ab_rounds if ab_mode else None,
     }
     out = Path(args.json)
     try:
-        if args.ab_fused_route:
+        if ab_mode == "fused_route":
             payload = run_routing_ab(args)
+            payload["config"] = cfg
+        elif ab_mode == "mask_fill":
+            payload = run_mask_fill_ab(args)
             payload["config"] = cfg
         else:
             res = _invoke(args)
@@ -255,10 +302,19 @@ def main(argv: list[str] | None = None) -> int:
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    if args.ab_fused_route:
-        print("[ab] canary_aten_drift=%s%%  tokens_equal=%s" % (payload.get("canary_aten_drift_pct"), payload.get("tokens_equal")))
-        print("[ab] mean wall aten=%s ms  fused=%s ms  fused_faster=%s%%" % (
-            payload.get("mean_wall_aten_ms"), payload.get("mean_wall_fused_ms"), payload.get("fused_faster_pct")))
+    if ab_mode:
+        print(
+            "[ab] canary_drift=%s%%  tokens_equal=%s"
+            % (payload.get("canary_drift_pct"), payload.get("tokens_equal"))
+        )
+        print(
+            "[ab] mean wall baseline=%s ms  treatment=%s ms  treatment_faster=%s%%"
+            % (
+                payload.get("mean_wall_baseline_ms"),
+                payload.get("mean_wall_treatment_ms"),
+                payload.get("treatment_faster_pct"),
+            )
+        )
         for r in payload.get("reasons") or []:
             print("[ab] INVALID: %s" % r, file=sys.stderr)
     else:
