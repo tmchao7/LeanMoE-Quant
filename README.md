@@ -30,6 +30,28 @@ FP8/MXFP4、dense 曲线、batch 扫描。**ncu 性能计数器在本机被宿�
 
 ---
 
+## 30 秒版（点进来先看这里）
+
+**MoE 大模型单卡推理优化**（模型：OLMoE-1B-7B · 显卡：RTX 5090 × 1 · 自研 Triton kernel）
+
+`大模型推理优化 | 算子融合 | 量化(W8A16) | Triton | CUDA Graph | 高性能计算 | MoE`
+
+- 自研 **4 个 Triton kernel**（grouped MoE GEMV / 融合反量化 GEMM / split-KV decode attention /
+  融合 RMSNorm），全部通过 `1e-3` 数值 parity 门。
+- **融合 RMSNorm：HF 的 7 个 kernel 合成 1 个**，全步 **1.24×**、kernel 数 **994→539**，
+  同进程交错 A/B **15/15 轮获胜**；torch 原生 `F.rms_norm` 对照反而慢 5%。
+- **无 gather 的 MoE decode kernel**（expert id 只做指针算术，保持 CUDA Graph 可捕获）：
+  消除 **3.22 GB/token** 的 gather 复制，per-token **5.26→4.07 ms（1.29×）**。
+- **W8A16 量化端到端 1.19×**，并**实测出上限只有 1.74×**（权重仅占一步 42%），
+  把 **90%** 收益归因到单个 kernel（专家 GEMV **1.52×**）；
+  精度三链闭合：KL **0.00136**、PPL **+0.067%**、MMLU 200 题 **−1.0 个点**。
+
+每个数字的出处：**[RESULTS.md](RESULTS.md)**（一页纸，逐条带工件路径）；图：
+**[docs/figures/](docs/figures/)**；面试必问三题的标准答法与岗位映射：
+**[docs/apply/PORTFOLIO.md](docs/apply/PORTFOLIO.md)**。
+
+---
+
 ## 这个项目在问什么
 
 **立论**：batch=1 解码是纯带宽受限（memory-bound）——每生成一个 token，必须把参与计算的
