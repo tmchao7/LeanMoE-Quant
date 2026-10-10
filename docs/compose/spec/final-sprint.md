@@ -1,9 +1,9 @@
 ---
 feature: final-sprint
-status: designed
+status: delivered
 updated: 2026-10-10
-branch: codex/offline-wrapup-p0p1
-commits: # 开发中，交付时填
+branch: main (merged from codex/offline-wrapup-p0p1)
+commits: 8c20ffd..e206d05
 ---
 
 # Final Sprint — 上机实测 + 全量收尾 + 投递定稿
@@ -139,5 +139,5 @@ README 顶部（现状行之后、"这个项目在问什么"之前）加一个 *
 - [x] T6: README 投递导向首屏 — acceptance: 顶部 30 秒结论区（定位 + 关键词行 + 4 条 bullet 与 PORTFOLIO §2b 逐字一致 + 出处链接），原内容保留，`check_docs` 通过 (covers: S2-C; depends: T5) — **2026-10-10 上午提前完成**（不依赖 G2/G3；T5 回填状态行时勿覆盖本区块）
 - [x] T7: 离线四门验证 — acceptance: `ruff` / `black` / `pytest -m "not gpu"` / `check_docs` 全绿，0 failed，命令与结果记入 Report (covers: S2-D; depends: T5, T6)
 - [x] T8: 独立评审 — acceptance: 一个全新 subagent 给出 spec 合规 / 正确性 / 一致性三个独立结论，critical 为 0；有则修复并复审 (covers: S2-D; depends: T7)
-- [ ] T9: 合回 main 并 push — acceptance: merge（非 rebase）完成，`origin/main` 包含全部提交，push 成功，工作区干净 (covers: S2-D; depends: T8)
-- [ ] T10: 投递文案定稿 + spec 交付 — acceptance: 产出与用户示例同构的最终文案（G2/G3 成功才加可选两条）；spec 置 `delivered` 并提交 (covers: S2-D; depends: T9)
+- [x] T9: 合回 main 并 push — acceptance: merge（非 rebase）完成，`origin/main` 包含全部提交，push 成功，工作区干净 (covers: S2-D; depends: T8)
+- [x] T10: 投递文案定稿 + spec 交付 — acceptance: 产出与用户示例同构的最终文案（G2/G3 成功才加可选两条）；spec 置 `delivered` 并提交 (covers: S2-D; depends: T9)
