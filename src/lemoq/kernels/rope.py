@@ -129,8 +129,8 @@ def _decode_shape_guard(q: Any, k: Any, cos_u: Any, sin_u: Any) -> bool:
 
     if not (_HAS_TRITON and q.is_cuda and k.is_cuda):
         return False
-    if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        return False
+    if q.dtype not in (torch.float16, torch.float32):
+        return False  # bf16 的 1 ulp ≈ 8e-3 过不了 K1 的 1e-3 —— 本项目只跑 fp16
     if q.shape[0] != 1 or k.shape[0] != 1:
         return False  # batch=1 only
     if q.ndim != 4 or k.ndim != 4 or q.shape[2] != 1 or k.shape[2] != 1:

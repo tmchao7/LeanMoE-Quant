@@ -107,9 +107,7 @@ def test_warm_is_noop_without_triton():
 # GPU：K1 parity（fused vs HF，PARITY_GATE 同口径）
 # ---------------------------------------------------------------------------
 @pytest.mark.gpu
-@pytest.mark.parametrize(
-    "d,dtype", [(128, torch.float16), (128, torch.bfloat16), (64, torch.float32)]
-)
+@pytest.mark.parametrize("d,dtype", [(128, torch.float16), (64, torch.float32)])
 def test_gpu_parity_fused_vs_hf(d, dtype):
     if not rope.fused_rope_available():
         pytest.skip("triton 不可用")
@@ -145,6 +143,17 @@ def test_gpu_non_decode_shape_falls_back_bitwise():
     if not rope.fused_rope_available():
         pytest.skip("triton 不可用")
     q, k, cos, sin = _inputs(batch=2, device="cuda", dtype=torch.float16)
+    got = rope.apply_rotary_pos_emb_fused(q, k, cos, sin)
+    want = _hf_apply(q, k, cos, sin)
+    assert torch.equal(got[0], want[0]) and torch.equal(got[1], want[1])
+
+
+@pytest.mark.gpu
+def test_gpu_bf16_falls_back_bitwise():
+    """bf16 不在 kernel 臂支持列表（1 ulp 过不了 K1）——必须逐位退回 HF。"""
+    if not rope.fused_rope_available():
+        pytest.skip("triton 不可用")
+    q, k, cos, sin = _inputs(device="cuda", dtype=torch.bfloat16)
     got = rope.apply_rotary_pos_emb_fused(q, k, cos, sin)
     want = _hf_apply(q, k, cos, sin)
     assert torch.equal(got[0], want[0]) and torch.equal(got[1], want[1])
