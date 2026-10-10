@@ -17,7 +17,35 @@ commits: # 开发中，交付时填
 
 ## Report
 
-（交付时填写）
+**What was built** — 最终冲刺交付了最后两个上机项与全部投递收尾：**G2 batch 曲线**单轮有效
+（金丝雀 **−3.448%** ≤5%，fp16 同轮 4 点：step p50 87.20/85.88/86.82/86.29 ms、tok/s
+11.47/23.29/46.07/92.71，单列表禁与历史 batch=1 混表；量化 × batch 衰减**仍为缺口**，
+因 batch_sweep 只测 fp16）；**G3 occupancy** `status=done`（真机修复三处后交付解析上界
+blocks/SM ≤12/≤12/≤6、n_regs 38/40/40，全程标注"解析上界非 ncu 实测"）。工件
+`results/batch_sweep.json` / `results/occupancy.json` + 两份日志已 tar 回 Mac；RESULTS §6、
+METRICS §6/§2、PORTFOLIO §2b 两条占位、README、ROADMAP、HANDOFF 横幅、AGENTS §3 全部回填；
+README 投递首屏（T6）已于上午提前交付。
+
+**Verification** — Mac 四门多轮全绿（最终：ruff ✓ / black ✓ / pytest **480 passed / 0
+failed** / check_docs 37 md ✓）；服务器 pytest **474 passed / 6 skipped**（同套 480）；
+G2 金丝雀 −3.448% 写进工件（`void:false`）；G3 真机 `status=done` 且三族上界经评审用
+工件限值逐 config 复算 MATCH；独立评审总判 **APPROVE、无 critical**，其 4 处 major
+（测试计数 466→480、METRICS/PORTFOLIO/AGENTS 三处 batch 口径残留）与全部 minor 已修复
+并四门复验。T1 共租检查两次执行（15:28、15:43，compute apps 空）已记录。
+
+**Journey log** —
+1. 公钥登录被平台侧拒（服务端指纹明明正确）→ 先走密码/expect 通道；期间发现公钥
+   粘贴把中文说明行带进了 `authorized_keys`（已清理并备份），后公钥恢复直连。
+   教训：平台密钥字段**只粘那一行**。
+2. G2 首启模型路径手误（漏 `-7B`）→ HFValidationError 秒败；nohup 日志一眼定位，
+   改对即通。启动前必查 `pgrep` + 日志头。
+3. G3 首轮 planned 是三连修：warm 调用参数顺序错（TypeError）、triton 3.4 的
+   `device_caches[device]` 是四元组（旧扫描只认 dict）、**block 被当线程数**（会产出
+   "occupancy 0%、SM 填不满"的假结论）——全部先在真机取证再改码。
+4. batch_sweep 只测 fp16：PORTFOLIO 的"量化衰减"占位符**不能硬填**，改写成实测的
+   fp16 曲线，量化 × batch 如实标回缺口——占位符的坑位要按实测能力重划，不是照抄模板。
+5. 数字回填必须连"未测"声明一起全库扫：评审抓到 4 处残留全是"某处还写着未测/没跑"
+   与新事实打架（含"P1-7"死引用）。
 
 ## [S1] Problem
 
@@ -109,7 +137,7 @@ README 顶部（现状行之后、"这个项目在问什么"之前）加一个 *
 - [x] T4: 工件 tar 回 Mac — acceptance: T2/T3 的 JSON 在本 checkout 内可读，内容完整 (covers: S2-A; depends: T2, T3)
 - [x] T5: 文档回填 — acceptance: RESULTS §6 / METRICS §6 / PORTFOLIO §2b / README 状态行 / HANDOFF 均按实测终态更新，每个数字带出处，`check_docs` 通过 (covers: S2-B; depends: T4)
 - [x] T6: README 投递导向首屏 — acceptance: 顶部 30 秒结论区（定位 + 关键词行 + 4 条 bullet 与 PORTFOLIO §2b 逐字一致 + 出处链接），原内容保留，`check_docs` 通过 (covers: S2-C; depends: T5) — **2026-10-10 上午提前完成**（不依赖 G2/G3；T5 回填状态行时勿覆盖本区块）
-- [ ] T7: 离线四门验证 — acceptance: `ruff` / `black` / `pytest -m "not gpu"` / `check_docs` 全绿，0 failed，命令与结果记入 Report (covers: S2-D; depends: T5, T6)
-- [ ] T8: 独立评审 — acceptance: 一个全新 subagent 给出 spec 合规 / 正确性 / 一致性三个独立结论，critical 为 0；有则修复并复审 (covers: S2-D; depends: T7)
+- [x] T7: 离线四门验证 — acceptance: `ruff` / `black` / `pytest -m "not gpu"` / `check_docs` 全绿，0 failed，命令与结果记入 Report (covers: S2-D; depends: T5, T6)
+- [x] T8: 独立评审 — acceptance: 一个全新 subagent 给出 spec 合规 / 正确性 / 一致性三个独立结论，critical 为 0；有则修复并复审 (covers: S2-D; depends: T7)
 - [ ] T9: 合回 main 并 push — acceptance: merge（非 rebase）完成，`origin/main` 包含全部提交，push 成功，工作区干净 (covers: S2-D; depends: T8)
 - [ ] T10: 投递文案定稿 + spec 交付 — acceptance: 产出与用户示例同构的最终文案（G2/G3 成功才加可选两条）；spec 置 `delivered` 并提交 (covers: S2-D; depends: T9)
