@@ -30,7 +30,7 @@ from benchmarks.bytes import ModelSpec, byte_budget, weight_budget
 # ★ 这是**实测值**，不是 datasheet 的 1792 —— AGENTS.md 硬规则 4。
 BW = 1559.2
 
-# OLMoE-1B-7B-0924 的**已核实** config（docs/MODELS.md §3.1）。
+# OLMoE-1B-7B-0924 的**已核实** config（docs/reference/MODELS.md §3.1）。
 # ★ `tie_word_embeddings: False` 不是细节：untied 的 lm_head 占 [W] 的 8.7%。
 #   把它写成 True 会让专家占比从 68.3% 变成 74.9% —— 这次就是被下面那条
 #   交叉核对测试抓出来的。所以这里走 `from_hf_config`，与 runner 同一条路径。
@@ -50,7 +50,7 @@ VERIFIED_OLMOE = {
 
 
 def olmoe_spec() -> ModelSpec:
-    """The **verified** OLMoE-1B-7B-0924 shape (docs/MODELS.md §3.1)."""
+    """The **verified** OLMoE-1B-7B-0924 shape (docs/reference/MODELS.md §3.1)."""
     return ModelSpec.from_hf_config(VERIFIED_OLMOE, name="allenai/OLMoE-1B-7B-0924")
 
 
@@ -122,7 +122,7 @@ def test_four_groups_sum_to_the_driven_total():
 
 
 def test_expert_share_matches_the_documented_68_percent():
-    """独立交叉核对：专家路径的理想量应当 ≈ [W] 的 68.3%（docs/METRICS.md §3.2）。
+    """独立交叉核对：专家路径的理想量应当 ≈ [W] 的 68.3%（docs/reference/METRICS.md §3.2）。
 
     这条把 `attribution.py` 与 `bytes.py` 两个模块钉在一起 —— 如果哪天
     `[W]` 的口径变了，这里会断，而不是让两份文档各说各话。

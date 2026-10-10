@@ -2,10 +2,10 @@
 
 ## 为什么需要它
 
-`docs/METRICS.md` §5 与审查清单都要求："算子融合后要重新评估 register / occupancy，
+`docs/reference/METRICS.md` §5 与审查清单都要求："算子融合后要重新评估 register / occupancy，
 否则可能引入新的瓶颈"。本项目的两个融合杠杆（fused RMSNorm、grouped MoE kernel）
 **至今没有 occupancy 数据** —— ncu 在这台宿主上被策略阻断
-（`RmProfilingAdminOnly: 1` + 容器无 `CAP_SYS_ADMIN`），见 `docs/NCU_EVIDENCE.md` §1。
+（`RmProfilingAdminOnly: 1` + 容器无 `CAP_SYS_ADMIN`），见 `docs/reference/NCU_EVIDENCE.md` §1。
 
 ## 它不是 ncu 的替代品
 
@@ -342,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
         "cross_round_comparison_allowed": False,
         "note": (
             "★ 所有数值都是 `kind=estimate` / `bound=upper` 的**解析上界**，不是 ncu 实测："
-            "测不到 stall / bank conflict / warp divergence（见 docs/NCU_EVIDENCE.md §1）。"
+            "测不到 stall / bank conflict / warp divergence（见 docs/reference/NCU_EVIDENCE.md §1）。"
             "`status=planned` 表示编译产物取不到 —— 那种情况下**没有产出任何数字**。"
         ),
     }

@@ -64,7 +64,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-# OLMoE-1B-7B-0924 的已核实形状（docs/MODELS.md §3.1）
+# OLMoE-1B-7B-0924 的已核实形状（docs/reference/MODELS.md §3.1）
 OLMOE = {"num_experts": 64, "hidden": 2048, "ffn": 1024, "top_k": 8, "layers": 16}
 
 # ncu 指标：kernel 级证据（见 lemoq.kernels.autotune 的清单）

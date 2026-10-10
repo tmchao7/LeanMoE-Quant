@@ -1,4 +1,4 @@
-"""test_stats — 统计口径（docs/METRICS.md §2）。
+"""test_stats — 统计口径（docs/reference/METRICS.md §2）。
 
 要点：
     - 必须报 p50/p99，**不得用 min-of-N** 当正式数字；

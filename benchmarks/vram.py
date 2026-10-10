@@ -1,4 +1,4 @@
-"""vram — 显存**分列**测量（`docs/METRICS.md` §4）。
+"""vram — 显存**分列**测量（`docs/reference/METRICS.md` §4）。
 
 规则：
     - **不得用 `nvidia-smi` 的总量当唯一数字**——它包含缓存与其它进程，无法定位是哪一项爆的；

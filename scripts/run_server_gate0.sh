@@ -117,7 +117,7 @@ else:
     print("  ✓ 无前置阻塞项")
 
 print()
-print("  下一步：把上面的 arch / 实测带宽 / 特性回填进 docs/SPECS.md §1，")
+print("  下一步：把上面的 arch / 实测带宽 / 特性回填进 docs/reference/SPECS.md §1，")
 print("         并把 stable 事实摘录进提交（results/ 本身是 gitignored 的）。")
 PYEOF
 GATE_RC=$?

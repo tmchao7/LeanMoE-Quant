@@ -901,7 +901,7 @@ def _run_isolated(args: Any) -> int:
         "ncu_blocked_by": None,
         "note": (
             "--isolated 这一段不用 ncu 计时（隔离计时取代了它），所以本轮既没有尝试"
-            "也没有被阻塞。计数器被宿主策略阻断的那条实测结论见 docs/NCU_EVIDENCE.md §2，"
+            "也没有被阻塞。计数器被宿主策略阻断的那条实测结论见 docs/reference/NCU_EVIDENCE.md §2，"
             "它是**在那台机器上**量出来的，不随本产物外推。"
         ),
     }

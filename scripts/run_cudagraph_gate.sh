@@ -199,7 +199,7 @@ for r in rows:
         f(r["kl"]), f(r["top1"]), f(r["p50"], "%.2f"), f(r["host%"], "%.1f")))
 
 print()
-print("  判据（见 docs/MOE_CUDAGRAPH.md §4）：")
+print("  判据（见 docs/reference/MOE_CUDAGRAPH.md §4）：")
 print("    p0-03 blocked + p0-04 通过 -> 预判成立，routing 的动态形状是阻塞点")
 print("    p0-03 也通过            -> 预判错了，HF 原版就够（但务必确认 KL/top1 真的过了）")
 print("    p0-04 也 blocked        -> 阻塞点不止 routing，看 failure 的 stage")

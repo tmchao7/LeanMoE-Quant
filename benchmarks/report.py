@@ -1,6 +1,6 @@
 """report — 把 `results/*/result.json` 汇总成可粘贴进 README 的 Markdown。
 
-规则（来自 `docs/METRICS.md` §5 与 Hoefler 的 12 条）：
+规则（来自 `docs/reference/METRICS.md` §5 与 Hoefler 的 12 条）：
 
     - **只报比值不算数**：加速比旁边必须给绝对值（ms/token）；
     - **报告全部点，包括输的**——不挑好看的；
@@ -180,9 +180,9 @@ def main(argv: list[str] | None = None) -> int:
     print("\n## 口径提醒\n")
     print(
         "- `[W]`（权重，与 ctx 无关）与 `[T]`（含 KV 读）是**两个分母**，不得混用"
-        "（docs/METRICS.md §3.2）"
+        "（docs/reference/METRICS.md §3.2）"
     )
-    print("- **host 占比是一等指标**：它决定量化收益的上限（docs/METRICS.md §2.1）")
+    print("- **host 占比是一等指标**：它决定量化收益的上限（docs/reference/METRICS.md §2.1）")
     print("- 未测的显示 `—`，不显示 0——`0` 是一个结论，`—` 才是未测")
     print("- 判据：`已实测` 需要 status=done **且** correctness.gate != FAIL")
 

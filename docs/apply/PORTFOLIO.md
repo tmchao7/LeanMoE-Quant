@@ -2,7 +2,7 @@
 
 > 用途：**投递与面试**。写简历时从这里挑句子，面试前用 §3 的三问自检。
 > 规矩不变：本文不引入任何新数字，每个数字都指向本仓库里的记录或工件；
-> 没测的东西一律写"未测"（与 [`RESULTS.md`](../RESULTS.md) §6 同一口径）。
+> 没测的东西一律写"未测"（与 [`RESULTS.md`](../../RESULTS.md) §6 同一口径）。
 > 生成时间：2026-10-09。
 
 ---
@@ -168,5 +168,5 @@ bash scripts/run_gpu_suite.sh --dry-run
 - **量化算法简单**：per-group 对称 **RTN**，没有 GPTQ/AWQ/校准集；卖点在**执行与评估闭环**，
   不在算法新颖度。
 - **ncu 计数拿不到**：宿主策略阻断（`RmProfilingAdminOnly: 1` + 无 `CAP_SYS_ADMIN`），
-  已交出替代口径（解析字节 / 隔离计时）但没有 stall / occupancy 归因（见 `docs/NCU_EVIDENCE.md`）。
+  已交出替代口径（解析字节 / 隔离计时）但没有 stall / occupancy 归因（见 `docs/reference/NCU_EVIDENCE.md`）。
 - **两条声明了但未跑的**：FP8 / MXFP4（矩阵里有条目，未跑）。

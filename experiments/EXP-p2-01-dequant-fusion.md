@@ -89,7 +89,7 @@ tol_atol = 1e-3 ; tol_rtol = 1e-3 ; tol_slack = 1.5
 2. **计时前查占用**：`nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader`。
    实测过外人进程把 ctx=4096 的 per-token 从 3.2356 ms 顶到 10.38 ms（host-share 67.5%）。
    发现占用先记录，不得去杀别人的进程。
-3. 报 p50/p99（`docs/METRICS.md` §2），并报 `dequant_share`（物化权重占单步时间的比例，
+3. 报 p50/p99（`docs/reference/METRICS.md` §2），并报 `dequant_share`（物化权重占单步时间的比例，
    由隔离微基准或 ncu 得到；`NCU_METRICS` 见 `lemoq.kernels.autotune`）。
 4. 带宽地板只用**实测** 1561.9 GB/s（`results/machine_probe.json`）。
 5. 报绝对值与比值（Hoefler 规则 #1）。
@@ -141,7 +141,7 @@ tol_atol = 1e-3 ; tol_rtol = 1e-3 ; tol_slack = 1.5
 ```
 
 **门槛不因结果改动**：K1 的 1e-3/1e-3/1.5、K2 的 0.01/0.05/0.95 全部来自
-`docs/METRICS.md` §1 与既有 kernel 的 PARITY_GATE。
+`docs/reference/METRICS.md` §1 与既有 kernel 的 PARITY_GATE。
 
 ## 6. 结果（2026-10-07，RTX 5090 32 GB，commit `e4a3803`）
 
@@ -171,7 +171,7 @@ fp16 scale（**部署口径**，`QuantLinear` 按字节账存 fp16）与 fp32 sc
 | 首尾金丝雀（`w8a16 × separate`，同格 `--force` 重跑） | p50 **190.8908 → 192.0597 ms**，相对差 **0.61%** ≪ 5% | ✅ **本轮有效** |
 | 金丝雀 p99 / 样本 | A: p99 200.77，min/max 189.19/204.42；B: p99 252.52，min/max **188.11/298.75**（1 个 ~299 ms 的 host 抖动） | 记录，不改判定（p50 与配对中位数稳健） |
 | 两臂计时方式 | **同进程、逐步 round-robin**（两臂交替走同一条 KV 流，按步号配对）；每臂 3 轮 × 20 步 = 60 样本 | ✅ K3.1 |
-| 首调 JIT 编译 | 单独记、**不计入稳态**：`separate` 格首调 fused=503.3 ms vs separate=202.8 ms（~300 ms 是 Triton 编译）；`fused` 格首调 fused=196.2 ms（编译已在前面的 warmup 相位完成） | ✅ `docs/METRICS.md` §2 |
+| 首调 JIT 编译 | 单独记、**不计入稳态**：`separate` 格首调 fused=503.3 ms vs separate=202.8 ms（~300 ms 是 Triton 编译）；`fused` 格首调 fused=196.2 ms（编译已在前面的 warmup 相位完成） | ✅ `docs/reference/METRICS.md` §2 |
 | 臂是否真的跑到 | `_measurement.dequant.activity`：`fused_calls=26,880`、`fallbacks={multi_token: 161,280}`（prefill 必然回退） | ✅ 不是"空对照" |
 
 ### 6.3 六个格子（`moe=hf` —— 矩阵未为 p2-01 声明 `config.moe`，见 §6.5）

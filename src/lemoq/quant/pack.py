@@ -2,7 +2,7 @@
 
 为什么需要它：
 
-    `docs/METRICS.md` §3.2 的 `[W]` 是在**打包后**的字节数上算的。若只算
+    `docs/reference/METRICS.md` §3.2 的 `[W]` 是在**打包后**的字节数上算的。若只算
     `params x bits / 8`，就漏掉了 per-group scale 的开销——那会让 W4 的收益被高估。
     本模块负责真实的位打包，`bit_cost()` 与 `benchmarks.bytes._quantized_bytes` 对齐。
 

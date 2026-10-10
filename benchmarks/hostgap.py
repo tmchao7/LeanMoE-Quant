@@ -1,6 +1,6 @@
 """hostgap — 把单步时间拆成 **GPU 时间 vs host/launch 开销**。
 
-为什么这是一等指标（`docs/METRICS.md` §2.1）：
+为什么这是一等指标（`docs/reference/METRICS.md` §2.1）：
 
     在 batch=1，`T_host` **不随量化下降**，所以量化对 token 延迟的收益被截断：
 
@@ -169,7 +169,7 @@ def measure_host_gap(
             "时会把 host 占比算成 0（实测：真值 ~93%，残差给出 0.0%）",
             "host_ms 仍是残差，不是直接测量；kernel 间重叠与 event 开销会摊进它",
             "profiler 自身有观测开销，但对'GPU 忙 vs 空闲'的量级判断足够稳健",
-            "nsys 不可用（本镜像未安装），故无法做第三方交叉验证（docs/METRICS.md 2）",
+            "nsys 不可用（本镜像未安装），故无法做第三方交叉验证（docs/reference/METRICS.md 2）",
         ],
     }
 

@@ -160,7 +160,7 @@ RESULT_SCHEMA: dict[str, dict[str, tuple[type, ...]]] = {
 SCOPE_NOT_APPLICABLE = (
     "服务/并发场景（单请求 batch=1 单流测量：无并发度、无 req/s、无吞吐-延迟曲线）—— "
     "本项目的数字不能用来推断线上服务能力；吞吐随 batch 的衰减未测"
-    "（见 docs/METRICS.md §6 G2）"
+    "（见 docs/reference/METRICS.md §6 G2）"
 )
 
 REQUIRED_TOP = (
@@ -198,7 +198,7 @@ PPL_STATUS_PATH = "results/PPL_STATUS.json"
 
 # 新 payload 自带的声明（与 `tools/ppl_status.REASON_NOT_MEASURED` 同一句）。
 PPL_NOT_MEASURED_NOTE = (
-    "未测：PPL 尚未写入本工件（`tools/quant_ppl.py` 已实现，见 docs/METRICS.md §6 待办 G5）。"
+    "未测：PPL 尚未写入本工件（`tools/quant_ppl.py` 已实现，见 docs/reference/METRICS.md §6 待办 G5）。"
     "现有 PPL 数字只存在于 EXP-p1-03 记录 §2 的表格里，不是工件级数据。"
 )
 
@@ -222,7 +222,7 @@ def load_ppl_index(path: str = PPL_STATUS_PATH) -> dict[str, Any]:
 def validate_ppl_declaration(payload: Any, ppl_index: dict[str, Any] | None = None) -> list[str]:
     """`ppl_*` 三个全 null 时，必须有声明（本 payload 的 `ppl_note` 或清单里的记录）。
 
-    ★ 为什么需要这条：`docs/METRICS.md` §1 把 PPL 列为带门槛的指标，而历史上 98 份
+    ★ 为什么需要这条：`docs/reference/METRICS.md` §1 把 PPL 列为带门槛的指标，而历史上 98 份
       result.json 的 `ppl_*` **全为 null 且没有任何说明** —— 那既可能是"未测"，也
       可能是"漏记"，读者分不出来。硬规则 1 要求未测的值显式写成未测。
     """

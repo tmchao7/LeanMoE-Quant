@@ -1,8 +1,8 @@
-"""task_accuracy — 任务级精度评估（**GPU 待执行**，见 docs/METRICS.md §6 G1）。
+"""task_accuracy — 任务级精度评估（**GPU 待执行**，见 docs/reference/METRICS.md §6 G1）。
 
 ## 为什么要它
 
-PPL 是 token 级聚合指标，`docs/METRICS.md` §1 自己就写了它对低比特区分度弱；
+PPL 是 token 级聚合指标，`docs/reference/METRICS.md` §1 自己就写了它对低比特区分度弱；
 KL 与 top-1 量的是"分布偏了多少"。三者都回答不了"这个模型还能不能用"。
 任务级精度（MMLU / GSM8K）才是那句话的直接证据。本仓库此前**零数据**。
 
@@ -93,7 +93,7 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
         "output": args.json or "results/task_accuracy.json",
         "acceptance": {
             "metric": "accuracy + 与 fp16 的 delta（百分点）",
-            "gate": "下降 < 2 个点（docs/METRICS.md §1；**自定建议值**）",
+            "gate": "下降 < 2 个点（docs/reference/METRICS.md §1；**自定建议值**）",
             "must_report": [
                 "样本量 n（子集，不是全量）",
                 "两口径 A 与 B 都报",

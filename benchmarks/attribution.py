@@ -116,7 +116,7 @@ def expert_path_accounting(
 ) -> dict[str, Any]:
     """MoE 专家路径的字节与 DRAM 下界，逐层与逐 token 都给出。
 
-    对齐 `docs/MOE_CUDAGRAPH.md` §3.3 与 p0-04 记录的附录：
+    对齐 `docs/reference/MOE_CUDAGRAPH.md` §3.3 与 p0-04 记录的附录：
 
         gate_up        (top_k, 2*ffn, hidden)
         down           (top_k, hidden, ffn)

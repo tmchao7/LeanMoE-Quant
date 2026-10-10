@@ -32,7 +32,7 @@
 
 ## 预判及其证据链
 
-预判写在 `docs/MOE_CUDAGRAPH.md`，依据：
+预判写在 `docs/reference/MOE_CUDAGRAPH.md`，依据：
 
 1. `EXP-p0-02` 的 profile：单步 `Memcpy DtoH` **恰好 1,024 次**，而
    `64 experts × 16 layers = 1,024`；
@@ -250,6 +250,6 @@ gather 额外流量 3.22 GB -> 2.07 ms    (读+写一遍专家权重)   <-- 见�
 原因：
   - 全部数字绑定在实测 1559.2 GB/s 与该机 launch 开销上；
   - "HF MoE 无法进 CUDA Graph" 是 transformers 4.57.6 实现的属性，不是 MoE 的属性 ——
-    上游若改用固定形状 routing，这个结论会失效（`docs/MOE_CUDAGRAPH.md` 有检测方法）；
+    上游若改用固定形状 routing，这个结论会失效（`docs/reference/MOE_CUDAGRAPH.md` 有检测方法）；
   - 15.73× 是**延迟**改善，不是吞吐改善；batch>1 时 launch 开销占比下降，收益会缩小。
 ```

@@ -3,7 +3,7 @@
 > ## ★ 更正（2026-10-06，由 [`EXP-p1-03`](EXP-p1-03-quant-mixed-bits.md) 给出）
 >
 > 本文所有 KL 都是用 `ids = torch.full((1, ctx), 1)` 测的 —— **1024 个 token id=1**，
-> 一段退化输入，而不是 `docs/METRICS.md` §1 写的"固定 prompt 集"。
+> 一段退化输入，而不是 `docs/reference/METRICS.md` §1 写的"固定 prompt 集"。
 > 换成真实文本后同一个配置的 KL **小 22–216 倍**：
 >
 > - **W8A16：本文的"9 格全 FAIL / 差 3–4 倍"是仪器效应。** 真实 prompt 上
@@ -38,7 +38,7 @@
 ```text
 假设（configs/experiments.yaml 原话）：位宽↓ → KL↑；group↓ → KL↓。
 
-门槛（docs/METRICS.md §1，**建议值**）：W8 KL < 0.01；W4 KL < 0.05；top-1 > 0.95。
+门槛（docs/reference/METRICS.md §1，**建议值**）：W8 KL < 0.01；W4 KL < 0.05；top-1 > 0.95。
 
 反证信号：W4 无法通过 KL 门槛 → 触发 REMEDIATION_LADDER。
 ```
@@ -107,7 +107,7 @@ W8 → W4 是 2× 的位宽变化，而 attention 上的 KL 从 0.027 跳到 4.2
 
 ## Method（为什么值得信）
 
-`docs/METRICS.md` 定义的是**逐位置** KL。而 free-running greedy 参照做不到：
+`docs/reference/METRICS.md` 定义的是**逐位置** KL。而 free-running greedy 参照做不到：
 一旦某一步 token 不同，后续位置比的就不是同一上下文。
 
 本实验两条臂都在**同一串 token** 上用 **teacher forcing** 收集 logits（`benchmarks/quant_gate.py`），
@@ -116,7 +116,7 @@ W8 → W4 是 2× 的位宽变化，而 attention 上的 KL 从 0.027 跳到 4.2
 ## Verdict
 
 ```text
-verdict:    FAIL（全部 9 格未过 docs/METRICS.md §1 的门槛）
+verdict:    FAIL（全部 9 格未过 docs/reference/METRICS.md §1 的门槛）
 outcome:    INCONCLUSIVE（不建议就此调用 REMEDIATION_LADDER）
 notes:
   1. 量化链路可用、字节账被核对、判据会失败 —— 这些已确证。

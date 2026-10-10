@@ -4,7 +4,7 @@
 （transformers 能否识别 olmoe、能否构建、能否前向）。
 
 在 Mac CPU 上用 tiny 随机权重，**不下载任何 checkpoint、不产出任何可报告数字**。
-真正的 0.5B / OLMoE 前向属于 Gate-0 的 B 组（见 docs/SERVER_RUNBOOK.md）。
+真正的 0.5B / OLMoE 前向属于 Gate-0 的 B 组（见 docs/reference/SERVER_RUNBOOK.md）。
 """
 
 from __future__ import annotations
@@ -84,7 +84,7 @@ def test_config_matches_verified_olmoe_fields():
 
 
 def test_greedy_decode_is_deterministic_on_cpu(tiny_model):
-    """CPU 上 greedy 应当可复现。GPU/bf16 的平局非确定性是已知例外（docs/SPECS.md §1.3）。"""
+    """CPU 上 greedy 应当可复现。GPU/bf16 的平局非确定性是已知例外（docs/reference/SPECS.md §1.3）。"""
     import torch
 
     model, _ = tiny_model

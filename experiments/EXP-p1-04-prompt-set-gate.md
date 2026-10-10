@@ -1,7 +1,7 @@
 # EXP-p1-04-prompt-set-gate
 
 > `EXP-p1-01` 的门是用 **1024 个 token id=1**（退化输入）测的；`EXP-p1-03` 用两个真实窗口
-> 发现 KL 小 20–200×。本条把门按 `docs/METRICS.md` §1 的原意（**固定 prompt 集上的
+> 发现 KL 小 20–200×。本条把门按 `docs/reference/METRICS.md` §1 的原意（**固定 prompt 集上的
 > 逐位置 KL 平均**）真正建起来：**5 个不重叠的真实窗口 + 1 个退化对照**，
 > 重测 `EXP-p1-01` 的全部 9 格（含 w8a8），并给出跨窗口的 mean/sd/min/max。
 >
@@ -43,7 +43,7 @@ METRICS.md §1 的门是"固定 prompt 集上的逐位置 KL 平均"。实现里
   （offset 0/1024/2048/3072/4096，每个 ctx=1024），+ 一个 `ones_control`（1024 个 token id=1）。
 - 每个窗口各自取 **fp16 贪心 32 步轨迹**，然后对该轨迹做 teacher forcing；KL 用唯一那个
   `compare_logits`。**臂之间不共享轨迹**（共享会引入前一个臂的偏差）。
-- **门**：`--kl-gate-w8 0.01 --kl-gate-w4 0.05 --top1-gate 0.95`（`docs/METRICS.md` §1 的值，
+- **门**：`--kl-gate-w8 0.01 --kl-gate-w4 0.05 --top1-gate 0.95`（`docs/reference/METRICS.md` §1 的值，
   以 CLI 参数形式显式传入，**本实验没有改动任何门槛**）。同时记录两个判据：
   `mean_pass`（METRICS 的口径）与 `all_windows_pass`（更严，额外信息）。
 - **自检**：每个窗口内插 3 个 noop 臂（恢复但不扰动）。**6 个窗口 × 3 = 18 次全部恰好 0.0**；
@@ -184,7 +184,7 @@ w4a16    |  0.0535 / 0.0789 / 0.0933      |  3.8966 / 3.8613 / 4.8388  |  ❌ FA
 - 4096 上 KL 均值掉到 **0.004606**（比 1024 的 0.032753 小 7.1×，且已在 0.01 门内）；
 - 但同一批窗口的 top-1 均值是 **0.9455 < 0.95**（其中两个窗口只有 0.8788）。
 
-按 `docs/METRICS.md` §1「KL **或** top-1 不达标 → 不报性能数字」，**`w8a8@4096` 的判定是 FAIL**
+按 `docs/reference/METRICS.md` §1「KL **或** top-1 不达标 → 不报性能数字」，**`w8a8@4096` 的判定是 FAIL**
 （合取）。这里必须显式记下一个陷阱：**只看 KL 就会把 `w8a8@4096` 判成 PASS**，
 从而允许它发表延迟 —— 那是放宽门。`benchmarks/runner.py` 的 `gate_from_metrics()`
 因此把两个判据写成合取，并由 `tests/test_runner_cells.py::

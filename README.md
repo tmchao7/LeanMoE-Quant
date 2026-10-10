@@ -24,7 +24,7 @@
 `experiments/<EXP-ID>.md`。**未做**：E5 专家敏感度、E6 KV INT8、E8 跨带宽（V100）、
 FP8/MXFP4、dense 曲线、batch 扫描。**ncu 性能计数器在本机被宿主策略阻断**
 （`RmProfilingAdminOnly: 1` + 容器无 `CAP_SYS_ADMIN`），已交出替代的 kernel 级证据：
-[docs/NCU_EVIDENCE.md](docs/NCU_EVIDENCE.md)。
+[docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md)。
 
 绝不把本机 Mac 的测试当成 GPU 实测；`results/` 是机器本地工件（gitignored），不进 git。
 
@@ -73,7 +73,7 @@ V100 上跑不了）；本项目需要"模型装得下 + 带宽越高越好"。�
 - **选卡铁律：带宽 > 显存**（OLMoE fp16 只有 13.84 GB，24 GB 已足够）。
 
 5090 有 `cp.async` / TMA / FP8 / MXFP4 block-scale，但 **40/50 系消费卡都没有 `wgmma`**
-（特性矩阵从本地 LLVM 谓词核实，见 [docs/SPECS.md](docs/SPECS.md) §2.1）。
+（特性矩阵从本地 LLVM 谓词核实，见 [docs/reference/SPECS.md](docs/reference/SPECS.md) §2.1）。
 所有结论必须声明适用区间。
 
 ## 目录
@@ -86,12 +86,11 @@ LeanMoE-Quant/
 ├── ENVIRONMENT.md           # 机器、环境、网络/镜像/代理、模型获取
 ├── EXPERIMENTS.md           # 实验记录格式与指标定义（强制）
 ├── docs/
-│   ├── SPECS.md             # 机器规格 + 跨代特性矩阵 + 选卡
-│   ├── MODELS.md            # 模型选型 + 已核实的 OLMoE 架构与字节预算
-│   ├── METRICS.md           # 指标口径（KL/PPL、[W]/[T]、达成率、host 占比）
-│   ├── NCU_EVIDENCE.md      # ★ kernel 级证据（计数器被阻断 + 替代口径）
-│   ├── figures/             # ★ 三张图（由 tools/make_figures.py 从工件生成）
-│   └── SERVER_RUNBOOK.md    # 服务器到手后的命令序列
+│   ├── README.md             # 文档地图（docs/ 下每份文档给谁看）
+│   ├── handoff/              # 交接：当前唯一权威摘要
+│   ├── reference/            # 查证：SPECS / MODELS / METRICS / NCU_* / MOE_CUDAGRAPH / RUNBOOK
+│   ├── apply/                # 投递：PORTFOLIO（简历 bullet + 面试三题）
+│   └── figures/              # ★ 三张图（由 tools/make_figures.py 从工件生成）
 ├── configs/
 │   ├── models.yaml          # 模型清单（唯一来源）
 │   ├── experiments.yaml     # 声明式实验矩阵（harness 读它展开）
@@ -108,7 +107,7 @@ LeanMoE-Quant/
 ## 快速开始
 
 环境与基线准备见 [ENVIRONMENT.md](ENVIRONMENT.md)，服务器上机序列见
-[docs/SERVER_RUNBOOK.md](docs/SERVER_RUNBOOK.md)。核心命令：
+[docs/reference/SERVER_RUNBOOK.md](docs/reference/SERVER_RUNBOOK.md)。核心命令：
 
 ```bash
 uv venv -p 3.12 .venv && uv pip install -e ".[dev]"
@@ -123,5 +122,5 @@ uv run python -m tools.probe_machine --json results/machine_probe.json
 - **不得用"逐 token 严格相等"**作门槛——bf16 greedy 在 logit 平局处是非确定性的；
 - **一次一个变量**；跨阶段数字不可混比；
 - **实测可达带宽**用于算理论下限，不用规格值；
-- **必须报 host/kernel 拆分**——只报加速比无法解释（见 [docs/METRICS.md](docs/METRICS.md) §2.1）；
+- **必须报 host/kernel 拆分**——只报加速比无法解释（见 [docs/reference/METRICS.md](docs/reference/METRICS.md) §2.1）；
 - 负结果同样记录——本项目的一半价值在"量化在 MoE 上到底能走多远"的边界。

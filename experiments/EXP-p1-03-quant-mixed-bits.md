@@ -3,7 +3,7 @@
 > 混合位宽（`REMEDIATION_LADDER` 第 4 档）+ 第二个指标（PPL）。
 >
 > **这条实验最重要的结果不是混合位宽，而是一个仪器缺陷**：`EXP-p1-01` 的 KL 门是用
-> **1024 个 token id=1** 当 prompt 测的（`docs/METRICS.md` 说的是"固定 prompt 集"），
+> **1024 个 token id=1** 当 prompt 测的（`docs/reference/METRICS.md` 说的是"固定 prompt 集"），
 > 那是一段退化输入。换成真实文本后，同一个配置的 KL **小 20–216 倍**，
 > W8A16 的判定从 FAIL 翻成 PASS。见 §3。
 
@@ -62,7 +62,7 @@
 
 ## 2. 第二个指标：PPL + 配对 ΔNLL（`tools/quant_ppl.py`，新实现）
 
-`docs/METRICS.md` §1 从 Phase 1 就把 PPL 列为指标（门槛：相对退化 <1%），但仓库里
+`docs/reference/METRICS.md` §1 从 Phase 1 就把 PPL 列为指标（门槛：相对退化 <1%），但仓库里
 **从来没有实现过** —— 之前每个 `result.json` 的 `ppl_fp16/ppl_this/ppl_delta` 都是 `null`。
 本条补上它，并按配对方式报：
 
@@ -101,7 +101,7 @@
 
 ## 3. ★ 仪器缺陷：KL 门是用**退化 prompt** 测的
 
-`docs/METRICS.md` §1 写的是"**固定 prompt 集**上的逐位置 KL"。而
+`docs/reference/METRICS.md` §1 写的是"**固定 prompt 集**上的逐位置 KL"。而
 `benchmarks/quant_gate.py` / `tools/quant_accuracy_gate.py` 一直在用
 
 ```python

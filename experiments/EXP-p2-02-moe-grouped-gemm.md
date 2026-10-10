@@ -243,7 +243,7 @@ notes:
 
   但**收益预测错了 42%**，原因是字节账把"额外搬运的字节"当成"额外 DRAM 流量"：
   gather 臂实测跑在它自己 DRAM 下界的 120.8%，即副本大部分留在 L2。
-  这条要写进 docs/METRICS.md 的口径里，否则会被下一轮重犯。
+  这条要写进 docs/reference/METRICS.md 的口径里，否则会被下一轮重犯。
 ```
 
 ## Follow-ups

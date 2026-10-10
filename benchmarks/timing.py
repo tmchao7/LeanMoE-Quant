@@ -1,4 +1,4 @@
-"""timing — 计时与统计口径（`docs/METRICS.md` §2）。
+"""timing — 计时与统计口径（`docs/reference/METRICS.md` §2）。
 
 口径要求（不得妥协）：
 
@@ -186,6 +186,6 @@ def record_compile_time(fn: Callable[[], Any]) -> dict[str, Any]:
     return {
         "compile_or_autotune_ms": (time.perf_counter() - t0) * 1000.0,
         "excluded_from_steady_state": True,
-        "note": "docs/METRICS.md 2: JIT/autotune first-compile time is recorded separately",
+        "note": "docs/reference/METRICS.md 2: JIT/autotune first-compile time is recorded separately",
         "result_repr": repr(result)[:200],
     }

@@ -2,7 +2,7 @@
 
 ## 为什么不用现有的 free-running 参照
 
-`docs/METRICS.md` §1 的定义是"**逐位置** KL" —— 同一个位置上，量化配置与 fp16
+`docs/reference/METRICS.md` §1 的定义是"**逐位置** KL" —— 同一个位置上，量化配置与 fp16
 参考的 logits 分布之差。
 
 而 `benchmarks.runner._eager_reference_logits` 是 **free-running greedy**：它喂给
@@ -20,7 +20,7 @@
 
 ## 门槛来自文档，不是这里发明的
 
-`docs/METRICS.md` §1：W8 KL < 0.01、W4 KL < 0.05、top-1 > 0.95（**建议值**）。
+`docs/reference/METRICS.md` §1：W8 KL < 0.01、W4 KL < 0.05、top-1 > 0.95（**建议值**）。
 本模块**照抄**这三个数，一个都不放宽 —— 不达标就记 FAIL 并触发
 `lemoq.quant.REMEDIATION_LADDER`。**agent 不得放宽正确性门。**
 """
@@ -38,13 +38,13 @@ __all__ = [
 ]
 
 
-# docs/METRICS.md §1 的原话：W8 ≈ <0.01；W4 ≈ <0.05；top-1 >0.95。
+# docs/reference/METRICS.md §1 的原话：W8 ≈ <0.01；W4 ≈ <0.05；top-1 >0.95。
 # ★ 这三个数是**文档里的建议值**，不是本文件调的。改它们要改文档并说明理由。
 QUANT_THRESHOLDS: dict[str, Any] = {
     "kl_w8_max": 0.01,
     "kl_w4_max": 0.05,
     "top1_min": 0.95,
-    "source": "docs/METRICS.md §1（建议值，需按实测调整；调整必须单独成 commit）",
+    "source": "docs/reference/METRICS.md §1（建议值，需按实测调整；调整必须单独成 commit）",
 }
 
 

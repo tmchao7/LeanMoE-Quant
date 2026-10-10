@@ -1,8 +1,8 @@
-"""batch_sweep — batch 扫描（**GPU 待执行**，见 docs/METRICS.md §6 G2）。
+"""batch_sweep — batch 扫描（**GPU 待执行**，见 docs/reference/METRICS.md §6 G2）。
 
 ## 为什么它单独存在
 
-`docs/METRICS.md` §2 声明了 `throughput @ batch ∈ {1,2,4,8}` 作为次要指标
+`docs/reference/METRICS.md` §2 声明了 `throughput @ batch ∈ {1,2,4,8}` 作为次要指标
 （"用于展示量化收益随 batch 的衰减"），但已落盘的 98 份 `result.json` 里
 **`config.batch` 全是 1** —— 零条数据。本工具补这一格。
 

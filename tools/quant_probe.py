@@ -687,7 +687,7 @@ def aggregate_windows(
         top1s = [v["top1_agreement"] for v in real.values() if v.get("top1_agreement") is not None]
         ones_kl = next((v.get("kl") for k, v in rows.items() if k.startswith("ones")), None)
         # ★ top-1 的**均值**必须写进工件：runner 的引用门（`gate_from_metrics`）用的
-        #   就是均值（docs/METRICS.md §1 的合取口径），而此前工件里只有 `top1_min`。
+        #   就是均值（docs/reference/METRICS.md §1 的合取口径），而此前工件里只有 `top1_min`。
         #   于是"引用门的那个数"只能靠人手抄进 `GATE_CITATIONS` —— 工件自己既
         #   不自洽也不能自检。逐窗口的**最小值**仍保留，但只是额外信息：按下限判门
         #   会让 w8a16（有一个窗口 0.9394 < 0.95）也过不了，与 p1-04 已记录的
@@ -831,7 +831,10 @@ def main(argv: list[str] | None = None) -> int:
         help="再挂一个退化对照（1024 个 token id=1），用于并排展示 EXP-p1-01 的口径",
     )
     ap.add_argument(
-        "--kl-gate-w8", type=float, default=0.01, help="docs/METRICS.md §1 的门槛，不在本工具里改"
+        "--kl-gate-w8",
+        type=float,
+        default=0.01,
+        help="docs/reference/METRICS.md §1 的门槛，不在本工具里改",
     )
     ap.add_argument("--kl-gate-w4", type=float, default=0.05, help="同上")
     ap.add_argument("--top1-gate", type=float, default=0.95, help="同上")

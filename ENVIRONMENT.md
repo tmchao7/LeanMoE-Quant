@@ -1,7 +1,7 @@
 # ENVIRONMENT — 机器、环境、网络与模型获取
 
 > 本文是**环境层**的权威说明。计划见 [PLAN.md](PLAN.md)，记录格式见
-> [EXPERIMENTS.md](EXPERIMENTS.md)，服务器上机步骤见 [docs/SERVER_RUNBOOK.md](docs/SERVER_RUNBOOK.md)。
+> [EXPERIMENTS.md](EXPERIMENTS.md)，服务器上机步骤见 [docs/reference/SERVER_RUNBOOK.md](docs/reference/SERVER_RUNBOOK.md)。
 
 **规则按机器分列。** 不要把一台机器的约束套到另一台上——租的机器我们全权掌控，
 学校机器是共享的，Mac 只是文档与 CPU 逻辑验证。
@@ -23,7 +23,7 @@
 5090 是本项目能拿到的、唯一同时具备 `cp.async` + TMA + FP8 + **MX block-scale（MXFP4/NVFP8）**
 的档位，且带宽 1792 GB/s 约为 V100 的 2 倍。
 
-**特性矩阵（从本地 LLVM NVPTX 谓词核实，见 [docs/SPECS.md](docs/SPECS.md) §2.1）**：
+**特性矩阵（从本地 LLVM NVPTX 谓词核实，见 [docs/reference/SPECS.md](docs/reference/SPECS.md) §2.1）**：
 `cp.async` ✅ / TMA ✅ / FP8 ✅ / **MXFP4 block-scale ✅** / bf16 ✅ / **`wgmma` ❌**。
 `wgmma` 门在 `SM90a`，**40 系和 50 系消费卡都没有**。
 
@@ -161,7 +161,7 @@ hf download Qwen/Qwen2.5-0.5B             # dev / --dry-run / Mac CPU 冒烟
 
 ## 4. 上机清单
 
-完整命令序列见 [docs/SERVER_RUNBOOK.md](docs/SERVER_RUNBOOK.md)。**Gate-0** 是最先做的一步。
+完整命令序列见 [docs/reference/SERVER_RUNBOOK.md](docs/reference/SERVER_RUNBOOK.md)。**Gate-0** 是最先做的一步。
 
 **Gate-0 A. 设备事实（写 `results/machine_probe.json`）**
 
@@ -184,7 +184,7 @@ hf download Qwen/Qwen2.5-0.5B             # dev / --dry-run / Mac CPU 冒烟
 > ⚠️ **更正**：此前这里写的是"与 HF 参考**逐 token 对齐**（greedy，同输入同输出）"。
 > **在 bf16 下这个门槛不成立**——bf16 greedy decode 在 logit 平局处是**非确定性**的，
 > 会随机失败并让你追一个不存在的 bug。正确门槛是 **KL 散度 + top-1 一致率**
-> （见 [docs/METRICS.md](docs/METRICS.md) §1），不要用严格逐 token 相等。
+> （见 [docs/reference/METRICS.md](docs/reference/METRICS.md) §1），不要用严格逐 token 相等。
 
 **Gate-0 C. 计时与显存口径**
 

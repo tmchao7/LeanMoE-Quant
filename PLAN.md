@@ -24,7 +24,7 @@
 2. 反量化（dequant）**必须与 GEMM 融合**，否则中间张量的写+读会吃掉大部分收益；
 3. MoE 上存在一个**量化收益上限**：专家权重的字节可以降到 1/4，但**路由与打包开销不随量化下降**；
 4. **★ 量化对 token 延迟的收益被 host/launch 开销截断**——字节降到 1/4 并不等于 token 快 4 倍，
-   除非同时消除 launch 开销（CUDA Graph）。这条是 v0.2 新增，见 [docs/METRICS.md](docs/METRICS.md) §2.1。
+   除非同时消除 launch 开销（CUDA Graph）。这条是 v0.2 新增，见 [docs/reference/METRICS.md](docs/reference/METRICS.md) §2.1。
 
 **与 MegaKernel-vLLM 的闭环**：那个项目证明了"融合不省字节 →、且执行层已经贴着 HBM 墙（cudagraph 纯 kernel 是墙的 1.06×），唯一能赚的是消掉 host 开销 → 得到 1.3×"；本项目回答"**那么什么才省字节**"，并量化"省下的字节为什么没完全兑现成速度"。
 
@@ -61,7 +61,7 @@ UMA 上"把专家卸载到主机内存"是空操作。所以端侧叙事属于�
 | 多卡 | 1 卡 | 单卡课题，**不要碰多卡** |
 | 计费 | 按量 ≈¥3/h，**非抢占式** | 磁盘可保留 → 配置税只付一次 |
 
-完整特性矩阵（从本地 LLVM 谓词核实）见 [docs/SPECS.md](docs/SPECS.md) §2.1。
+完整特性矩阵（从本地 LLVM 谓词核实）见 [docs/reference/SPECS.md](docs/reference/SPECS.md) §2.1。
 
 ### 1.2 第二数据点（免费）：学校 V100 32 GB（sm_70）
 
@@ -133,12 +133,12 @@ OLMoE fp16 只有 13.84 GB，**24 GB 已足够**；而本项目主指标是带�
 | OLMoE-1B-7B | 16 | 2048 | 64 | 8 | 1024 | 6.92B | 1.18B | 13.84 GB | **2.358 GB** |
 | Qwen3-30B-A3B | 48 | 2048 | 128 | 8 | 768 | 30.52B | 3.34B | 61.0 GB | 3.85 GB |
 
-> **两行都已核实来源**：OLMoE 一行由 `config.json` 逐项推导（过程见 [docs/MODELS.md](docs/MODELS.md) §3.1–§3.2）；
+> **两行都已核实来源**：OLMoE 一行由 `config.json` 逐项推导（过程见 [docs/reference/MODELS.md](docs/reference/MODELS.md) §3.1–§3.2）；
 > Qwen3-30B-A3B 来自 HF 模型卡 + config 推导（见 MegaKernel-vLLM docs/16 §1.2）。
 >
 > ⚠️ **"权重字节/token"不含 KV**。这是**权重字节 `[W]`**，与 context 无关；
 > 决定实测延迟的总字节 `[T] = [W] + KV 读` 随 ctx 变化（OLMoE @4K 时 KV 占 `[T]` 的 18.5%）。
-> 两个口径的定义与各自的达成率公式见 [docs/METRICS.md](docs/METRICS.md) §3.2。**历史上此处曾漏标，
+> 两个口径的定义与各自的达成率公式见 [docs/reference/METRICS.md](docs/reference/METRICS.md) §3.2。**历史上此处曾漏标，
 > 导致"2.25 GB @8K ctx"被误读；现已显式区分。**
 
 ---
@@ -148,8 +148,8 @@ OLMoE fp16 只有 13.84 GB，**24 GB 已足够**；而本项目主指标是带�
 | 优先级 | 技术 | 目标 | 备注 |
 |---|---|---|---|
 | ⭐⭐⭐ | **W4A16 / W8A8 权重量化 + 自写 dequant-GEMM 融合 kernel** | 降低 `[W]`（专家权重占 68.3%） | Triton 先（迭代快、可跨卡复用源码），CUDA 后（kernel 质量对照） |
-| ⭐⭐ | **量化 lm_head 的取舍决策** | `[W]` 的 8.7% | OLMoE 的 lm_head **untied**，必须完整流一遍。保留 fp16 vs 量化，**必须显式记录**（docs/MODELS.md §4.4） |
-| ⭐ | **KV Cache 量化（INT8）** | **带宽**，不是显存 | ⚠️ 已下调：主配置下 KV 池仅 0.5 GiB（占权重 3.6%），@4K 占流量 18.5%、INT8 后约省 9%。**batch=1 下不是主杠杆**（docs/MODELS.md §3.2） |
+| ⭐⭐ | **量化 lm_head 的取舍决策** | `[W]` 的 8.7% | OLMoE 的 lm_head **untied**，必须完整流一遍。保留 fp16 vs 量化，**必须显式记录**（docs/reference/MODELS.md §4.4） |
+| ⭐ | **KV Cache 量化（INT8）** | **带宽**，不是显存 | ⚠️ 已下调：主配置下 KV 池仅 0.5 GiB（占权重 3.6%），@4K 占流量 18.5%、INT8 后约省 9%。**batch=1 下不是主杠杆**（docs/reference/MODELS.md §3.2） |
 | ⭐ | **算子融合**（RMSNorm+RoPE、SwiGLU、decode attention） | 减少中间张量读写与 launch | 是"锦上添花"，**不要当主杠杆** |
 
 ### 3.1 反量化必须融合（本项目的核心技术判断）
@@ -218,7 +218,7 @@ OLMoE fp16 只有 13.84 GB，**24 GB 已足够**；而本项目主指标是带�
 | **7** | 文档与复现：README、实验记录、图表、已知限制 | 可复现的仓库 | 2 天 |
 
 > ⚠️ **阶段 0 的正确性门槛不用"逐 token 严格相等"**：bf16 greedy decode 在 logit 平局处
-> **是非确定性的**（见 [docs/SPECS.md](docs/SPECS.md) §1.3）。用 **KL 散度 + top-1 一致率**。
+> **是非确定性的**（见 [docs/reference/SPECS.md](docs/reference/SPECS.md) §1.3）。用 **KL 散度 + top-1 一致率**。
 
 > ⚠️ **阶段 2 设超时 25 GPU 小时**。若融合 kernel 到那时未达实测可达带宽的 70%，
 > **切兜底方案**：用现成融合 kernel（vLLM/torchao）当"已融合"臂，把贡献转落到
@@ -240,13 +240,13 @@ OLMoE fp16 只有 13.84 GB，**24 GB 已足够**；而本项目主指标是带�
 |---|---|---|
 | **精度** | ① **KL 散度**（logits，主）② PPL 退化 ③ 任务级（GSM8K/MMLU 小子集）④ top-1 一致率 | KL 不受采样策略影响，是量化文献标准主指标 |
 | **延迟** | TTFT p50/p99、**per-token p50/p99 @ batch=1** | 本项目主指标；必须报 p99，不能只报均值 |
-| **归因** | **host/launch 占比 ★**、dequant 占比、路由占比、实测可达带宽、带宽达成率 | **host 占比是一等指标**：它决定量化收益的上限（docs/METRICS.md §2.1） |
+| **归因** | **host/launch 占比 ★**、dequant 占比、路由占比、实测可达带宽、带宽达成率 | **host 占比是一等指标**：它决定量化收益的上限（docs/reference/METRICS.md §2.1） |
 | **显存** | **权重 / KV / 激活 分列** + 峰值 | 用 allocator 峰值而非 nvidia-smi；分列才能定位爆点 |
 | **归因** | **dequant 开销占总步时间比例**、**实测可达带宽**、**带宽达成率** | 本项目最该报的"深度指标" |
 | **边界** | batch 扫描 1/2/4/8、context 扫描 | 量化在 batch=1 最赚，大 batch 可能被 dequant 拖累 |
 
 **带宽达成率**（把两个项目连起来的物理口径）——**完整定义与两个分母见
-[docs/METRICS.md](docs/METRICS.md) §3.2**：
+[docs/reference/METRICS.md](docs/reference/METRICS.md) §3.2**：
 
 ```text
 [W] = 权重字节/token     （不含 KV，与 ctx 无关）—— 量化的直接杠杆
@@ -284,7 +284,7 @@ OLMoE fp16 只有 13.84 GB，**24 GB 已足够**；而本项目主指标是带�
   3–4×）。**这是简历上最值钱的一条**，因为它不是"我快了多少"，而是"我解释了一个现象"。
 
 > ⚠️ **context 上限约束**：OLMoE-1B-7B-0924 的 `max_position_embeddings = 4096`
-> （见 [docs/MODELS.md](docs/MODELS.md) §3.3）。因此 **E3/E5/E6 的 context 扫描上限是 4K**，
+> （见 [docs/reference/MODELS.md](docs/reference/MODELS.md) §3.3）。因此 **E3/E5/E6 的 context 扫描上限是 4K**，
 > 不能用 8K。若确实需要长 ctx 数据点，必须换模型并标注**不可与 OLMoE 混比**。
 
 ---
@@ -376,13 +376,13 @@ LeanMoE-Quant/
 
 **已完成（2026-09，已核实来源见对应文档）**
 
-- [x] OLMoE 架构数字 —— `config.json` 逐项推导，见 [docs/MODELS.md](docs/MODELS.md) §3.1
+- [x] OLMoE 架构数字 —— `config.json` 逐项推导，见 [docs/reference/MODELS.md](docs/reference/MODELS.md) §3.1
 - [x] OLMoE 每-token 字节预算（fp16）→ `[W] = 2,357,723,136 B`，专家占 68.3%
 - [x] OLMoE 仓库名 = `allenai/OLMoE-1B-7B-0924`（**`-0924` 必需**），3 shard = 13,838,721,960 B
 - [x] OLMoE `max_position_embeddings = 4096` → context 扫描上限 4K
 - [x] OLMoE `tie_word_embeddings = false` → lm_head 独立，占 `[W]` 的 8.7%
 - [x] 跨代特性矩阵（V100/4090/5090/H100）—— 本地 LLVM NVPTX 谓词核实，
-      含"40/50 系都没有 `wgmma`"、"5090 独有 MX block-scale"，见 [docs/SPECS.md](docs/SPECS.md) §2.1
+      含"40/50 系都没有 `wgmma`"、"5090 独有 MX block-scale"，见 [docs/reference/SPECS.md](docs/reference/SPECS.md) §2.1
 - [x] 目标栈轮子可用性：`torch==2.14.0` 在 cpu/cu130/cu132/cu128 均有 cp312 轮子；
       Mac CPU 轮子已实装并验证（`.venv-mac/`）
 - [x] Mac 环境更正：`uv 0.11.25` 已装且在 PATH；miniforge3 Python 3.13.13；

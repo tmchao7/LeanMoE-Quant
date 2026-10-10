@@ -163,7 +163,7 @@ bmm 再读一遍                     ~1.5 GiB
 
 **但它不是终局。** Phase 2 的 grouped GEMM（Triton）在 kernel 内直接由专家 id 算指针，
 **没有 gather 拷贝** —— 这条路已由 `EXP-p2-02` 走通（1.293x，同路径 KL 恰好 0），
-见 [EXP-p2-02](../experiments/EXP-p2-02-moe-grouped-gemm.md)。
+见 [EXP-p2-02](../../experiments/EXP-p2-02-moe-grouped-gemm.md)。
 `moe_static` 因此确定是**正确性参照 + 可行性门**，不是最终性能形态。
 
 ---

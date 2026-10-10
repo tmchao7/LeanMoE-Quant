@@ -275,7 +275,7 @@ def warm(
 ) -> None:
     """JIT 编译一次并做一次真实 launch（capture 之前必须调用）。
 
-    ★ 首次编译时间**不得**计入稳态数字（`docs/METRICS.md` §2）——
+    ★ 首次编译时间**不得**计入稳态数字（`docs/reference/METRICS.md` §2）——
     `benchmarks.timing.record_compile_time` 就是为它准备的。
     """
     dequant_gemm_fused(x, qweight, scale, zero, **kwargs)

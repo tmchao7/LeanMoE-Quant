@@ -75,7 +75,7 @@ ncu --version
 - 汇总进 `results/ncu_evidence/isolated.json` 的同级 `ncu_real.json`，并把
   `isolated.json` 的 `ncu.ncu_attempted` 从 `false` 改成 `true`、
   `ncu_blocked_by` 填**本轮**实测到的原因（不要再抄别的机器的值）；
-- 更新 `docs/NCU_EVIDENCE.md`：把"替代口径"与"实测口径"并列，说明两者差多少。
+- 更新 `docs/reference/NCU_EVIDENCE.md`：把"替代口径"与"实测口径"并列，说明两者差多少。
 
 ## 5. 不要做的事
 

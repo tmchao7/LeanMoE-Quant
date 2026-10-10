@@ -167,8 +167,8 @@ Gate-0 探测到 `sm_89` 时自动去掉 TMA/MXFP4 臂；探测到 `sm_86` 时�
 > 选卡的判据是**带宽与架构特性**，不是显存（见 §2.2）。
 
 `OLMoE-1B-7B-0924` 的架构数字已由 `config.json` 逐项核实（见
-[docs/MODELS.md](MODELS.md) §3.1）；`Qwen3-30B-A3B` 引自
-[MegaKernel-vLLM docs/16](../../MegaKernel-vLLM/docs/16_MoE_A100可行性调研.md)；
+[docs/reference/MODELS.md](MODELS.md) §3.1）；`Qwen3-30B-A3B` 引自
+[MegaKernel-vLLM docs/16](../../../MegaKernel-vLLM/docs/16_MoE_A100可行性调研.md)；
 其余为按参数量与 2 B/参数的算术推演。
 
 ⚠️ `Qwen3-30B-A3B` 的 32GB 可行性此前记为"❌ 装不下"。该结论取决于假定的 KV 池与 ctx，

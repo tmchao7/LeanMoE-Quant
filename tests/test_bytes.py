@@ -1,6 +1,6 @@
 """test_bytes — 字节预算是全项目的物理口径，因此必须**锁死**。
 
-锚点（已核实，见 docs/MODELS.md §3.1–§3.2）：
+锚点（已核实，见 docs/reference/MODELS.md §3.1–§3.2）：
     OLMoE-1B-7B-0924 总参数            6,919,028,736
     激活/token（不含 embedding）        1,178,861,568
     [W] fp16 权重字节/token             2,357,723,136
@@ -8,8 +8,8 @@
     KV 读 @1K / @4K                     134,217,728 / 536,870,912
     KV 占 [T] @1K / @4K                 5.4% / 18.5%
 
-**任何改动若打破这些数字，必须解释**——它们是把 PLAN.md / docs/MODELS.md /
-docs/METRICS.md 串起来的唯一定量依据。
+**任何改动若打破这些数字，必须解释**——它们是把 PLAN.md / docs/reference/MODELS.md /
+docs/reference/METRICS.md 串起来的唯一定量依据。
 """
 
 from __future__ import annotations
@@ -172,5 +172,5 @@ def test_attainments_refuse_to_divide_by_zero(olmoe_config):
 
 
 def test_oltmoe_max_position_embeddings_is_4096(olmoe_config):
-    """context 扫描上限据此确定 —— 防止有人再写 8K（docs/MODELS.md §3.3）。"""
+    """context 扫描上限据此确定 —— 防止有人再写 8K（docs/reference/MODELS.md §3.3）。"""
     assert olmoe_config["max_position_embeddings"] == 4096

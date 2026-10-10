@@ -72,8 +72,9 @@ settled — do not re-derive them and do not re-run their cells:
 
 Read, in this order: **`RESULTS.md`** (the one-page result with a citation per number),
 **`configs/experiments.yaml`** (the only source of hypotheses and cells), the **record** of the
-experiment you are about to touch (`experiments/<EXP-ID>.md`), then **`docs/HANDOFF_P2_FUSION.md`**
-(historical — the Phase-2 handoff, kept because its blocked-path reasoning is still accurate).
+experiment you are about to touch (`experiments/<EXP-ID>.md`), then
+**`docs/handoff/HANDOFF_2026-10-10.md`** (the current state summary; superseded handoffs are
+deleted — history lives in git).
 
 Two rules come before everything else: **do not redo what §3 lists as done**, and **ask the user**
 before changing a matrix axis, a cell id, or overwriting a recorded `result.json` (§6).
@@ -100,7 +101,7 @@ in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`
    `to be evaluated` — never as achieved speedups. Negative and null results are reported too.
 2. **Correctness gate before performance.** A performance number may only be published for a
    configuration whose KL divergence / top-1 agreement against the fp16 reference has passed
-   the thresholds in `docs/METRICS.md`. A faster-but-different model is a failed experiment.
+   the thresholds in `docs/reference/METRICS.md`. A faster-but-different model is a failed experiment.
 3. **One variable per experiment.** Never change bit-width, group size, and fusion strategy in
    the same run. A combined run is allowed only *after* the individual effects are known, and
    must be labelled `combined`.
@@ -141,7 +142,7 @@ in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`
 | E4 routing overhead | done — **supported**: 44.2% of GPU busy, and **quantization-invariant** (4.478/4.512/4.526/4.555 ms for fp16/w8a16/w8a8/w4a16) | `experiments/EXP-p4-01-moe-routing-overhead.md` |
 | The elementwise/copy tail (0.90 ms, "~330 kernels") | done — classified: it is **~13 named families × 16–83 calls/step**, not a flat tail; module-level attribution VOID (its own K1 failed) | `experiments/EXP-p4c-02-elementwise-tail.md` |
 | E5 expert sensitivity, E6 KV INT8, E8 cross-bandwidth, FP8/MXFP4, dense curves, batch sweep | **not run** | `configs/experiments.yaml`, `PLAN.md` §7 |
-| ncu evidence (a Phase 2 deliverable) | **partly delivered 2026-10-08** — the counter path is **blocked by the host** (`RmProfilingAdminOnly: 1` + no `CAP_SYS_ADMIN` in the container; even the counter-free `gpu__time_duration.sum` is refused). Substitute delivered: kernel/call-level bandwidth attainment from hand-computed necessary bytes ÷ isolated cold timing ÷ measured achievable bandwidth, with an L2 flush and an explicit event-floor subtraction. Headline: fp16 grouped GEMV **71.0%** of the wall, fused dequant-GEMM **94.9%**, and the expert GEMV alone accounts for **90%** of E7's step-level saving. Missing: stall/occupancy attribution | `docs/NCU_EVIDENCE.md`, `results/ncu_evidence/isolated.json`, `tools/ncu_evidence.py` |
+| ncu evidence (a Phase 2 deliverable) | **partly delivered 2026-10-08** — the counter path is **blocked by the host** (`RmProfilingAdminOnly: 1` + no `CAP_SYS_ADMIN` in the container; even the counter-free `gpu__time_duration.sum` is refused). Substitute delivered: kernel/call-level bandwidth attainment from hand-computed necessary bytes ÷ isolated cold timing ÷ measured achievable bandwidth, with an L2 flush and an explicit event-floor subtraction. Headline: fp16 grouped GEMV **71.0%** of the wall, fused dequant-GEMM **94.9%**, and the expert GEMV alone accounts for **90%** of E7's step-level saving. Missing: stall/occupancy attribution | `docs/reference/NCU_EVIDENCE.md`, `results/ncu_evidence/isolated.json`, `tools/ncu_evidence.py` |
 
 **Do not redo** (recorded): P0 / P1 gate / P2 / P3 wiring; the dense fused dequant kernel; the
 grouped quant expert kernel (8- and 4-bit); the split-KV attention kernel; the E2, E7 and p4c-01
@@ -167,7 +168,7 @@ that the science was not done — read the record first.
 | P2k | **Re-run the 18 host-bound cells on a quiet box** (p0-02 ×2, p0-04 ×2, p2-01 ×6, p4b eager ×8) | their refresh was VOID on the shared card; their conclusions don't depend on the norm (~0.4 ms in an 8–272 ms step) so this is about record hygiene, not science | the same protocol (archive → re-run → canary → per-record update); if the box is never quiet, keep the pre-P2i labels | no (just needs a quiet machine) |
 | P2c | Widen the routing classifier (torch `topk`/`sort`/`index_select`/`gather`/`scatter`) so the **grouped** path's routing cost can be quoted | `EXP-p4-01` §5.3: the classifier's 0.0% on the grouped path is a **blind spot**, not a measurement | new rules + tests; the number must be produced in its own round | **YES — it changes the meaning of the `routing_share_pct` field** |
 | P3 | Breadth: E5 (`EXP-p4-02`), E6 (`EXP-p5-01`), E8 (`EXP-p8-01`, needs the V100), E1's group axis under the corrected prompt set, dense curves, batch sweep (E3 — today it has **no** experiment), FP8/MXFP4 (`EXP-p3-01/02`), repairing the W4A16 gate | each closes a declared hypothesis or lever; several need a matrix entry that does not exist | per matrix entry; E8 only after the same protocol passes on the V100 | partial: new matrix entries need approval |
-| P4 | ✅ **done 2026-10-08 (except the counters)**: `tools/ncu_evidence.py` (counter path written, blocked on this host) + `docs/NCU_EVIDENCE.md` + `RESULTS.md` + 3 charts generated from artifacts by `tools/make_figures.py` + README/HANDOFF corrections | closes Phase 2's last deliverable and Phase 7 | charts regenerate from `result.json` via `python -m tools.make_figures`; every number in RESULTS.md cites an artifact or record | no |
+| P4 | ✅ **done 2026-10-08 (except the counters)**: `tools/ncu_evidence.py` (counter path written, blocked on this host) + `docs/reference/NCU_EVIDENCE.md` + `RESULTS.md` + 3 charts generated from artifacts by `tools/make_figures.py` + README/HANDOFF corrections | closes Phase 2's last deliverable and Phase 7 | charts regenerate from `result.json` via `python -m tools.make_figures`; every number in RESULTS.md cites an artifact or record | no |
 
 ## 5. Wrap-up (docs/config only — **done 2026-10-07**)
 
@@ -216,7 +217,7 @@ machine, re-run there, and rsync `results/` back to the Mac.
 
 ### Never relax or bypass
 
-- the thresholds in `docs/METRICS.md` §1, `PARITY_GATE` (1e-3), `benchmarks/schema.py`, or the
+- the thresholds in `docs/reference/METRICS.md` §1, `PARITY_GATE` (1e-3), `benchmarks/schema.py`, or the
   existing `GATE_CITATIONS` rows — new rows only from a **new measurement with its own artifact**;
 - the runner's five load-time refusals (all before any model load; pinned by
   `tests/test_runner_cells.py`): fused on a non-quantized cell; fused without triton/CUDA; a
@@ -281,16 +282,16 @@ the V100 box, the Mac) diverge, so:
 | `PLAN.md` | the frozen plan: thesis, hypotheses, phases, budget, risks (not a status page) |
 | `configs/experiments.yaml` | the declarative matrix: the only source of hypotheses and cell ids |
 | `experiments/<EXP-ID>.md` | the authoritative record of each experiment (status, results, applicability) |
-| `docs/NCU_EVIDENCE.md` | kernel-level evidence; why ncu counters are blocked on this host and what replaced them |
-| `docs/NCU_PLAN.md` | **换机才能做**的 ncu 补测清单：要测哪些 kernel、抓哪些 counter、验收判据（当前 blocked） |
-| `docs/HANDOFF_2026-10-10.md` | **当前状态的唯一权威摘要**：分支/提交、已实测数字、剩下的唯一一件事（上机命令）、纪律红线、坑位清单 |
-| `docs/PORTFOLIO.md` | 面向实习投递的自述：简历 bullet（中英）、面试必问三题的标准答法、岗位映射与如实缺口（**不引入任何新数字**） |
+| `docs/reference/NCU_EVIDENCE.md` | kernel-level evidence; why ncu counters are blocked on this host and what replaced them |
+| `docs/reference/NCU_PLAN.md` | **换机才能做**的 ncu 补测清单：要测哪些 kernel、抓哪些 counter、验收判据（当前 blocked） |
+| `docs/handoff/HANDOFF_2026-10-10.md` | **当前状态的唯一权威摘要**：分支/提交、已实测数字、剩下的唯一一件事（上机命令）、纪律红线、坑位清单 |
+| `docs/apply/PORTFOLIO.md` | 面向实习投递的自述：简历 bullet（中英）、面试必问三题的标准答法、岗位映射与如实缺口（**不引入任何新数字**） |
 | `docs/figures/` | the three charts, regenerated from artifacts by `python -m tools.make_figures` |
-| `docs/HANDOFF_P2_FUSION.md` | **historical** Phase-2 handoff (banner at the top says so) |
+| `docs/README.md` | 文档地图：`docs/` 下每份文档是什么、给谁看 |
 | `EXPERIMENTS.md` | mandatory record format and metric definitions |
-| `docs/METRICS.md` | metric definitions and the correctness thresholds |
-| `docs/MODELS.md` | model candidates and the verified OLMoE architecture (incl. the ctx≤4096 limit) |
-| `docs/SPECS.md`, `docs/SERVER_RUNBOOK.md`, `ENVIRONMENT.md` | hardware facts, runbook, machine access |
+| `docs/reference/METRICS.md` | metric definitions and the correctness thresholds |
+| `docs/reference/MODELS.md` | model candidates and the verified OLMoE architecture (incl. the ctx≤4096 limit) |
+| `docs/reference/SPECS.md`, `docs/reference/SERVER_RUNBOOK.md`, `ENVIRONMENT.md` | hardware facts, runbook, machine access |
 | `benchmarks/runner.py` | the harness that produces cells; its refusals and payloads are the contract |
 | `benchmarks/schema.py` | the machine-checked shape of `result.json` (hard rule 8 lives here) |
 | `tools/check_docs.py` | dead-link and table-column checker (also run by `tests/test_links.py`) |

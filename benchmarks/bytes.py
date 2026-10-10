@@ -1,6 +1,6 @@
 """bytes — 每-token 字节预算 `[W]` 与 `[T]` 的计算（**纯 Python，无 torch 依赖**）。
 
-口径定义见 docs/METRICS.md §3.2。这是全项目的物理口径，所以：
+口径定义见 docs/reference/METRICS.md §3.2。这是全项目的物理口径，所以：
 
     - 本模块**不 import torch**，因此可以在 Mac 的最小环境、CI 或任何地方跑；
     - 每个分项都带 provenance（参数量/公式），因为"别人无法复核的数字等于没测"；
@@ -360,7 +360,7 @@ def byte_budget(
 ) -> dict[str, Any]:
     """Compute both `[W]` and `[T] = [W] + KV read(ctx)`.
 
-    Both denominators are returned, because `docs/METRICS.md` §3.2 requires reporting
+    Both denominators are returned, because `docs/reference/METRICS.md` §3.2 requires reporting
     which one an attainment figure used.
     """
     w = weight_budget(spec, quant=quant, dtype_bytes=dtype_bytes)

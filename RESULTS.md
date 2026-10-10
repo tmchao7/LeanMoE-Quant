@@ -2,7 +2,7 @@
 
 > 目标读者：**五分钟**。每个数字后面都跟着工件或记录的路径；没有出处的数字一律不写。
 > 口径、门槛、以及"哪些数字不可比"见 [EXPERIMENTS.md](EXPERIMENTS.md) 与
-> [docs/METRICS.md](docs/METRICS.md) §1。逐格记录见 [`experiments/`](experiments/)。
+> [docs/reference/METRICS.md](docs/reference/METRICS.md) §1。逐格记录见 [`experiments/`](experiments/)。
 >
 > **前提**：OLMoE-1B-7B-0924（64 专家 / top-8，16 层，hidden 2048），batch=1 单流 decode，
 > RTX 5090（sm_120），**实测可达带宽 1561.9 GB/s**（不是规格值）。
@@ -16,9 +16,9 @@
 > | --- | --- |
 > | 并发度 / 多请求 | 无排队、无 batching 调度，也就没有"服务吞吐"这一说 |
 > | **req/s** | 全项目零条 req/s 数据（只有 `tok/s = 1000/p50` 的**单流反推值**) |
-> | 吞吐-延迟曲线 | `docs/METRICS.md` §2 声明的 `throughput @ batch ∈ {1,2,4,8}`：**2026-10-09 两轮均 VOID**（金丝雀漂移 6.3% / 56.3% > 5%），未发表任何数字，待重试（待办 G2） |
+> | 吞吐-延迟曲线 | `docs/reference/METRICS.md` §2 声明的 `throughput @ batch ∈ {1,2,4,8}`：**2026-10-09 两轮均 VOID**（金丝雀漂移 6.3% / 56.3% > 5%），未发表任何数字，待重试（待办 G2） |
 > | 任务级精度 | **MMLU 已测**（fp16 53.50% / w8a16 52.50%，delta −1.0 点 ⇒ PASS，n=200 子集，2026-10-09）；**GSM8K 是 floor**（基座模型 8-shot 生成式 fp16 0/15，已放弃）；**PPL 已进工件**（fp16 9.1985 / w8a16 9.2047 = +0.067%） |
-> | 长上下文 | ctx 只测了 1024 / 4096；该模型的上限就是 4096（`docs/MODELS.md`） |
+> | 长上下文 | ctx 只测了 1024 / 4096；该模型的上限就是 4096（`docs/reference/MODELS.md`） |
 >
 > 这句话同时也写进了**每一份** `result.json` 的 `applicability.does_not_apply_to`
 > （`benchmarks/schema.SCOPE_NOT_APPLICABLE`，有测试钉住）—— 单份 payload 被引用
@@ -67,7 +67,7 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | E7 步级量化收益（w8a16，图内） | **1.1911×** / 1.0888× | [EXP-p4b-01](experiments/EXP-p4b-01-truncation.md) §P2j |
 | 权重流占一个 graph 步的比例 | **42%**（1024）/ **23%**（4096） | 同上 §4 |
 | ⇒ 完美权重路径的**结构性上限** | **~1.74×** / **~1.30×** | 同上 |
-| 专家 GEMV 实测占一步 GPU 时间 | **1.540 ms / 3.5881 ms = 42.9%** | [docs/NCU_EVIDENCE.md](docs/NCU_EVIDENCE.md) §4.3 |
+| 专家 GEMV 实测占一步 GPU 时间 | **1.540 ms / 3.5881 ms = 42.9%** | [docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md) §4.3 |
 | kernel 级量化收益（专家 GEMV，隔离测） | 96.3 → 63.5 µs = **1.52×** | 同上 §3 |
 | ⇒ 该 kernel 解释了步级收益的 | **90.4%**（16 层 × Δ0.029 ms = 0.524 / 0.580 ms） | 同上 §4.3 |
 
@@ -97,7 +97,7 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | --- | --- | --- |
 | **融合反量化不是 1.3–2×，反而慢 4.4%** | [EXP-p2-01](experiments/EXP-p2-01-dequant-fusion.md)：eager 格里 `fused/separate` = **1.0442**，`host_share` 72.2%、**19,029 kernel/步** | 那条路径是 host/launch 受限的 ⇒ "融合"本身不是收益来源，"把 launch 消掉"才是 |
 | **torch 的 `F.rms_norm` 比 HF 原链慢 5%** | [EXP-p4c-02](experiments/EXP-p4c-02-elementwise-tail.md) §5.5：2.5474 vs 2.4143 ms，**0/15 轮获胜**（虽然数值等价） | 它保留了同一个 `MeanOps` reduce，却多出 65 次 fp32 行乘 ⇒ 只有自研 kernel 能赢 |
-| **权重 ÷4 拿不到延迟 ÷4** | [docs/NCU_EVIDENCE.md](docs/NCU_EVIDENCE.md) §4.2：字节 ÷3.88，时间只 ÷2.24，达成率 71% → 44% | 瓶颈从 DRAM 挪到了 kernel 内解包 —— 这才是"字节预算"的真实边界 |
+| **权重 ÷4 拿不到延迟 ÷4** | [docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md) §4.2：字节 ÷3.88，时间只 ÷2.24，达成率 71% → 44% | 瓶颈从 DRAM 挪到了 kernel 内解包 —— 这才是"字节预算"的真实边界 |
 | **`EXP-p0-03`（HF 路径 + cudagraph）** | 记录里是 `blocked` **by design**：动态 cache 不可 capture | 说明"能不能进图"是这条路径的硬约束 |
 
 还有一条**内部的负结果**：`EXP-p4c-02` 的模块级归因被它自己预注册的 K1 判据否掉了
@@ -117,7 +117,7 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 
 | 缺口 | 状态 |
 | --- | --- |
-| **ncu 性能计数器** | **宿主策略阻断**（`RmProfilingAdminOnly: 1` + 容器无 `CAP_SYS_ADMIN`），连 `gpu__time_duration.sum` 都被拒。已交出替代口径（解析字节 / 隔离计时）与可复核的工具；缺的是 stall/occupancy 归因。见 [docs/NCU_EVIDENCE.md](docs/NCU_EVIDENCE.md) §1 |
+| **ncu 性能计数器** | **宿主策略阻断**（`RmProfilingAdminOnly: 1` + 容器无 `CAP_SYS_ADMIN`），连 `gpu__time_duration.sum` 都被拒。已交出替代口径（解析字节 / 隔离计时）与可复核的工具；缺的是 stall/occupancy 归因。见 [docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md) §1 |
 | FP8 / MXFP4（sm_120 的 block-scale） | 矩阵已声明（`EXP-p3-01/02`），**未跑**（假设已补前置条件：需先切 `tl.dot` 路径） |
 | E5 专家敏感度 / E6 KV INT8 / E8 跨带宽（V100） | 矩阵已声明，**未跑** |
 | **occupancy / register 下限估计** | **未跑**（G3；ncu 阻断后的替代口径，工具已就绪，待一次上机窗口） |

@@ -89,7 +89,7 @@ per-token p50 / p99 (ms)  @ batch = 1:
 throughput (tok/s)        @ batch ∈ {1,2,4,8}:
 bytes-per-token [W] = _   # 权重：attention _ + router _ + experts+scale _ + shared _ + lm_head _
 bytes-per-token [T] = _   # = [W] + KV 读(ctx)；KV @ctx = (2 × 层数 × kv_heads × head_dim × ctx × dtype字节)
-context length = _        # 达成率必须带 ctx（口径见 docs/METRICS.md §3.2）
+context length = _        # 达成率必须带 ctx（口径见 docs/reference/METRICS.md §3.2）
 floor_W (ms/step) = [W] ÷ measured bw = _
 floor_T (ms/step) = [T] ÷ measured bw = _
 quantization attainment = floor_W ÷ measured latency = _%   # 量化兑现了多少
@@ -121,7 +121,7 @@ notes:      负结果同样记录；与其它实验的差异必须显式说明
 
 ---
 
-## 2. 指标定义（完整口径见 [docs/METRICS.md](docs/METRICS.md)）
+## 2. 指标定义（完整口径见 [docs/reference/METRICS.md](docs/reference/METRICS.md)）
 
 | 指标 | 定义 | 为什么用它 |
 |---|---|---|

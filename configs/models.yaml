@@ -1,6 +1,6 @@
 # configs/models.yaml — 模型清单（唯一来源）
 #
-# 角色说明与选型理由见 docs/MODELS.md。
+# 角色说明与选型理由见 docs/reference/MODELS.md。
 # 约束：主开发机是 V100 32GB (sm_70)，**一律 fp16**，不可用 bf16。
 # 本文件不硬编码本机路径；下载后把路径写进 ENVIRONMENT.md 的「本机附录」。
 
@@ -67,10 +67,10 @@ models:
     total_bytes: 13838721960
     num_shards: 3
     local_path: null
-    verified_config: true          # 架构数字已由 config.json 逐项核实，见 docs/MODELS.md §3.1
+    verified_config: true          # 架构数字已由 config.json 逐项核实，见 docs/reference/MODELS.md §3.1
     verified_on_target: false      # 是否已在目标机上加载并前向
     purpose: "MoE 主线实验（路由开销、专家层量化敏感度、收益上限）"
-    note: "config.json 已核实；每-token 权重字节 [W] = 2,357,723,136 B，专家占 68.3%（docs/MODELS.md §3.2）"
+    note: "config.json 已核实；每-token 权重字节 [W] = 2,357,723,136 B，专家占 68.3%（docs/reference/MODELS.md §3.2）"
 
   - role: dense_comparison
     repo: "Qwen/Qwen3-4B"

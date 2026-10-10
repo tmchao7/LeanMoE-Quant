@@ -634,7 +634,7 @@ def fig3(inputs: dict[str, Any]) -> str:
         [
             "One call per subject. attainment = hand-computed necessary bytes / cold time / "
             "measured achievable bandwidth (%.1f GB/s)." % bw,
-            "ncu performance counters are blocked on this host — see docs/NCU_EVIDENCE.md §1.",
+            "ncu performance counters are blocked on this host — see docs/reference/NCU_EVIDENCE.md §1.",
         ],
     )
     left, right, top, bottom = 230, 120, 118, 96

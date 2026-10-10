@@ -257,7 +257,7 @@ def build_exp_id(exp_id: str, values: dict[str, Any]) -> str:
 #   key = (bit_width, group_size, ctx)；targets 恒为 ("attention", "experts")（与 p1-04 逐字一致）。
 #   换任何一项（g=64、ctx=2048、加 router…）就**没有**门实测 → runner 直接拒绝。
 #
-# ★ 门是**两个判据的合取**（docs/METRICS.md §1：「KL 或 top-1 不达标 → 不报性能数字」），
+# ★ 门是**两个判据的合取**（docs/reference/METRICS.md §1：「KL 或 top-1 不达标 → 不报性能数字」），
 #   聚合口径 = p1-04 记录自己写明的「mean_pass（METRICS 的口径）」：
 #       gate = PASS  ⟺  KL 均值 < 门限  且  top-1 **均值** ≥ 0.95
 #   `gate` 由 `gate_from_metrics()` 从实测值**推导**，不在表里手写 —— 手写会漂移。
@@ -287,7 +287,7 @@ GATE_CITATIONS: dict[tuple[str, int, int], dict[str, Any]] = {
     ("w4a16", 128, 4096): {"kl": 0.059331, "top1": 0.866667, "rmsnorm": "fused"},
 }
 
-# docs/METRICS.md §1 的门槛（**门不动**；本表只引用实测，不改门槛）
+# docs/reference/METRICS.md §1 的门槛（**门不动**；本表只引用实测，不改门槛）
 KL_MAX_W8 = 0.01
 KL_MAX_W4 = 0.05
 TOP1_MIN = 0.95
@@ -388,7 +388,7 @@ def _interleaved_ab_stats(
     first_call_ms: dict[str, float],
     rounds: int,
 ) -> dict[str, Any]:
-    """两臂交错测量的统计（`docs/METRICS.md` §2 的口径 + MAD）。
+    """两臂交错测量的统计（`docs/reference/METRICS.md` §2 的口径 + MAD）。
 
     ★ 配对是**按步号**的：两臂交替走同一条 KV 流（第 2i 步给第一臂、2i+1 步给第二臂），
       所以第 i 对看到的 KV 长度只差 1 个 token —— 上下文增长与顺序效应都被平掉，
@@ -774,7 +774,7 @@ def _graph_res(
     """这个格的 res 字典。★ `qreport` 决定字节账走 fp16 还是**量化后**的分母。
 
     量化格若用 fp16 的 `[W]`/`[T]` 算达成率，分母会大一倍 —— 那不是"保守"，
-    是错的口径（`docs/METRICS.md` §3.2）。所以 `quant` 必须透传到两个预算函数。
+    是错的口径（`docs/reference/METRICS.md` §3.2）。所以 `quant` 必须透传到两个预算函数。
     """
     spec = _model_spec(model.config, model_id)
     steps = gap["stats"]["wall"]
@@ -1309,7 +1309,7 @@ def run_baseline(
 
     # ---- 字节预算 ----
     # 量化格必须把 QuantSpec 传进去：否则 [W] 用 fp16 的分母算"达成率"，
-    # 而量化格的分母本来就该是**打包后**的字节（docs/METRICS.md §3.2）。
+    # 而量化格的分母本来就该是**打包后**的字节（docs/reference/METRICS.md §3.2）。
     qspec = quant_spec_for_cfg(quant_cfg) if quant_cfg else None
     quant = (
         QuantSpec(
@@ -1672,7 +1672,7 @@ def build_payload(
         "kv_read_bytes": budget["KV"]["read_bytes"],
         "breakdown": budget["W"]["items"],
         # ★ 预算 vs 实测：两者必须接近。差得远说明"读多少字节"这个前提错了，
-        #   而那正是本项目全部结论的地基（docs/METRICS.md §3）。
+        #   而那正是本项目全部结论的地基（docs/reference/METRICS.md §3）。
         "weight_bytes_actual": res.get("weight_bytes_actual"),
         "budget_vs_actual_delta_pct": (
             round(
@@ -2571,7 +2571,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if a["quant_attainment_pct"] and a["quant_attainment_pct"] > 100:
         print(
-            "  ⚠️ 达成率 >100% —— 字节账或带宽有问题，必须解释（docs/METRICS.md §3）",
+            "  ⚠️ 达成率 >100% —— 字节账或带宽有问题，必须解释（docs/reference/METRICS.md §3）",
             file=sys.stderr,
         )
     print("\n  wrote %s" % path)

@@ -53,7 +53,7 @@ requires_cuda = pytest.mark.skipif(not _cuda_available(), reason="需要 CUDA �
 
 @pytest.fixture(scope="session")
 def olmoe_config() -> dict:
-    """The **verified** OLMoE-1B-7B-0924 config values (see docs/MODELS.md §3.1)."""
+    """The **verified** OLMoE-1B-7B-0924 config values (see docs/reference/MODELS.md §3.1)."""
     return {
         "hidden_size": 2048,
         "num_attention_heads": 16,

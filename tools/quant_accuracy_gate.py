@@ -10,7 +10,7 @@
     2. 在 fp16 模型上 teacher-force 这串 token，收集参考 logits；
     3. **重新加载**一份干净的 fp16 权重（量化是就地替换，不能复用）；
     4. `quantize_model` 后 teacher-force **同一串** token；
-    5. 逐位置比 KL / top-1，套 `docs/METRICS.md` §1 的门槛。
+    5. 逐位置比 KL / top-1，套 `docs/reference/METRICS.md` §1 的门槛。
 
 ## 为什么每个 cell 都要重新加载模型
 
@@ -199,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
                     indent=2,
                 )
 
-    print("\n=== 汇总（门 = docs/METRICS.md §1）===")
+    print("\n=== 汇总（门 = docs/reference/METRICS.md §1）===")
     print("  %-28s %10s %8s %6s" % ("cell", "kl", "top1", "gate"))
     for name, report in summary["cells"].items():
         print(

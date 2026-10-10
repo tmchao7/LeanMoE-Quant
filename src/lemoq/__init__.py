@@ -15,7 +15,7 @@
 4. `models/`     **尚未建立**。模型加载与逐层统计；目标精度为 **fp16**（V100 无 bf16
                  张量核），注意 checkpoint 自述为 bfloat16，需转换并记录落差。
 
-口径与纪律见根目录 `PLAN.md`、`AGENTS.md` 与 `docs/`（`METRICS.md` §3.2 定义了
+口径与纪律见根目录 `PLAN.md`、`AGENTS.md` 与 `docs/reference/METRICS.md`（§3.2 定义了
 `[W]` 与 `[T]` 两个字节分母，两者不得混用）。
 """
 

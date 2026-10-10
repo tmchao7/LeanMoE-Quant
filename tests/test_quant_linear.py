@@ -176,7 +176,7 @@ def test_scale_is_fp16_and_symmetric_quantization_stores_no_zero():
 def test_realized_bytes_match_the_w_formula_when_dimensions_divide():
     """OLMoE 的形状全部整除，所以实数应当与 `_quantized_bytes` **完全相等**。
 
-    `_quantized_bytes` 是 `docs/METRICS.md` §3.2 里 `[W]` 的公式实现。
+    `_quantized_bytes` 是 `docs/reference/METRICS.md` §3.2 里 `[W]` 的公式实现。
     """
     from benchmarks.bytes import _quantized_bytes
 
@@ -436,7 +436,7 @@ def test_report_carries_everything_needed_to_check_the_byte_account():
 # 6) EXP-p1-01 的判据与 teacher forcing（CPU 可测）
 # ---------------------------------------------------------------------------
 def test_kl_thresholds_come_from_the_documented_values():
-    """★ 门槛照抄 `docs/METRICS.md` §1，一个都不许在这里放宽。
+    """★ 门槛照抄 `docs/reference/METRICS.md` §1，一个都不许在这里放宽。
 
     这是"agent 不得放宽正确性门"的直接体现：把文档里的数**钉在测试里**，
     改它们就必须同时改文档并让这条测试红。

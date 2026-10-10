@@ -2,7 +2,7 @@
 
 ## 为什么需要这份清单
 
-`docs/METRICS.md` §1 把 PPL 列为带门槛（相对退化 <1%）的正确性指标。但历史上
+`docs/reference/METRICS.md` §1 把 PPL 列为带门槛（相对退化 <1%）的正确性指标。但历史上
 **98 份 `result.json` 的 `ppl_fp16 / ppl_this / ppl_delta` 全是 `null`，且没有任何
 说明** —— 那既可能是"未测"，也可能是"漏记"，读者分不出来。项目硬规则 1 要求
 未测的值显式写成未测，而"没有声明的 null"不满足这一点。
@@ -33,7 +33,7 @@ PPL_FIELDS = ("ppl_fp16", "ppl_this", "ppl_delta")
 REASON_NOT_MEASURED = (
     "PPL 尚未测量：`tools/quant_ppl.py` 已实现（wikitext-2 test 前 8192 token + 配对 ΔNLL），"
     "但其结果还没有写进任何 result.json —— 数字目前只存在于 EXP-p1-03 记录 §2 的表格里。"
-    "见 docs/METRICS.md §6 待办 G5。"
+    "见 docs/reference/METRICS.md §6 待办 G5。"
 )
 BLOCKED_BY = "gpu（quant_ppl 需要 CUDA 加载模型；Mac 上的数字不得进 results/，硬规则）"
 PLANNED_METHOD = (
@@ -89,7 +89,7 @@ def build(cells: dict[str, Any]) -> dict[str, Any]:
         "ppl_fields": list(PPL_FIELDS),
         "note": (
             "★ 本清单**不是**测量结果。PPL 数值要等 GPU 上跑 `tools/quant_ppl.py` 并写入"
-            " result.json 之后才有（docs/METRICS.md §6 待办 G5）。"
+            " result.json 之后才有（docs/reference/METRICS.md §6 待办 G5）。"
         ),
         "cells": cells,
     }

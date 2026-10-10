@@ -6,7 +6,7 @@
 #
 # 设计要点：
 #   1. **按 arch 挂载实验臂** —— 蹲到 4090 还是 5090，靠 `arch_arms` 自动裁剪，
-#      不需要改代码（见 docs/SPECS.md §2.2）。
+#      不需要改代码（见 docs/reference/SPECS.md §2.2）。
 #   2. **一次一个变量**（AGENTS.md 规则 3）—— 每个实验只在一个轴上展开；
 #      组合实验必须显式标 `combined: true`。
 #   3. **假设先写**（EXPERIMENTS.md §3）—— 每个实验必须带 `hypothesis` 与
@@ -27,7 +27,7 @@ defaults:
 
 # ---------------------------------------------------------------------------
 # 按 compute capability 挂载实验臂。
-# 依据：本地 LLVM NVPTX 谓词（见 docs/SPECS.md §2.1）
+# 依据：本地 LLVM NVPTX 谓词（见 docs/reference/SPECS.md §2.1）
 #   cp.async -> Requires<[SM80]> ; wgmma -> [SM90a]（消费级都没有）
 #   fp8      -> SM90 | (SM89 & PTX8.1) ; mx_block_scale -> [SM120f]
 # ---------------------------------------------------------------------------

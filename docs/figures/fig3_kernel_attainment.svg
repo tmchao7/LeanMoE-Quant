@@ -2,7 +2,7 @@
 <rect width="980" height="500" fill="#ffffff"/>
 <text x="24.0" y="34.0" font-size="17.0" fill="#1f2328" font-weight="600" text-anchor="start">Kernel-level: necessary bytes vs measured time (isolated, L2 flushed)</text>
 <text x="24.0" y="56.0" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="start">One call per subject. attainment = hand-computed necessary bytes / cold time / measured achievable bandwidth (1561.9 GB/s).</text>
-<text x="24.0" y="71.0" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="start">ncu performance counters are blocked on this host — see docs/NCU_EVIDENCE.md §1.</text>
+<text x="24.0" y="71.0" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="start">ncu performance counters are blocked on this host — see docs/reference/NCU_EVIDENCE.md §1.</text>
 <line x1="230.0" y1="118.0" x2="230.0" y2="404.0" stroke="#d8dee4" stroke-width="0.8"/>
 <text x="230.0" y="422.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">0%</text>
 <line x1="387.5" y1="118.0" x2="387.5" y2="404.0" stroke="#d8dee4" stroke-width="0.8"/>

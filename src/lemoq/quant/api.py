@@ -5,7 +5,7 @@
 
 `REMEDIATION_LADDER` 记录**精度不达标时的兜底阶梯**。
 
-为什么需要这条阶梯：`docs/METRICS.md` §1 的门槛是 W4 的 KL < 0.05。对 7B MoE 做**朴素
+为什么需要这条阶梯：`docs/reference/METRICS.md` §1 的门槛是 W4 的 KL < 0.05。对 7B MoE 做**朴素
 per-group RTN W4**，很可能过不了。而项目纪律是"不达标只记 FAIL、不报性能"——若没有补救
 方案，项目就会停在第 4 阶段且没有任何可交付的性能结论。所以先把阶梯写下来。
 

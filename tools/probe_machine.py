@@ -3,7 +3,7 @@
 
 为什么这个工具是第一个要写的东西：
 
-    本项目所有性能结论都建立在「实测可达带宽」之上（见 docs/METRICS.md §3）。
+    本项目所有性能结论都建立在「实测可达带宽」之上（见 docs/reference/METRICS.md §3）。
     规格带宽（datasheet）**不得**用于任何理论下限的计算。
 
 因此这里产出的 JSON 是后续实验的**输入依赖**：`results/machine_probe.json`。
@@ -273,7 +273,7 @@ def _plausibility_check(gpu_name: str, measured: float | None) -> dict[str, Any]
     在 RTX 5090 上报出 76 GB/s（同卡真值约 1520 GB/s，恰好差 timed=20 倍）。
     结果**看起来完全合理**——数值稳定、CoV 0.1%、三次重复一致——只有跟规格一比
     才会露馅。若不加这个告警，那个数字会被当成"实测可达带宽"写进结果，
-    而依据它的每一个带宽达成率都会 >100%（docs/METRICS.md §3 要求解释这种情况）。
+    而依据它的每一个带宽达成率都会 >100%（docs/reference/METRICS.md §3 要求解释这种情况）。
     """
     if not measured:
         return {"warning": None}
@@ -746,7 +746,7 @@ def build_report(
         if sm != assumed_sm:
             deviations.append(
                 "device %s is %s, project assumption is %s "
-                "(arms are mounted per arch; see docs/SPECS.md 2.2)"
+                "(arms are mounted per arch; see docs/reference/SPECS.md 2.2)"
                 % (dev.get("index"), sm, assumed_sm)
             )
         if (dev.get("vram_total_gb") or 0) < 20:

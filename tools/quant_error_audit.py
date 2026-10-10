@@ -65,7 +65,7 @@ SCOPE_SUFFIXES: dict[str, tuple[str, ...]] = {
     "lm_head": ("lm_head.weight",),
 }
 
-# docs/METRICS.md 的门槛不在这里 —— 本工具只谈**权重域**，不谈 KL 门。
+# docs/reference/METRICS.md 的门槛不在这里 —— 本工具只谈**权重域**，不谈 KL 门。
 QMAX = {4: 7, 8: 127}
 
 

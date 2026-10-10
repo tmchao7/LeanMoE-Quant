@@ -2,7 +2,7 @@
 
 1. **无 GPU 时产出完整结构**：所有字段都在，未测的写 `null`（**不是 `false`**）。
    消费端（Gate-0 脚本、report）依赖这一点，否则会误把"没测"读成"不支持"。
-2. **架构特性表来自 LLVM 谓词**，必须与 docs/SPECS.md §2.1 一致：
+2. **架构特性表来自 LLVM 谓词**，必须与 docs/reference/SPECS.md §2.1 一致：
    40/50 系都**没有** wgmma；只有 sm_120 有 MX block-scale。
 """
 
@@ -134,7 +134,7 @@ def test_dry_run_uses_null_not_false_for_unmeasured(tmp_path):
 
 
 def test_dry_run_carries_method_and_uncertainty_fields(tmp_path):
-    """`docs/SPECS.md` §4：每一项都要有测量方法与不确定性，否则视为未测。"""
+    """`docs/reference/SPECS.md` §4：每一项都要有测量方法与不确定性，否则视为未测。"""
     r = _run_dry_run(tmp_path)
     for section in ("bandwidth", "arch_features", "compile", "disk"):
         assert r[section].get("method"), "%s 缺少 method" % section

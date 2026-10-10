@@ -1,7 +1,7 @@
 # SERVER_RUNBOOK — 服务器到手后的操作序列
 
 > 目标：**从裸机到第一批实测数据，尽可能一条命令接一条命令地走完。**
-> 环境原则见 [ENVIRONMENT.md](../ENVIRONMENT.md)，硬件规格见 [SPECS.md](SPECS.md)，
+> 环境原则见 [ENVIRONMENT.md](../../ENVIRONMENT.md)，硬件规格见 [SPECS.md](SPECS.md)，
 > 指标口径见 [METRICS.md](METRICS.md)。
 
 **在开机前**：本仓库在 Mac 上应当已经 `pytest -m "not gpu"` 全绿。
@@ -187,7 +187,7 @@ bash scripts/run_cudagraph_gate.sh --only p0-03 # 只跑一条
 
 `EXP-p0-03` 测的是"HF 原版能不能进图"。我基于 profile 证据预判它**会失败**：
 单步恰好 1,024 次 `Memcpy DtoH` = 64 experts × 16 layers，来源是
-`torch.where(expert_mask[e])` 的数据依赖输出长度（详见 `docs/MOE_CUDAGRAPH.md`）。
+`torch.where(expert_mask[e])` 的数据依赖输出长度（详见 `docs/reference/MOE_CUDAGRAPH.md`）。
 
 `EXP-p0-04` 测的是**另一个假设**：把逐专家循环换成固定形状前向
 （`lemoq.kernels.moe_static`）之后能不能进图。所以它是独立的 EXP id，
@@ -220,12 +220,12 @@ curl -fsSL https://opencode.ai/install | bash     # 或者 npm i -g opencode-ai
 export PATH="$HOME/.opencode/bin:$PATH"
 ```
 
-**双写纪律**（见 [AGENTS.md](../AGENTS.md) "Remotes and sync"）：
+**双写纪律**（见 [AGENTS.md](../../AGENTS.md) "Remotes and sync"）：
 
 - agent 只在**特性分支**上工作并推送；Mac 只 `git pull --no-rebase`；
 - **绝不 rebase、绝不 force-push**；
 - 每次迭代必须留下三样：`results/<EXP-ID>/result.json`、
-  `experiments/<EXP-ID>.md`（按 [TEMPLATE](../experiments/TEMPLATE.md) 填）、一个提交；
+  `experiments/<EXP-ID>.md`（按 [TEMPLATE](../../experiments/TEMPLATE.md) 填）、一个提交；
 - **agent 不得自行放宽正确性门槛**：KL/top-1 不过就是 `FAIL`。
 
 ---
