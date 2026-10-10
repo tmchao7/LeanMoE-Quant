@@ -247,12 +247,30 @@ def static_moe_forward(
     return out.reshape(*shape), logits
 
 
+def _fused_route_enabled() -> bool:
+    """候选融合路由的开关（默认关 = 走 ATen 原路，已录格子零影响）。
+
+    在 Python 相位（prefill / capture）读取 ⇒ capture 烘焙所选实现；
+    采纳前不改默认值（见 docs/compose/spec/routing-fusion.md [S3]）。
+    """
+    import os
+
+    return os.environ.get("LEMOQ_FUSED_ROUTE", "0") == "1"
+
+
 def _route(x: Any, router_weight: Any, *, top_k: int, norm_topk_prob: bool):
     """公共路由计算：返回 (logits, top_w, top_i)。两种形状约定下的输出都固定。"""
     import torch
     import torch.nn.functional as F
 
     logits = F.linear(x, router_weight)  # (T, E)
+    if _fused_route_enabled():
+        # 候选路径：softmax + top-K 单 kernel（省掉每层 3 个 ATen 小 kernel）。
+        # F.linear 仍走 ATen —— router gemvx 不在本次融合范围。
+        from lemoq.kernels._routing_triton import routing_softmax_topk  # noqa: PLC0415
+
+        top_w, top_i = routing_softmax_topk(logits, top_k=top_k, norm_topk_prob=norm_topk_prob)
+        return logits, top_w.to(x.dtype), top_i
     weights = F.softmax(logits, dim=-1, dtype=torch.float)
     top_w, top_i = torch.topk(weights, top_k, dim=-1)  # (T, K) —— K 固定
     if norm_topk_prob:
