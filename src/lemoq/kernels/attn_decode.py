@@ -738,6 +738,8 @@ def _decode_forward_impl(
         apply_rotary_pos_emb,
     )
 
+    from lemoq.kernels.rope import _fused_rope_enabled  # noqa: PLC0415
+
     bsz, _, _ = hidden_states.shape
     query_states = self.q_norm(self.q_proj(hidden_states))
     key_states = self.k_norm(self.k_proj(hidden_states))
@@ -758,7 +760,15 @@ def _decode_forward_impl(
     )
 
     cos, sin = position_embeddings
-    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+    if _fused_rope_enabled():
+        # 候选路径：rotate_half 链（neg/cat/mul/add ×10/层）融合为 2 kernel/层。
+        # Python 相位读 env ⇒ capture 烘焙；默认关走 HF 原路（已录格零影响）。
+        # 见 docs/compose/spec/fused-rope.md。
+        from lemoq.kernels.rope import apply_rotary_pos_emb_fused  # noqa: PLC0415
+
+        query_states, key_states = apply_rotary_pos_emb_fused(query_states, key_states, cos, sin)
+    else:
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
     if past_key_values is not None:
         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
