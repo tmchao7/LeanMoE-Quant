@@ -1,16 +1,41 @@
 ---
 feature: routing-fusion
-status: in-progress
+status: delivered
 updated: 2026-10-10
 branch: opt/elementwise-fusion
-commits: # 交付时填
+commits: 2591b9d..c0c3611
 ---
 
 # Routing Fusion — softmax+topk 单 kernel 融合（候选，不采纳）
 
 ## Report
 
-（交付时填写）
+**What was built** — 路由融合候选全链路：`tools/profile_graph` 首轮定位出路由桶
+（softmax+topk+sort ×16 层 = 0.110 ms/step ≈ busy 的 5.9%）；`_routing_triton.py`
+单 kernel 融合 softmax(fp32)+K 轮 argmax top-K（E/K 全 constexpr、capture 安全、
+不依赖 tl.sort）；`_route` 增加 `LEMOQ_FUSED_ROUTE` 开关（**默认 aten，已录路径零影响**）；
+A/B 工具 `profile_graph --ab-fused-route`（同进程交替 + 金丝雀 + 跨臂 token 比对）。
+**候选结论（未采纳）**：同进程 A/B 实测 fused 臂 wall 1.9521 → 1.8935 ms（**+3.0%**）、
+gpu_busy 1.8743 → 1.7954 ms（**+4.2%**），金丝雀 aten 漂移 2.215% ≤5%、
+32-token 序列跨 4 次 run 逐位相同。工件 `results/routing_ab.json`（status=measured）。
+
+**Verification** — Mac 四门全绿（最终 **491 passed / 0 failed**）；服务器
+`pytest -m gpu tests/test_routing_fusion.py` **10/10 passed**（fp32 ids 逐位、fp16
+平局集合、env 端到端、非连续、非 2 幂 E、norm 双分支、默认仍 aten）；A/B 三验收
+（金丝雀 2.215%、token 逐位同、fused 快 3.0%/4.2%）全部达成；跨臂贪心输出为
+32×同一 token（合成 prompt 下退化轨迹——相等性结论成立，但轨迹多样性有限，已如实
+记录）。
+
+**Journey log** —
+1. graph 格 payload 的 top_kernels 全 0、老工件是 hf 旧路径 ⇒ 先造 `profile_graph`
+   再选靶，避免拍脑袋（首轮 profile 4 分钟 ¥0.4，直接给出5.9% 的路由桶）。
+2. kernel 不用 `tl.sort`（丢 index、API 脆弱），改用 K 轮 argmax + one-hot 置 -inf：
+   O(K·E) 全 constexpr 展开、平局取最低 lane、语义与 torch.topk 的"等值集合"对齐。
+3. `tl.arange` 只接受 2 的幂 ⇒ E_POW/K_POW 双装垫 + mask，测试覆盖非 2 幂（E=12,K=3）。
+4. 第二靶（mask 两次 fill_ / KV cat）在 `cudagraph.py` 注释里被原作者标为"后续单独的
+   改动（一次一个变量）"——本轮不硬塞，留作下一候选（见 §4）。
+5. 采纳路由融合 = 刷新 grouped 路径全部已录格（P2d 同款，估 ¥5+ 与一个记录轮），
+   超出本轮预算 ⇒ 保持候选态，采纳与否留给用户决策。
 
 ## [S1] Problem
 
@@ -53,6 +78,6 @@ wall 1.94 ms / gpu_busy 1.876 ms / 539 kernels·step⁻¹）显示：路由链
 
 ## Tasks
 
-- [ ] T1: kernel + oracle + 测试（Mac） — acceptance: `_routing_triton` 落盘；`_route` 带 env 分支（默认 aten）；CPU oracle 测试 + GPU K1 测试齐；四门绿 (covers: S2)
-- [ ] T2: GPU 测试 + A/B 实测（服务器） — acceptance: `pytest -m gpu` 相关用例过；A/B JSON 落盘且三验收（金丝雀≤5%、token 逐位同、fused 快于 aten 或如实记录）有结论 (covers: S2; depends: T1)
-- [ ] T3: 工件回传 + 分支交付 — acceptance: A/B JSON 回传本地；Report 填毕；分支推送；给用户采纳/不采纳的建议 (covers: S2; depends: T2)
+- [x] T1: kernel + oracle + 测试（Mac） — acceptance: `_routing_triton` 落盘；`_route` 带 env 分支（默认 aten）；CPU oracle 测试 + GPU K1 测试齐；四门绿 (covers: S2)
+- [x] T2: GPU 测试 + A/B 实测（服务器） — acceptance: `pytest -m gpu` 相关用例过；A/B JSON 落盘且三验收（金丝雀≤5%、token 逐位同、fused 快于 aten 或如实记录）有结论 (covers: S2; depends: T1)
+- [x] T3: 工件回传 + 分支交付 — acceptance: A/B JSON 回传本地；Report 填毕；分支推送；给用户采纳/不采纳的建议 (covers: S2; depends: T2)
