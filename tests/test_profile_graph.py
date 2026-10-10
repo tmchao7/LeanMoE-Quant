@@ -66,3 +66,47 @@ def test_failure_path_writes_error_and_exits_1(monkeypatch, tmp_path):
 def test_build_payload_marks_missing_table_incomplete():
     payload = pg.build_payload({"gap": {}}, {"ctx": 1024})
     assert payload["status"] == "incomplete"
+
+
+def test_ab_routing_verdict(monkeypatch, capsys, tmp_path):
+    """A/B：金丝雀 ≤5% + token 逐位相同 ⇒ measured；任何一条破 ⇒ invalid。"""
+    calls = {"n": 0}
+
+    def fake_invoke(args):
+        calls["n"] += 1
+        i = calls["n"] - 1
+        arm_fused = i % 2 == 1
+        wall = 1.90 if arm_fused else 2.00  # fused 快 5%
+        if i == 2:  # 第二次 aten（金丝雀尾）
+            wall = 2.02  # +1% 漂移，≤5%
+        return {
+            "gap": {"wall_p50_ms": wall, "gpu_busy_ms": wall - 0.05, "host_share_pct": 3.0},
+            "correctness": {"graph_output_tokens": [11, 12, 13], "graph_seed_token": 11},
+        }
+
+    monkeypatch.setattr(pg, "_invoke", fake_invoke)
+    out = tmp_path / "ab.json"
+    rc = pg.main(["--model", "m", "--ab-fused-route", "--json", str(out)])
+    assert rc == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["status"] == "measured"
+    assert payload["tokens_equal"] is True
+    assert abs(payload["canary_aten_drift_pct"]) <= 5.0
+    assert payload["fused_faster_pct"] > 0
+    assert len(payload["runs"]) == 4
+
+    # token 漂移 ⇒ invalid + rc1
+    calls["n"] = 0
+
+    def fake_invoke_bad(args):
+        res = fake_invoke(args)
+        if calls["n"] == 4:
+            res = dict(res, correctness=dict(res["correctness"], graph_output_tokens=[99]))
+        return res
+
+    monkeypatch.setattr(pg, "_invoke", fake_invoke_bad)
+    rc = pg.main(["--model", "m", "--ab-fused-route", "--json", str(out)])
+    assert rc == 1
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["status"] == "invalid"
+    assert any("token" in r for r in payload["reasons"])

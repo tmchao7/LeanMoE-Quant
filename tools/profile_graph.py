@@ -22,11 +22,126 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
 from benchmarks.runner import run_cudagraph
+
+ABLATE_ARM_ENV = "LEMOQ_FUSED_ROUTE"
+
+
+def _invoke(args: argparse.Namespace) -> dict[str, Any]:
+    """按 CLI 参数跑一次 run_cudagraph（单发与 A/B 共用）。"""
+    quantized = args.bit_width != "fp16"
+    return run_cudagraph(
+        model_id=args.model,
+        ctx=args.ctx,
+        batch=args.batch,
+        max_new_tokens=args.max_new_tokens,
+        warmup=args.warmup,
+        timed=args.timed,
+        dtype_name=args.dtype,
+        moe=args.moe,
+        attn=args.attn,
+        quant_cfg=(
+            {
+                "bit_width": args.bit_width,
+                "group_size": args.group_size,
+                "ctx": args.ctx,
+                "dequant": args.dequant,
+            }
+            if quantized
+            else None
+        ),
+        rmsnorm=args.rmsnorm,
+    )
+
+
+def _extract_ab(res: dict[str, Any]) -> dict[str, Any]:
+    gap = res.get("gap") or {}
+    correctness = res.get("correctness") or {}
+    return {
+        "wall_p50_ms": gap.get("wall_p50_ms"),
+        "gpu_busy_ms": gap.get("gpu_busy_ms"),
+        "host_share_pct": gap.get("host_share_pct"),
+        "tokens": correctness.get("graph_output_tokens"),
+        "seed_token": correctness.get("graph_seed_token"),
+    }
+
+
+def run_routing_ab(args: argparse.Namespace) -> dict[str, Any]:
+    """aten→fused 交替 N 轮的同进程 A/B（routing 融合候选专用）。
+
+    验收三件套（spec routing-fusion [S2]）：
+      ① 金丝雀 = 首尾两次 aten 的 wall 漂移 ≤5%（超了整轮无效）；
+      ② 全部 run 的 token 序列逐位相同（融合不改变贪心轨迹）；
+      ③ fused 臂 wall 对 aten 臂的同进程 MAD 口径差（方向如实记录）。
+    """
+    rounds = max(int(args.ab_rounds), 1)
+    seq = ["aten", "fused"] * rounds
+    runs: list[dict[str, Any]] = []
+    saved = os.environ.get(ABLATE_ARM_ENV)
+    try:
+        for i, arm in enumerate(seq):
+            os.environ[ABLATE_ARM_ENV] = "1" if arm == "fused" else "0"
+            one = _extract_ab(_invoke(args))
+            one.update({"i": i, "arm": arm})
+            runs.append(one)
+            print(
+                "[ab] run %d arm=%s wall_p50=%.4f ms busy=%.4f ms tokens=%s"
+                % (i, arm, one["wall_p50_ms"] or -1, one["gpu_busy_ms"] or -1, one["tokens"])
+            )
+    finally:
+        if saved is None:
+            os.environ.pop(ABLATE_ARM_ENV, None)
+        else:
+            os.environ[ABLATE_ARM_ENV] = saved
+
+    aten = [r for r in runs if r["arm"] == "aten"]
+    fused = [r for r in runs if r["arm"] == "fused"]
+    reasons: list[str] = []
+    drift = None
+    if len(aten) >= 2 and aten[0]["wall_p50_ms"] and aten[-1]["wall_p50_ms"]:
+        drift = round(
+            100.0
+            * (aten[-1]["wall_p50_ms"] - aten[0]["wall_p50_ms"])
+            / aten[0]["wall_p50_ms"],
+            3,
+        )
+        if abs(drift) > 5.0:
+            reasons.append("aten 金丝雀漂移 %.3f%% > 5%%" % drift)
+    else:
+        reasons.append("aten 臂不足两次，金丝雀缺失")
+    token_sets = {json.dumps(r["tokens"]) for r in runs}
+    tokens_equal = len(token_sets) == 1
+    if not tokens_equal:
+        reasons.append("跨臂 token 序列不一致（融合改变了贪心轨迹）")
+    mean_aten = sum(r["wall_p50_ms"] for r in aten) / len(aten) if aten else None
+    mean_fused = (
+        sum(r["wall_p50_ms"] for r in fused) / len(fused) if fused else None
+    )
+    delta_pct = (
+        round(100.0 * (mean_aten - mean_fused) / mean_aten, 2)
+        if mean_aten and mean_fused
+        else None
+    )
+    return {
+        "generated_by": "tools/profile_graph.py --ab-fused-route",
+        "status": "measured" if not reasons else "invalid",
+        "reasons": reasons,
+        "canary_aten_drift_pct": drift,
+        "tokens_equal": tokens_equal,
+        "mean_wall_aten_ms": round(mean_aten, 4) if mean_aten else None,
+        "mean_wall_fused_ms": round(mean_fused, 4) if mean_fused else None,
+        "fused_faster_pct": delta_pct,
+        "runs": runs,
+        "note": (
+            "同进程交替 A/B；fused_faster_pct>0 = 融合臂更快。"
+            "候选结论：采纳需重测 grouped 路径已录格（P2d 同款），本工具不写 result.json。"
+        ),
+    }
 
 
 def build_payload(res: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
@@ -94,9 +209,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--group-size", type=int, default=128)
     ap.add_argument("--rmsnorm", default="fused", choices=["fused", "hf"])
     ap.add_argument("--json", default="results/graph_profile.json")
+    ap.add_argument(
+        "--ab-fused-route",
+        action="store_true",
+        help="routing 融合候选 A/B：aten→fused 交替 N 轮（同进程），金丝雀+跨臂 token 比对",
+    )
+    ap.add_argument("--ab-rounds", type=int, default=2, help="A/B 的 (aten,fused) 对数；2 ⇒ 4 次 run")
     args = ap.parse_args(argv)
-
-    quantized = args.bit_width != "fp16"
     cfg = {
         "model": args.model,
         "ctx": args.ctx,
@@ -111,31 +230,17 @@ def main(argv: list[str] | None = None) -> int:
         "dequant": args.dequant,
         "group_size": args.group_size,
         "rmsnorm": args.rmsnorm,
+        "ab_fused_route": bool(args.ab_fused_route),
+        "ab_rounds": args.ab_rounds if args.ab_fused_route else None,
     }
     out = Path(args.json)
     try:
-        res = run_cudagraph(
-            model_id=args.model,
-            ctx=args.ctx,
-            batch=args.batch,
-            max_new_tokens=args.max_new_tokens,
-            warmup=args.warmup,
-            timed=args.timed,
-            dtype_name=args.dtype,
-            moe=args.moe,
-            attn=args.attn,
-            quant_cfg=(
-                {
-                    "bit_width": args.bit_width,
-                    "group_size": args.group_size,
-                    "ctx": args.ctx,
-                    "dequant": args.dequant,
-                }
-                if quantized
-                else None
-            ),
-            rmsnorm=args.rmsnorm,
-        )
+        if args.ab_fused_route:
+            payload = run_routing_ab(args)
+            payload["config"] = cfg
+        else:
+            res = _invoke(args)
+            payload = build_payload(res, cfg)
     except Exception as exc:  # noqa: BLE001 — 定位工具：失败要原因，不要 traceback 刷屏
         payload = {
             "generated_by": "tools/profile_graph.py",
@@ -148,10 +253,16 @@ def main(argv: list[str] | None = None) -> int:
         print("[profile_graph] FAILED: %s" % payload["error"], file=sys.stderr)
         return 1
 
-    payload = build_payload(res, cfg)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print_table(payload)
+    if args.ab_fused_route:
+        print("[ab] canary_aten_drift=%s%%  tokens_equal=%s" % (payload.get("canary_aten_drift_pct"), payload.get("tokens_equal")))
+        print("[ab] mean wall aten=%s ms  fused=%s ms  fused_faster=%s%%" % (
+            payload.get("mean_wall_aten_ms"), payload.get("mean_wall_fused_ms"), payload.get("fused_faster_pct")))
+        for r in payload.get("reasons") or []:
+            print("[ab] INVALID: %s" % r, file=sys.stderr)
+    else:
+        print_table(payload)
     print("[profile_graph] wrote %s (status=%s)" % (out, payload["status"]))
     return 0 if payload["status"] == "measured" else 1
 
