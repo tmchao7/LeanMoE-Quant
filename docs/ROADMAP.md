@@ -48,9 +48,9 @@
 
 | # | 方向 | 内容 | 成本 | 状态 |
 | --- | --- | --- | --- | --- |
-| A1 | README 投递首屏 | 30 秒结论区 + 关键词行 + 4 条 bullet（= PORTFOLIO §2b） | 低 | final-sprint T6，已排 |
+| A1 | README 投递首屏 | 30 秒结论区 + 关键词行 + 4 条 bullet（= PORTFOLIO §2b） | 低 | ✅ 2026-10-10 提前完成 |
 | A2 | G2 batch 曲线 + G3 occupancy | 唯一剩余上机项；成功则 PORTFOLIO 补两条 bullet | ≈¥2 | final-sprint T1–T3，已排 |
-| A3 | **金丝雀 VOID 机械化** | 轮次脚本公共 drift 校验（>5% ⇒ 非零退出 + 隔离工件）+ schema 支持 `void` 状态；修掉 2026-10-10 评审的 M1 缺口 | 低-中 | 未做 |
+| A3 | **金丝雀 VOID 机械化** | ✅ 2026-10-10：`tools/round_canary.py`（fail-closed 退出码 + `--graph` 共租自检 + `--mark` 归档置 `status=void`）+ schema/report 接 `void` + clone-gate 脚本接入；修掉评审 M1 缺口 | 低-中 | 完成 |
 | A4 | MMLU 样本扩量 | n=200 → 更大子集，把 −1.0 点从噪声带里拉出来；或保持现状但在引用处始终带上 SE | 中（上机） | 未做 |
 | A5 | CI 绿徽章 | GitHub Actions 跑四门（`not gpu`），投递链接点开即见健康度 | 低 | 未做 |
 | A6 | parity 门合取补齐 | `PARITY_GATE` 文案是合取，但 E2/grouped/rmsnorm 测试只断言 allclose 半边——补 baseline×1.5 半边（GPU 用例，上机顺跑） | 低 | 未做 |
@@ -88,7 +88,7 @@
 
 ## 3. 优先级建议（如果只做五件事）
 
-1. **A1 + A2**（下午冲刺内完成）：投递闭环，成本最低收益最直接。
+1. **A2**（下午冲刺内完成）：G2/G3 上机，投递闭环的最后一块；A1 首屏已于 2026-10-10 上午提前完成。
 2. **A3 金丝雀机械化**：唯一还停留在"靠自觉"的核心纪律，修掉后面试官追问"你怎么保证
    数字可信"时，第 2 条答案从"我们判过 VOID"升级成"代码里判，过不了就非零退出"。
 3. **B2 batch 曲线**：从 batch=1 单流走向"懂 serving 话题"的桥，面试高频问题。

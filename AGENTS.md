@@ -198,11 +198,14 @@ README status, `PLAN.md` pointer, p4b `Status`, the p1-02/03/04 artifact-id note
 
 - check `nvidia-smi --query-compute-apps=…` before timing; a foreign process is **recorded, never
   killed** — wait for it to exit and re-run the round;
-- **canary**: same cell first and last; >5% drift ⇒ the whole round is `VOID` (keep the log, publish nothing);
+- **canary**: same cell first and last; >5% drift ⇒ the whole round is `VOID` (keep the log, publish nothing).
+  **验收用 `python -m tools.round_canary head.json tail.json [--graph] [--mark] [--out v.json]`** —
+  退出码非零 = VOID，fail-closed（指标缺失/读不出一律 VOID）；`--mark` 归档后置 `status=void`
+  （report 不计入已完成、`is_done` 为 False ⇒ 下轮重跑）；
 - **cudagraph cells need their own canary**: an `eager` canary is *not* sensitive to a co-tenant
   (measured: it drifted 1.16% while three graph cells in the same round were ruined — one OOM, one
   3× outlier). Add a same-cell graph canary plus a payload self-check: a graph cell with
-  `host_share_pct > 5` is contaminated.
+  `host_share_pct > 5` is contaminated（`tools/round_canary --graph` 机械执行这条自检）。
 
 ### Commit and verification gate
 
