@@ -33,6 +33,7 @@
 
 ## 其它（不在本目录）
 
+- [ROADMAP.md](ROADMAP.md) — **项目评估与扩展方向**（做得怎么样、下一步做什么；展望，不是状态）
 - 根目录：[README](../README.md)（入口）、[AGENTS](../AGENTS.md)（协作规则+文档索引）、
   [PLAN](../PLAN.md)（冻结计划）、[RESULTS](../RESULTS.md)（一页纸结果）、
   [EXPERIMENTS](../EXPERIMENTS.md)（记录格式）、[ENVIRONMENT](../ENVIRONMENT.md)（环境）

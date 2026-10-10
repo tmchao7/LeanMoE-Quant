@@ -288,6 +288,7 @@ the V100 box, the Mac) diverge, so:
 | `docs/apply/PORTFOLIO.md` | 面向实习投递的自述：简历 bullet（中英）、面试必问三题的标准答法、岗位映射与如实缺口（**不引入任何新数字**） |
 | `docs/figures/` | the three charts, regenerated from artifacts by `python -m tools.make_figures` |
 | `docs/README.md` | 文档地图：`docs/` 下每份文档是什么、给谁看 |
+| `docs/ROADMAP.md` | 项目评估与扩展方向（Tier A 投递前 / B 矩阵缺口 / C 技术栈升级 / D 明确不做）——展望，不是状态 |
 | `EXPERIMENTS.md` | mandatory record format and metric definitions |
 | `docs/reference/METRICS.md` | metric definitions and the correctness thresholds |
 | `docs/reference/MODELS.md` | model candidates and the verified OLMoE architecture (incl. the ctx≤4096 limit) |
