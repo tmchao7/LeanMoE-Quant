@@ -31,6 +31,7 @@ from benchmarks.runner import run_cudagraph
 
 ABLATE_ARM_ENV = "LEMOQ_FUSED_ROUTE"
 MASK_FILL_ARM_ENV = "LEMOQ_SKIP_MASK_FILL"
+ROPE_ARM_ENV = "LEMOQ_FUSED_ROPE"
 
 
 def _invoke(args: argparse.Namespace) -> dict[str, Any]:
@@ -179,6 +180,22 @@ def run_mask_fill_ab(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+def run_fused_rope_ab(args: argparse.Namespace) -> dict[str, Any]:
+    """off→on 交替 A/B（fused-rope 候选专用）。"""
+    return _run_env_ab(
+        args,
+        env_var=ROPE_ARM_ENV,
+        arm_a="off",
+        arm_b="on",
+        generated_by="tools/profile_graph.py --ab-fused-rope",
+        note=(
+            "同进程交替 A/B；treatment_faster_pct>0 = fused rope 更快。"
+            "tokens_equal 必须为 True —— 若为 False 说明 fused rope 改变了贪心轨迹，候选否决。"
+            "低于噪声的收益也如实记录；本工具不写 result.json。"
+        ),
+    )
+
+
 def build_payload(res: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
     """把 run_cudagraph 的结果收成定位用 JSON（gap 原样保留）。"""
     gap = res.get("gap") or {}
@@ -254,11 +271,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip-mask-fill 候选 A/B：off→on 交替 N 轮（同进程），金丝雀+跨臂 token 比对",
     )
+    ap.add_argument(
+        "--ab-fused-rope",
+        action="store_true",
+        help="fused-rope 候选 A/B：off→on 交替 N 轮（同进程），金丝雀+跨臂 token 比对",
+    )
     ap.add_argument("--ab-rounds", type=int, default=2, help="A/B 的 (off,on) 对数；2 ⇒ 4 次 run")
     args = ap.parse_args(argv)
-    if args.ab_fused_route and args.ab_mask_fill:
-        ap.error("--ab-fused-route 与 --ab-mask-fill 互斥（一次一个变量）")
-    ab_mode = "fused_route" if args.ab_fused_route else ("mask_fill" if args.ab_mask_fill else None)
+    ab_flags = {
+        "fused_route": args.ab_fused_route,
+        "mask_fill": args.ab_mask_fill,
+        "fused_rope": args.ab_fused_rope,
+    }
+    if sum(bool(v) for v in ab_flags.values()) > 1:
+        ap.error("--ab-fused-route / --ab-mask-fill / --ab-fused-rope 互斥（一次一个变量）")
+    ab_mode = next((name for name, on in ab_flags.items() if on), None)
     cfg = {
         "model": args.model,
         "ctx": args.ctx,
@@ -275,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         "rmsnorm": args.rmsnorm,
         "ab_fused_route": bool(args.ab_fused_route),
         "ab_mask_fill": bool(args.ab_mask_fill),
+        "ab_fused_rope": bool(args.ab_fused_rope),
         "ab_rounds": args.ab_rounds if ab_mode else None,
     }
     out = Path(args.json)
@@ -284,6 +312,9 @@ def main(argv: list[str] | None = None) -> int:
             payload["config"] = cfg
         elif ab_mode == "mask_fill":
             payload = run_mask_fill_ab(args)
+            payload["config"] = cfg
+        elif ab_mode == "fused_rope":
+            payload = run_fused_rope_ab(args)
             payload["config"] = cfg
         else:
             res = _invoke(args)
