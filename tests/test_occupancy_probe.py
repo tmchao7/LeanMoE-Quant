@@ -104,3 +104,10 @@ def test_find_compiled_kernel_reads_all_cache_layouts():
     for obj in (_Old(), _New(), _Triton34()):
         ck = op._find_compiled_kernel(obj)
         assert ck is not None and ck.n_regs == 96
+
+
+def test_threads_come_from_num_warps_not_block():
+    """block 是每程序的元素数；线程数只由 num_warps 决定（2026-10-10 修的假 occupancy 根因）。"""
+    assert op._threads_of({"block": 2048, "num_warps": 4}) == 128
+    assert op._threads_of({"block": 64, "num_warps": 8}) == 256
+    assert op._threads_of({"block": 32}) == 128  # 缺省 num_warps=4

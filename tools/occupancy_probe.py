@@ -60,6 +60,16 @@ _SM_LIMITS = {
 }
 
 
+def _threads_of(cfg: dict[str, Any]) -> int:
+    """Triton 程序的线程数 = num_warps × 32。
+
+    2026-10-10 修：原来把 `cfg["block"]`（元素数）当 threads_per_block 传给上界
+    函数 —— H=2048 的 norm 配置因此被算成"2048 线程/块 > 1536 上限 ⇒ occupancy 0%"
+    的假结论。block 是每程序处理的元素数，线程数只由 num_warps 决定。
+    """
+    return int(cfg.get("num_warps", 4)) * 32
+
+
 def occupancy_upper_bound(
     *, n_regs: int, threads_per_block: int, shared_bytes: int, limits: dict[str, int]
 ) -> dict[str, Any]:
@@ -348,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
                     cfg,
                     **occupancy_upper_bound(
                         n_regs=info["n_regs"],
-                        threads_per_block=int(cfg["block"]),
+                        threads_per_block=_threads_of(cfg),
                         shared_bytes=info["shared_bytes"] + int(cfg.get("extra_smem_bytes", 0)),
                         limits=limits,
                     ),
@@ -376,7 +386,10 @@ def main(argv: list[str] | None = None) -> int:
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
-    print("wrote %s (status=planned —— 未产出数字)" % out)
+    if payload["status"] == "done":
+        print("wrote %s (status=done —— 三族 kernel 均有解析上界)" % out)
+    else:
+        print("wrote %s (status=planned —— 未产出数字)" % out)
     return 0
 
 
