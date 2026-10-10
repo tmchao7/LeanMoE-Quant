@@ -81,6 +81,7 @@ cell fp16  eager     1024 canaryB_fp16_eager_1024
 if ! $PY -m tools.round_canary \
     "$OUT/clone1_canaryA_fp16_eager_1024_result.json" \
     "$OUT/clone1_canaryB_fp16_eager_1024_result.json" \
+    --mark \
     --out "$OUT/canary_verdict.json" >> "$LOG" 2>&1; then
   echo "[canary] VOID —— 整轮作废，任何数字不得发布；verdict: $OUT/canary_verdict.json" >> "$LOG"
   exit 1

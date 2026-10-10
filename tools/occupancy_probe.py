@@ -9,9 +9,10 @@
 
 ## 它不是 ncu 的替代品
 
-本工具用 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` 算的是** occupancy 上限 /
-下限的算术估计**，基于 kernel 的 launch 配置（threads per block、shared memory、
-register 用量）。它**测不到**真实的 stall 原因、bank conflict、warp divergence。
+本工具用**解析式**（regs / shared / threads 三个除法取最小，纯算术、可离线单测）
+估算 occupancy 上限，输入是编译产物里的 `n_regs` / `shared` 与 launch 配置
+（threads per block = num_warps × 32）。它**不调用** CUDA occupancy API，也**测不到**
+真实的 stall 原因、bank conflict、warp divergence。
 所以输出里每一项都标 `kind: "estimate"`，并且**不得**被当成实测值引用。
 
 能回答的那一问（这就是它的价值）：
@@ -387,7 +388,13 @@ def main(argv: list[str] | None = None) -> int:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
     if payload["status"] == "done":
-        print("wrote %s (status=done —— 三族 kernel 均有解析上界)" % out)
+        n_measured = sum(
+            1 for v in payload["subjects"].values() if v["status"] == "measured_estimate"
+        )
+        print(
+            "wrote %s (status=done —— %d/%d 族 kernel 有解析上界)"
+            % (out, n_measured, len(payload["subjects"]))
+        )
     else:
         print("wrote %s (status=planned —— 未产出数字)" % out)
     return 0
