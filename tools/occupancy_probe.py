@@ -114,22 +114,44 @@ def _limits(torch_mod: Any) -> dict[str, int]:
     return dict(_SM_LIMITS[(12, 0)])
 
 
+def _iter_compiled(obj: Any, depth: int = 0):
+    """深度优先扫 dict/tuple/list 的任意嵌套，产出带 `n_regs` 的 CompiledKernel。
+
+    2026-10-10 真机（triton 3.4.0）实测的第三种布局：`device_caches[device]` 是
+    **4 元组 `(cache_dict, GPUTarget, backend, fn)`**，CompiledKernel 藏在元组第 0 项
+    的 dict 里 —— 旧实现只认 dict，于是把跑过的 kernel 当成"没编译产物"（G3 首轮
+    planned 的根因）。dict 之外的元素（GPUTarget/backend/函数）不是容器，直接跳过。
+    """
+    if depth > 5:
+        return
+    if isinstance(obj, dict):
+        nodes: Any = obj.values()
+    elif isinstance(obj, (tuple, list)):
+        nodes = obj
+    else:
+        return
+    for value in nodes:
+        if hasattr(value, "n_regs"):
+            yield value
+        else:
+            yield from _iter_compiled(value, depth + 1)
+
+
 def _find_compiled_kernel(jit_fn: Any) -> Any | None:
     """从 JITFunction 上找到**已编译**的那份产物。
 
-    Triton 版本的差异在这一处：3.x 早期用 `.cache`，较新版本用 `.device_caches`
-    （按 device 再嵌一层）。所以不猜名字，只**扫**所有 dict-of-dict 的属性，取第一个
-    带 `n_regs` 的对象；找不到就返回 None（调用方据此保持 planned，不编数字）。
+    Triton 版本差异都收在 `_iter_compiled` 里：
+      - 3.x 早期：`.cache` = dict-of-dict；
+      - 较新：`.device_caches` = dict-of-dict；
+      - 3.4.0：`.device_caches[device]` = **tuple**(cache_dict, …)。
+    扫不到返回 None（调用方据此保持 planned，不编数字）。
     """
     for attr in ("device_caches", "cache"):
         cache = getattr(jit_fn, attr, None)
-        if not isinstance(cache, dict):
+        if cache is None:
             continue
-        for value in cache.values():
-            candidates = value.values() if isinstance(value, dict) else [value]
-            for cand in candidates:
-                if hasattr(cand, "n_regs"):
-                    return cand
+        for ck in _iter_compiled(cache):
+            return ck
     return None
 
 
@@ -189,7 +211,10 @@ def _warm_kernels(torch_mod: Any, attempts: list[str]) -> None:
         ids = torch_mod.zeros(1, 1, dtype=torch_mod.long, device="cuda")
         top_w = torch_mod.ones(1, 1, dtype=torch_mod.float16, device="cuda")
         x = torch_mod.randn(1, 1, hidden, dtype=torch_mod.float16, device="cuda")
-        _mg.grouped_moe_forward(x, ids, top_w, fused, top_k=1)
+        # ★ 参数顺序 = grouped_moe_forward(x, fused, ids, top_w)（2026-10-10 修：
+        #   原来写成 (x, ids, top_w, fused, top_k=1) —— 顺序错 + 没有 top_k 形参，
+        #   真机上直接 TypeError，grouped 两族 kernel 因此进不了缓存）。
+        _mg.grouped_moe_forward(x, fused, ids, top_w)
         attempts.append("ran grouped_moe_forward")
     except Exception as exc:  # noqa: BLE001
         attempts.append("grouped_moe_forward 失败(%s)" % type(exc).__name__)

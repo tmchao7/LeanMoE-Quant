@@ -80,8 +80,10 @@ def test_missing_compiled_artifact_stays_planned_without_numbers():
     assert attempts, "失败原因必须记录下来（否则上机时不知道该试什么）"
 
 
-def test_find_compiled_kernel_reads_both_cache_layouts():
-    """Triton 3.x 早期 `.cache` 与较新 `.device_caches` 两种布局都要认。"""
+def test_find_compiled_kernel_reads_all_cache_layouts():
+    """三种布局都要认：早期 `.cache` dict-of-dict、`.device_caches` dict-of-dict、
+    以及 triton 3.4.0 的 `device_caches[device] = (cache_dict, GPUTarget, …)` 元组
+    （2026-10-10 真机实测；G3 首轮 planned 的根因就是漏了这一种）。"""
 
     class _CK:
         n_regs = 96
@@ -96,6 +98,9 @@ def test_find_compiled_kernel_reads_both_cache_layouts():
     class _New:
         device_caches = {"cuda:0": {"k": _CK()}}
 
-    for obj in (_Old(), _New()):
+    class _Triton34:
+        device_caches = {0: (_CK(), object(), object(), object())}  # 元组布局
+
+    for obj in (_Old(), _New(), _Triton34()):
         ck = op._find_compiled_kernel(obj)
         assert ck is not None and ck.n_regs == 96
