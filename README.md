@@ -22,7 +22,8 @@
 
 进度、工件与"还没做什么"见 [AGENTS.md](AGENTS.md) 的 §0/§3；权威记录是
 `experiments/<EXP-ID>.md`。**未做**：E5 专家敏感度、E6 KV INT8、E8 跨带宽（V100）、
-FP8/MXFP4、dense 曲线、batch 扫描。**ncu 性能计数器在本机被宿主策略阻断**
+FP8/MXFP4、dense 曲线。（★ 2026-10-10：G2 batch 曲线与 G3 occupancy 已测，见
+[RESULTS.md](RESULTS.md) §6。）**ncu 性能计数器在本机被宿主策略阻断**
 （`RmProfilingAdminOnly: 1` + 容器无 `CAP_SYS_ADMIN`），已交出替代的 kernel 级证据：
 [docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md)。
 

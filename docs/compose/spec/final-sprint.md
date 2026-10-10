@@ -103,11 +103,11 @@ README 顶部（现状行之后、"这个项目在问什么"之前）加一个 *
 
 ## Tasks
 
-- [ ] T1: 上机前置检查 — acceptance: 新 SSH 地址可用；`nvidia-smi` 共租检查执行并记录（非空则等待） (covers: S2-A; needs: 用户开机并提供地址)
-- [ ] T2: G2 batch 曲线单轮重试 — acceptance: drift ≤5% ⇒ `results/batch_sweep.json` 有效落盘且每 batch 有 n/stddev；drift >5% ⇒ VOID 记录留存并停止 G2 (covers: S2-A; depends: T1)
-- [ ] T3: G3 occupancy 上界 — acceptance: `results/occupancy.json` 落盘，`status=done`（三族 blocks/SM）或 `planned`（含 attempts 失败原因） (covers: S2-A; depends: T1)
-- [ ] T4: 工件 tar 回 Mac — acceptance: T2/T3 的 JSON 在本 checkout 内可读，内容完整 (covers: S2-A; depends: T2, T3)
-- [ ] T5: 文档回填 — acceptance: RESULTS §6 / METRICS §6 / PORTFOLIO §2b / README 状态行 / HANDOFF 均按实测终态更新，每个数字带出处，`check_docs` 通过 (covers: S2-B; depends: T4)
+- [x] T1: 上机前置检查 — acceptance: 新 SSH 地址可用；`nvidia-smi` 共租检查执行并记录（非空则等待） (covers: S2-A; needs: 用户开机并提供地址)
+- [x] T2: G2 batch 曲线单轮重试 — acceptance: drift ≤5% ⇒ `results/batch_sweep.json` 有效落盘且每 batch 有 n/stddev；drift >5% ⇒ VOID 记录留存并停止 G2 (covers: S2-A; depends: T1)
+- [x] T3: G3 occupancy 上界 — acceptance: `results/occupancy.json` 落盘，`status=done`（三族 blocks/SM）或 `planned`（含 attempts 失败原因） (covers: S2-A; depends: T1)
+- [x] T4: 工件 tar 回 Mac — acceptance: T2/T3 的 JSON 在本 checkout 内可读，内容完整 (covers: S2-A; depends: T2, T3)
+- [x] T5: 文档回填 — acceptance: RESULTS §6 / METRICS §6 / PORTFOLIO §2b / README 状态行 / HANDOFF 均按实测终态更新，每个数字带出处，`check_docs` 通过 (covers: S2-B; depends: T4)
 - [x] T6: README 投递导向首屏 — acceptance: 顶部 30 秒结论区（定位 + 关键词行 + 4 条 bullet 与 PORTFOLIO §2b 逐字一致 + 出处链接），原内容保留，`check_docs` 通过 (covers: S2-C; depends: T5) — **2026-10-10 上午提前完成**（不依赖 G2/G3；T5 回填状态行时勿覆盖本区块）
 - [ ] T7: 离线四门验证 — acceptance: `ruff` / `black` / `pytest -m "not gpu"` / `check_docs` 全绿，0 failed，命令与结果记入 Report (covers: S2-D; depends: T5, T6)
 - [ ] T8: 独立评审 — acceptance: 一个全新 subagent 给出 spec 合规 / 正确性 / 一致性三个独立结论，critical 为 0；有则修复并复审 (covers: S2-D; depends: T7)

@@ -90,10 +90,12 @@
 >   step) and attributed **90%** of the gain to one kernel; accuracy closed with KL **0.00136**,
 >   PPL **+0.067%**, MMLU **−1.0 pt** (200-q subset).
 
-**上机后可以再加的两条（现在留空，别提前写）**
+**上机后可以再加的两条（2026-10-10 已测，按需选用）**
 
-- `batch 曲线：量化收益随 batch 从 1.19× 衰减到 [待测]×（同轮 4 点，金丝雀 ≤5%）`
-- `occupancy 上界：融合 RMSNorm / grouped kernel 的 blocks/SM = [待测]（解析上界，非 ncu 实测）`
+- `batch 曲线（G2，fp16 单臂同轮 4 点）：batch 1→8 的 step p50 近乎平坦（87.20→86.29 ms），
+  tok/s 11.47→92.71（8.08×）；金丝雀 −3.448% ≤5%，n=5 丢 1 轮`
+- `occupancy 上界（G3，解析上界非 ncu 实测）：fused RMSNorm blocks/SM ≤12（threads 限，
+  n_regs=38）、grouped gate_up ≤12、down_sum ≤6（regs 限），occupancy 上界 100%`
 
 ⚠️ 示例写法（**数值是编的，切勿抄**）：`blocks/SM 上界 = 4（寄存器受限）` —— 若上机测出
 不是 4，简历立刻变成假话。**先测，再填。**

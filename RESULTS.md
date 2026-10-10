@@ -16,7 +16,7 @@
 > | --- | --- |
 > | 并发度 / 多请求 | 无排队、无 batching 调度，也就没有"服务吞吐"这一说 |
 > | **req/s** | 全项目零条 req/s 数据（只有 `tok/s = 1000/p50` 的**单流反推值**) |
-> | 吞吐-延迟曲线 | `docs/reference/METRICS.md` §2 声明的 `throughput @ batch ∈ {1,2,4,8}`：**2026-10-09 两轮均 VOID**（金丝雀漂移 6.3% / 56.3% > 5%），未发表任何数字，待重试（待办 G2） |
+> | 吞吐-延迟曲线 | `docs/reference/METRICS.md` §2 的 `throughput @ batch ∈ {1,2,4,8}`：**已测（2026-10-10，G2 单轮有效）**——fp16 单臂、金丝雀 **−3.448%** ≤5%；batch 1→8 的 step p50 **87.20 → 86.29 ms 近乎平坦**、tok/s **11.47 → 92.71（8.08×）**。单列一表（`results/batch_sweep.json`），**禁止与历史 batch=1 数字混表**；量化收益随 batch 的衰减**仍未测**（本轮只测 fp16） |
 > | 任务级精度 | **MMLU 已测**（fp16 53.50% / w8a16 52.50%，delta −1.0 点 ⇒ PASS，n=200 子集，2026-10-09）；**GSM8K 是 floor**（基座模型 8-shot 生成式 fp16 0/15，已放弃）；**PPL 已进工件**（fp16 9.1985 / w8a16 9.2047 = +0.067%） |
 > | 长上下文 | ctx 只测了 1024 / 4096；该模型的上限就是 4096（`docs/reference/MODELS.md`） |
 >
@@ -120,8 +120,8 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | **ncu 性能计数器** | **宿主策略阻断**（`RmProfilingAdminOnly: 1` + 容器无 `CAP_SYS_ADMIN`），连 `gpu__time_duration.sum` 都被拒。已交出替代口径（解析字节 / 隔离计时）与可复核的工具；缺的是 stall/occupancy 归因。见 [docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md) §1 |
 | FP8 / MXFP4（sm_120 的 block-scale） | 矩阵已声明（`EXP-p3-01/02`），**未跑**（假设已补前置条件：需先切 `tl.dot` 路径） |
 | E5 专家敏感度 / E6 KV INT8 / E8 跨带宽（V100） | 矩阵已声明，**未跑** |
-| **occupancy / register 下限估计** | **未跑**（G3；ncu 阻断后的替代口径，工具已就绪，待一次上机窗口） |
-| **batch 曲线** | 2026-10-09 两轮 **VOID**（金丝雀漂移 6.3% / 56.3%），未发表数字；待重试（G2）。本项目仍是有意的 batch=1 单流课题 |
+| **occupancy / register 下限估计** | ✅ **已跑（G3，2026-10-10，`status=done`）**：三族自研 kernel 的**解析上界**（`kind=estimate`/`bound=upper`，非 ncu 实测）——fused RMSNorm（n_regs=38）blocks/SM **≤12**（threads 限）；grouped gate_up（n_regs=40）**≤12**、down_sum **≤6**（regs 限）；occupancy 上界均 100%。工件 `results/occupancy.json`。stall/occupancy **实测**归因仍缺（ncu 阻断，见 [NCU_PLAN](docs/reference/NCU_PLAN.md)） |
+| **batch 曲线** | ✅ **已测（G2，2026-10-10 单轮有效）**：金丝雀 **−3.448%** ≤5%（此前两轮 VOID 的冷态根因已由 `9729dde` 修复）。fp16、ctx=1024、同轮 4 点（n=5、丢 1 轮）：batch 1/2/4/8 → step p50 **87.20 / 85.88 / 86.82 / 86.29 ms**，tok/s **11.47 / 23.29 / 46.07 / 92.71**（工件 `results/batch_sweep.json`，单列表）。仅 fp16 单臂 ⇒ **量化衰减对比仍是缺口**；本项目仍是有意的 batch=1 单流课题 |
 | **任务级精度（GSM8K）** | 生成式口径在基座模型上贴地板（fp16 8-shot 0/15）⇒ **放弃并如实记录**；MMLU 已测并过门（§3.1） |
 | 18 个 host 主导格子的刷新 | 刷新值 VOID（共租 CPU），规范 payload 保留 pre-P2i 版本；列为 P2k。结论不依赖它 |
 | 一处口径不一致（在修） | `AGENTS.md` §0 写的 `1.1927` 用了金丝雀首值 3.0084 做分母；**记录采用值 3.0124 ⇒ 1.1911**。本文用 1.1911 |
