@@ -44,3 +44,6 @@ auth.json
 .idea/
 .vscode/
 *.swp
+
+# WorkBuddy 残余（已弃用，防复发）
+.workbuddy/
