@@ -1,7 +1,7 @@
 # docs/ — 文档地图
 
-> 按读者分三层：**接手干活**看 `handoff/`，**查证口径与证据**看 `reference/`，
-> **投递面试**看 `apply/`。仓库总入口是根目录 [README.md](../README.md)，
+> 按用途阅读：**接手干活**看 `handoff/`，**查证口径与证据**看 `reference/`，
+> **投递面试**看 `apply/`，**亲手吃透源码与实验**看 `study/`。仓库总入口是根目录 [README.md](../README.md)，
 > 数字的唯一权威是 [RESULTS.md](../RESULTS.md) 与 [`experiments/`](../experiments/)。
 
 ## handoff/ — 交接（给下一个 agent）
@@ -30,6 +30,15 @@
 | 文档 | 是什么 | 给谁 |
 | --- | --- | --- |
 | [PORTFOLIO.md](apply/PORTFOLIO.md) | 简历 bullet（中英）、面试必问三题标准答法、岗位映射与如实缺口 | 投递与面试前的你 |
+
+## study/ — 两周源码与实验自学
+
+| 文档 | 是什么 | 给谁 |
+| --- | --- | --- |
+| [README.md](study/README.md) | 14 天路线、掌握标准、Mac 练习边界 | 想自己讲清并修改本项目的你 |
+| [01–05 专题](study/01-architecture.md) | decode 地图、量化、grouped MoE、dense/attention、norm 与候选融合 | 深入读源码的人；从 01 开始顺序阅读 |
+| [CUDA Graph](study/06-cudagraph.md)、[profiling](study/07-profiling.md) | capture/replay 生命周期、图内归因与 A/B 判据 | 理解性能机制的人 |
+| [简历追问](study/08-interview.md)、[答案](study/09-answers.md)、[真机练习](study/10-gpu-labs.md) | 证据索引、自测核对、将来可选的 5090 演练 | 面试准备与复盘 |
 
 ## 其它（不在本目录）
 
