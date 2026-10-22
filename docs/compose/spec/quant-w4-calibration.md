@@ -112,7 +112,7 @@ test PPL 使用前 8192 token / 8×1024 窗口；ctx4096 的五窗口门至少�
 逐层输出传播、非专家参数保持原样、packed 导出/重载及“不再次 RTN”的推理集成。
 另覆盖 split/哈希/冻结证据、预算耗尽、部分 bundle、参数上限与防覆盖；GPU 新用例只 collection。
 
-最终 CPU 结果：**655 passed / 32 deselected**；其中新增 65 个 CPU 用例与 1 个 GPU 用例。
+最终 CPU 结果：**656 passed / 32 deselected**；其中新增 66 个 CPU 用例与 1 个 GPU 用例。
 ruff、black（103 个文件）、check_docs（57 份 Markdown）和 `git diff --check` 全通过。
 新增 GPU 用例只完成 collection。旧极值 oracle 的一条 overflow warning 保留，不放宽任何门。
 W4 过门、W8 GPU 回归、峰值显存、实际耗时、速度提升均为 **未测**。本轮不注册矩阵、不修改 gate
