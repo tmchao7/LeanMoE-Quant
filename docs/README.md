@@ -52,3 +52,4 @@
 - [`compose/spec/`](compose/spec/) — 本仓库 compose-next 流程的 feature 文档
 - [`compose/spec/review-2026-10-22.md`](compose/spec/review-2026-10-22.md) — **review/debug 二次复核**（旧 P1–P9 状态纠正、新 R1–R12；后续修复状态见离线验证记录）
 - [`compose/spec/offline-validation-2026-10-22.md`](compose/spec/offline-validation-2026-10-22.md) — **5090 前离线验证/修复**（CPU 反例、验收器与入口守卫修复、自然文本 GPU 检查脚本；待 GPU 回归项明确单列）
+- [`compose/spec/quant-w4-calibration.md`](compose/spec/quant-w4-calibration.md) — **专家 W4 校准分支**（GPTQ 离线实现、预量化加载、数据隔离、成本账与预算确认后的命令；GPU 未执行）
