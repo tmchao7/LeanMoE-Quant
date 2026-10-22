@@ -43,6 +43,7 @@
 ## 其它（不在本目录）
 
 - [ROADMAP.md](ROADMAP.md) — **项目评估与扩展方向**（做得怎么样、下一步做什么；展望，不是状态）
+- [FUSION_OPPORTUNITIES.md](FUSION_OPPORTUNITIES.md) — **融合优化的剩余空间：可执行任务规格**（F1–F6 按实测/估计分级、验收判据、八条注意事项红线、复算命令；给下一个 agent 干活用）
 - 根目录：[README](../README.md)（入口）、[AGENTS](../AGENTS.md)（协作规则+文档索引）、
   [PLAN](../PLAN.md)（冻结计划）、[RESULTS](../RESULTS.md)（一页纸结果）、
   [EXPERIMENTS](../EXPERIMENTS.md)（记录格式）、[ENVIRONMENT](../ENVIRONMENT.md)（环境）

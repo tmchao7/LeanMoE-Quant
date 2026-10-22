@@ -292,6 +292,7 @@ the V100 box, the Mac) diverge, so:
 | `docs/figures/` | the three charts, regenerated from artifacts by `python -m tools.make_figures` |
 | `docs/README.md` | 文档地图：`docs/` 下每份文档是什么、给谁看 |
 | `docs/ROADMAP.md` | 项目评估与扩展方向（Tier A 投递前 / B 矩阵缺口 / C 技术栈升级 / D 明确不做）——展望，不是状态 |
+| `docs/FUSION_OPPORTUNITIES.md` | **融合优化任务规格（F1–F6）**：已测未采纳的三项、q/k/v 三合一、残差 epilogue、KV 直写、lm_head 量化、w4a16（阻塞）；含验收判据与八条注意事项红线 |
 | `EXPERIMENTS.md` | mandatory record format and metric definitions |
 | `docs/reference/METRICS.md` | metric definitions and the correctness thresholds |
 | `docs/reference/MODELS.md` | model candidates and the verified OLMoE architecture (incl. the ctx≤4096 limit) |
