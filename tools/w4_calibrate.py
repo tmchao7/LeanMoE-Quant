@@ -621,6 +621,7 @@ def main(argv: list[str] | None = None) -> int:
                 _calibrate(args, run, payload, model_id, tokenizer, budget)
             else:
                 _validate(args, run, payload, model_id, tokenizer, budget)
+            budget.check()  # include the final forward/library call before accepting completion
     except Exception as exc:  # incomplete artifacts retain coverage/finished layers, never loadable
         payload.update(status="failed", error=f"{type(exc).__name__}: {exc}")
     _write(run / "manifest.json", payload)

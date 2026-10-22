@@ -259,3 +259,46 @@ def test_profile_only_offers_one_unmeasured_followup_after_clean_canary():
     assert result["candidate"]["removed_bucket_ceiling_ms"] == pytest.approx(0.3)
     assert wc.profile_opportunity(p, dict(p, host_share_pct=5.1))["status"] == "invalid"
     assert wc.profile_opportunity(p, dict(p, wall_p50_ms=2.2))["status"] == "invalid"
+
+
+def test_final_library_call_over_budget_cannot_mark_bundle_complete(monkeypatch, tmp_path):
+    monkeypatch.setattr(wc.subprocess, "check_output", lambda *a, **k: "")
+    monkeypatch.setattr(wc, "_source_identity", lambda: {"commit": "mock"})
+    monkeypatch.setattr(wc, "tokenizer_identity", lambda _: "tok")
+    monkeypatch.setattr(wc, "model_identity", lambda _: "model")
+    monkeypatch.setattr(wc.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(wc.torch.cuda, "get_device_capability", lambda _: (12, 0))
+    monkeypatch.setattr(wc.importlib.metadata, "version", lambda _: "mock")
+
+    def expired():
+        raise TimeoutError("final call exceeded budget")
+
+    monkeypatch.setattr(wc, "Budget", lambda _: SimpleNamespace(check=expired))
+    monkeypatch.setattr(
+        wc, "_calibrate", lambda args, run, payload, *a: payload.update(status="complete")
+    )
+    out = tmp_path / "run"
+    assert (
+        wc.main(
+            [
+                "--phase",
+                "calibrate",
+                "--execute",
+                "--model",
+                "m",
+                "--data-manifest",
+                "d",
+                "--train-cache",
+                "t",
+                "--validation-cache",
+                "v",
+                "--out",
+                str(out),
+                "--gpu-budget-seconds",
+                "1",
+            ]
+        )
+        == 1
+    )
+    result = json.loads((out / "manifest.json").read_text())
+    assert result["status"] == "failed" and "exceeded budget" in result["error"]
