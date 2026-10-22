@@ -112,6 +112,18 @@ def _run_env_ab(
     base = [r for r in runs if r["arm"] == arm_a]
     treat = [r for r in runs if r["arm"] == arm_b]
     reasons: list[str] = []
+    # ★ fail-closed（review P2）：任一 run 的 wall/busy/host_share 缺失 ⇒ 判 invalid，
+    #   不崩在 `sum(None)` 上（原实现遇到 gap 不完整的 run 会 TypeError 丢整轮数据）。
+    missing = [
+        r
+        for r in runs
+        if r["wall_p50_ms"] is None or r["gpu_busy_ms"] is None or r["host_share_pct"] is None
+    ]
+    if missing:
+        reasons.append(
+            "指标缺失（wall/busy/host_share 为 None，run i=%s）——按 fail-closed 判无效"
+            % [r["i"] for r in missing]
+        )
     drift = None
     if len(base) >= 2 and base[0]["wall_p50_ms"] and base[-1]["wall_p50_ms"]:
         drift = round(
@@ -122,12 +134,43 @@ def _run_env_ab(
             reasons.append("%s 金丝雀漂移 %.3f%% > 5%%" % (arm_a, drift))
     else:
         reasons.append("%s 臂不足两次，金丝雀缺失" % arm_a)
+    # ★ busy 双口径（review P1；fused-rope Journey log ① 的建议）：wall 金丝雀会被 host
+    #   噪声打爆而 busy 不动 —— 把基线臂首尾的 gpu_busy 漂移单列，供判读时对照。
+    busy_drift = None
+    if len(base) >= 2 and base[0]["gpu_busy_ms"] and base[-1]["gpu_busy_ms"]:
+        busy_drift = round(
+            100.0 * (base[-1]["gpu_busy_ms"] - base[0]["gpu_busy_ms"]) / base[0]["gpu_busy_ms"],
+            3,
+        )
+    busy_stable = busy_drift is not None and abs(busy_drift) <= 5.0
+    # ★ 图格污染观察（review P1）：AGENTS §6 的 host_share>5% ⇒ 污染。**只警告不改判定** ——
+    #   "treatment 本身降 host" 时该判据要重释（skip-mask-fill Journey log ④），
+    #   判定语义的变更需用户批准；这里先把观察暴露出来。
+    host_share_warnings = [
+        {"i": r["i"], "arm": r["arm"], "host_share_pct": r["host_share_pct"]}
+        for r in runs
+        if r["host_share_pct"] is not None and r["host_share_pct"] > 5.0
+    ]
     token_sets = {json.dumps(r["tokens"]) for r in runs}
     tokens_equal = len(token_sets) == 1
     if not tokens_equal:
         reasons.append("跨臂 token 序列不一致（%s→%s 改变了贪心轨迹）" % (arm_a, arm_b))
-    mean_a = sum(r["wall_p50_ms"] for r in base) / len(base) if base else None
-    mean_b = sum(r["wall_p50_ms"] for r in treat) / len(treat) if treat else None
+    # ★ 轨迹退化警告（review P3）：合成 prompt 下 token 全同 ⇒ tokens_equal 近乎空判据
+    #   （routing-fusion Report 已自认）。只标记，不否决 —— 相等性结论仍成立，只是证据弱。
+    degenerate = False
+    if tokens_equal and runs:
+        degenerate = len(set(runs[0]["tokens"] or [])) <= 1
+
+    def _mean_median(vals: list[Any]) -> tuple[float | None, float | None]:
+        if any(v is None for v in vals) or not vals:
+            return None, None
+        ordered = sorted(vals)
+        n = len(ordered)
+        median = ordered[n // 2] if n % 2 else (ordered[n // 2 - 1] + ordered[n // 2]) / 2.0
+        return sum(ordered) / n, float(median)
+
+    mean_a, median_a = _mean_median([r["wall_p50_ms"] for r in base])
+    mean_b, median_b = _mean_median([r["wall_p50_ms"] for r in treat])
     delta_pct = round(100.0 * (mean_a - mean_b) / mean_a, 2) if mean_a and mean_b else None
     return {
         "generated_by": generated_by,
@@ -139,6 +182,14 @@ def _run_env_ab(
         "mean_wall_baseline_ms": round(mean_a, 4) if mean_a else None,
         "mean_wall_treatment_ms": round(mean_b, 4) if mean_b else None,
         "treatment_faster_pct": delta_pct,
+        # ---- 观察字段（review P1/P2/P3）：不参与 status 判定，供判读 ----
+        "stat": "mean_of_run_p50s",
+        "median_wall_baseline_ms": round(median_a, 4) if median_a is not None else None,
+        "median_wall_treatment_ms": round(median_b, 4) if median_b is not None else None,
+        "busy_drift_pct": busy_drift,
+        "busy_stable": busy_stable,
+        "host_share_warnings": host_share_warnings,
+        "degenerate_trajectory": degenerate,
         "runs": runs,
         "note": note,
     }

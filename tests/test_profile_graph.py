@@ -163,3 +163,147 @@ def test_ab_modes_are_mutually_exclusive(tmp_path):
             ]
         )
     assert excinfo.value.code == 2  # argparse.error
+
+
+# ---------------------------------------------------------------------------
+# review 2026-10-22（P1/P2/P3/P9）：A/B 判定机器的观察字段与 fail-closed
+# ---------------------------------------------------------------------------
+
+
+def _ab_run(wall, busy, tokens, host=2.0):
+    return {
+        "gap": {"wall_p50_ms": wall, "gpu_busy_ms": busy, "host_share_pct": host},
+        "correctness": {"graph_output_tokens": tokens, "graph_seed_token": tokens[0]},
+    }
+
+
+def _ab_invoke_seq(seq):
+    it = iter(seq)
+
+    def fake(args):
+        return next(it)
+
+    return fake
+
+
+def test_ab_warns_on_host_share_contamination_and_degenerate_tokens(monkeypatch, tmp_path):
+    """P1: host_share>5% 的 run 要进 host_share_warnings；全同 token 要标 degenerate_trajectory。"""
+    tok = [7, 7, 7, 7]
+    monkeypatch.setattr(
+        pg,
+        "_invoke",
+        _ab_invoke_seq(
+            [
+                _ab_run(2.00, 1.90, tok, host=2.0),
+                _ab_run(1.90, 1.80, tok, host=6.3),  # 污染 run
+                _ab_run(2.01, 1.91, tok, host=2.1),
+                _ab_run(1.91, 1.81, tok, host=2.2),
+            ]
+        ),
+    )
+    out = tmp_path / "ab.json"
+    rc = pg.main(["--model", "m", "--ab-fused-route", "--json", str(out)])
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert rc == 0
+    assert payload["status"] == "measured"  # 只警告不改判定（口径争议未决）
+    warn_runs = payload["host_share_warnings"]
+    assert warn_runs and warn_runs[0]["i"] == 1 and warn_runs[0]["host_share_pct"] == 6.3
+    assert payload["degenerate_trajectory"] is True
+
+
+def test_ab_reports_busy_drift_for_graph_arms(monkeypatch, tmp_path):
+    """P1: 基线臂首尾 gpu_busy 漂移要有 busy_drift_pct / busy_stable 字段。"""
+    tok = [5, 6, 7, 8]
+    monkeypatch.setattr(
+        pg,
+        "_invoke",
+        _ab_invoke_seq(
+            [
+                _ab_run(2.00, 1.80, tok),
+                _ab_run(1.90, 1.75, tok),
+                _ab_run(2.01, 2.00, tok),  # busy +11% > 5%
+                _ab_run(1.91, 1.76, tok),
+            ]
+        ),
+    )
+    out = tmp_path / "ab.json"
+    pg.main(["--model", "m", "--ab-fused-route", "--json", str(out)])
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["busy_drift_pct"] == pytest.approx(11.111, abs=0.01)
+    assert payload["busy_stable"] is False
+
+
+def test_ab_missing_wall_fails_closed_not_crash(monkeypatch, tmp_path):
+    """P2: 任一 run 的 wall/busy 为 None ⇒ invalid + 原因，而不是 sum() 崩溃。"""
+    tok = [1, 2, 3]
+    monkeypatch.setattr(
+        pg,
+        "_invoke",
+        _ab_invoke_seq(
+            [
+                _ab_run(2.00, 1.90, tok),
+                _ab_run(None, 1.80, tok),  # gap 不完整
+                _ab_run(2.01, 1.91, tok),
+                _ab_run(1.91, 1.81, tok),
+            ]
+        ),
+    )
+    out = tmp_path / "ab.json"
+    rc = pg.main(["--model", "m", "--ab-fused-route", "--json", str(out)])
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert rc == 1
+    assert payload["status"] == "invalid"
+    assert any("缺失" in r for r in payload["reasons"])
+    assert payload["mean_wall_baseline_ms"] is None or payload["mean_wall_treatment_ms"] is None
+
+
+def test_ab_reports_median_and_stat_label(monkeypatch, tmp_path):
+    """P3: 口径声明 stat + median_* 字段（mean 保留）。"""
+    tok = [1, 2, 3]
+    monkeypatch.setattr(
+        pg,
+        "_invoke",
+        _ab_invoke_seq(
+            [
+                _ab_run(2.00, 1.90, tok),
+                _ab_run(1.90, 1.80, tok),
+                _ab_run(2.02, 1.92, tok),
+                _ab_run(1.92, 1.82, tok),
+            ]
+        ),
+    )
+    out = tmp_path / "ab.json"
+    pg.main(["--model", "m", "--ab-fused-route", "--json", str(out)])
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["stat"] == "mean_of_run_p50s"
+    assert payload["median_wall_baseline_ms"] == pytest.approx(2.01, abs=1e-6)
+    assert payload["median_wall_treatment_ms"] == pytest.approx(1.91, abs=1e-6)
+
+
+def test_ab_routing_carries_both_key_families(monkeypatch, tmp_path):
+    """P9: routing 轮 payload 同时带历史键（fused_*）与通用键（treatment_*）。"""
+    tok = [1, 2, 3]
+    monkeypatch.setattr(
+        pg,
+        "_invoke",
+        _ab_invoke_seq(
+            [
+                _ab_run(2.00, 1.90, tok),
+                _ab_run(1.90, 1.80, tok),
+                _ab_run(2.01, 1.91, tok),
+                _ab_run(1.91, 1.81, tok),
+            ]
+        ),
+    )
+    out = tmp_path / "ab.json"
+    pg.main(["--model", "m", "--ab-fused-route", "--json", str(out)])
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    for key in (
+        "fused_faster_pct",
+        "treatment_faster_pct",
+        "canary_aten_drift_pct",
+        "canary_drift_pct",
+        "mean_wall_aten_ms",
+        "mean_wall_baseline_ms",
+    ):
+        assert key in payload, key
