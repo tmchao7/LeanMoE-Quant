@@ -22,7 +22,7 @@
 | [MODELS.md](reference/MODELS.md) | 模型选型与已核实的 OLMoE 架构、字节预算 | 要确认模型事实的人 |
 | [NCU_EVIDENCE.md](reference/NCU_EVIDENCE.md) | kernel 级证据：计数器为何被阻断、替代口径 | 深读性能归因的人 |
 | [NCU_PLAN.md](reference/NCU_PLAN.md) | 换机才能做的 ncu 补测清单（当前 blocked） | 将来拿到 profiling 权限的人 |
-| [FUSION_RESEARCH.md](reference/FUSION_RESEARCH.md) | 联网调研：融合/量化的优化方法 + 十条避坑点（公开报告值，非实测） | 做融合任务（F1–F6）前要外部依据的人 |
+| [FUSION_RESEARCH.md](reference/FUSION_RESEARCH.md) | 联网调研及二次复核：融合/量化方法、避坑点、来源适用限制（公开报告值，非实测） | 做融合任务（F1–F6）前要外部依据的人 |
 | [MOE_CUDAGRAPH.md](reference/MOE_CUDAGRAPH.md) | 为什么 HF 的 MoE 进不了 CUDA Graph（预判+依据） | 理解 p0-03 blocked 结论的人 |
 | [SERVER_RUNBOOK.md](reference/SERVER_RUNBOOK.md) | 服务器到手后的命令序列 | 上机执行的人 |
 
@@ -50,4 +50,5 @@
   [EXPERIMENTS](../EXPERIMENTS.md)（记录格式）、[ENVIRONMENT](../ENVIRONMENT.md)（环境）
 - [`figures/`](figures/) — 三张图，由 `python -m tools.make_figures` 从工件生成
 - [`compose/spec/`](compose/spec/) — 本仓库 compose-next 流程的 feature 文档
-- [`compose/spec/review-2026-10-22.md`](compose/spec/review-2026-10-22.md) — **review/debug 问题清单**（P1–P9：A/B 验收口径、rope 守卫、skip-mask 契约等，逐条带验证与修复方案）
+- [`compose/spec/review-2026-10-22.md`](compose/spec/review-2026-10-22.md) — **review/debug 二次复核**（旧 P1–P9 状态纠正、新 R1–R12；后续修复状态见离线验证记录）
+- [`compose/spec/offline-validation-2026-10-22.md`](compose/spec/offline-validation-2026-10-22.md) — **5090 前离线验证/修复**（CPU 反例、验收器与入口守卫修复、自然文本 GPU 检查脚本；待 GPU 回归项明确单列）
