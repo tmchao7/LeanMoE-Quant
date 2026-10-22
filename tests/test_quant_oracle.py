@@ -183,7 +183,7 @@ def test_api_rejects_unimplemented_scheme():
     from lemoq.quant import quantize_linear
 
     with pytest.raises(NotImplementedError):
-        quantize_linear(torch.zeros(4, 128), scheme="gptq")
+        quantize_linear(torch.zeros(4, 128), scheme="awq")
 
 
 def test_remediation_ladder_is_documented():
