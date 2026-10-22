@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +46,38 @@ def _dig(payload: Any, path: tuple[str, ...]) -> Any:
             return None
         node = node[key]
     return node
+
+
+def finite_number(
+    value: Any, *, minimum: float = 0.0, maximum: float | None = None, positive: bool = False
+) -> bool:
+    """Reject bool, non-numbers, non-finite values and values outside the domain."""
+    if type(value) not in (int, float):
+        return False
+    try:
+        return (
+            math.isfinite(value)
+            and (value > minimum if positive else value >= minimum)
+            and (maximum is None or value <= maximum)
+        )
+    except (OverflowError, ValueError):
+        return False
+
+
+def json_safe(value: Any) -> Any:
+    """Keep invalid evidence readable without emitting non-standard JSON NaN/Infinity."""
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if type(value) is float and not math.isfinite(value):
+        return repr(value)
+    return value
+
+
+def drift_pct(head: float, tail: float) -> float:
+    """Decimal input spelling keeps exactly 5% valid without an epsilon relaxation."""
+    return float(Decimal(100) * (Decimal(str(tail)) - Decimal(str(head))) / Decimal(str(head)))
 
 
 def evaluate(
@@ -66,14 +100,34 @@ def evaluate(
         reasons.append(
             "金丝雀指标 %s 缺失（head=%r tail=%r）" % (".".join(metric), head_ms, tail_ms)
         )
-    elif not isinstance(head_ms, (int, float)) or not isinstance(tail_ms, (int, float)):
-        reasons.append("金丝雀指标不是数值（head=%r tail=%r）" % (head_ms, tail_ms))
-    elif float(head_ms) == 0.0:
-        reasons.append("head=0，无法计算漂移")
+    elif not finite_number(head_ms, positive=True) or not finite_number(tail_ms, positive=True):
+        reasons.append(
+            "金丝雀指标必须为有限正数（head=%r tail=%r；head=0 也无效）" % (head_ms, tail_ms)
+        )
     else:
-        drift = round(100.0 * (float(tail_ms) - float(head_ms)) / float(head_ms), 4)
-        if abs(drift) > max_drift_pct:
+        raw_drift = drift_pct(head_ms, tail_ms)
+        drift = round(raw_drift, 4)
+        if not finite_number(abs(raw_drift)):
+            reasons.append("漂移不是有限数值")
+        elif (
+            finite_number(max_drift_pct, maximum=CANARY_MAX_DRIFT_PCT)
+            and abs(raw_drift) > max_drift_pct
+        ):
             reasons.append("漂移 %.3f%% 超过阈值 %.1f%%" % (drift, max_drift_pct))
+    if not finite_number(max_drift_pct, maximum=CANARY_MAX_DRIFT_PCT):
+        reasons.append("漂移阈值必须为 [0, 5] 内的有限数值，不得放宽现行上限")
+    # Formal payloads carry an experiment ID; never compare different cells/configurations.
+    for section in ("exp_id", "config", "model", "runtime"):
+        a, b = _dig(head, (section,)), _dig(tail, (section,))
+        if a != b:
+            reasons.append("金丝雀身份不一致：%s" % section)
+        if section != "exp_id" and (not isinstance(a, dict) or not isinstance(b, dict)):
+            reasons.append("金丝雀缺少身份段：%s" % section)
+    if not isinstance(_dig(head, ("exp_id",)), str) or not _dig(head, ("exp_id",)):
+        reasons.append("金丝雀缺少 exp_id，无法确认同格身份")
+    for key in ("gpu", "compute_capability", "gpu_count_used"):
+        if _dig(head, ("hardware", key)) != _dig(tail, ("hardware", key)):
+            reasons.append("金丝雀硬件身份不一致：%s" % key)
     if graph:
         for label, payload in (("head", head), ("tail", tail)):
             host = _dig(payload, ("attribution", "host_share_pct"))
@@ -81,22 +135,26 @@ def evaluate(
                 reasons.append(
                     "%s 的 attribution.host_share_pct 缺失（--graph 自检无法通过）" % label
                 )
-            elif isinstance(host, (int, float)) and float(host) > GRAPH_HOST_SHARE_MAX_PCT:
+            elif not finite_number(host, maximum=100.0):
+                reasons.append("%s 的 host_share 必须为 [0,100] 内有限数值" % label)
+            elif host > GRAPH_HOST_SHARE_MAX_PCT:
                 reasons.append(
                     "%s 的 host_share=%.1f%% > %.0f%%（疑似共租污染）"
                     % (label, float(host), GRAPH_HOST_SHARE_MAX_PCT)
                 )
-    return {
-        "generated_by": "tools/round_canary.py",
-        "metric": ".".join(metric),
-        "head_value": head_ms,
-        "tail_value": tail_ms,
-        "drift_pct": drift,
-        "max_drift_pct": max_drift_pct,
-        "graph_check": graph,
-        "verdict": "VOID" if reasons else "PASS",
-        "reasons": reasons,
-    }
+    return json_safe(
+        {
+            "generated_by": "tools/round_canary.py",
+            "metric": ".".join(metric),
+            "head_value": head_ms,
+            "tail_value": tail_ms,
+            "drift_pct": drift,
+            "max_drift_pct": max_drift_pct,
+            "graph_check": graph,
+            "verdict": "VOID" if reasons else "PASS",
+            "reasons": reasons,
+        }
+    )
 
 
 def mark_void(path: Path) -> dict[str, Any]:

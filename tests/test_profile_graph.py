@@ -89,14 +89,14 @@ def test_ab_routing_verdict(monkeypatch, capsys, tmp_path):
 
     monkeypatch.setattr(pg, "_invoke", fake_invoke)
     out = tmp_path / "ab.json"
-    rc = pg.main(["--model", "m", "--ab-fused-route", "--json", str(out)])
+    rc = pg.main(["--model", "m", "--max-new-tokens", "3", "--ab-fused-route", "--json", str(out)])
     assert rc == 0
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["status"] == "measured"
     assert payload["tokens_equal"] is True
     assert abs(payload["canary_aten_drift_pct"]) <= 5.0
     assert payload["fused_faster_pct"] > 0
-    assert len(payload["runs"]) == 4
+    assert len(payload["runs"]) == 5
 
     # token 漂移 ⇒ invalid + rc1
     calls["n"] = 0
@@ -108,7 +108,8 @@ def test_ab_routing_verdict(monkeypatch, capsys, tmp_path):
         return res
 
     monkeypatch.setattr(pg, "_invoke", fake_invoke_bad)
-    rc = pg.main(["--model", "m", "--ab-fused-route", "--json", str(out)])
+    out = tmp_path / "ab_bad.json"
+    rc = pg.main(["--model", "m", "--max-new-tokens", "3", "--ab-fused-route", "--json", str(out)])
     assert rc == 1
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["status"] == "invalid"
@@ -134,7 +135,7 @@ def test_ab_mask_fill_verdict_and_env_restored(monkeypatch, tmp_path):
     monkeypatch.setattr(pg, "_invoke", fake_invoke)
     monkeypatch.delenv("LEMOQ_SKIP_MASK_FILL", raising=False)
     out = tmp_path / "ab_mask.json"
-    rc = pg.main(["--model", "m", "--ab-mask-fill", "--json", str(out)])
+    rc = pg.main(["--model", "m", "--max-new-tokens", "3", "--ab-mask-fill", "--json", str(out)])
     assert rc == 0
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["status"] == "measured"
@@ -143,10 +144,10 @@ def test_ab_mask_fill_verdict_and_env_restored(monkeypatch, tmp_path):
     assert payload["tokens_equal"] is True
     assert abs(payload["canary_drift_pct"]) <= 5.0
     assert payload["treatment_faster_pct"] > 0
-    assert len(payload["runs"]) == 4
-    assert [r["arm"] for r in payload["runs"]] == ["off", "on", "off", "on"]
+    assert len(payload["runs"]) == 5
+    assert [r["arm"] for r in payload["runs"]] == ["off", "on", "off", "on", "off"]
     # 臂间 env 正确交替，且结束后还原（原环境没有这个变量 ⇒ 被删除）
-    assert seen_env == ["0", "1", "0", "1"]
+    assert seen_env == ["0", "1", "0", "1", "0"]
     assert "LEMOQ_SKIP_MASK_FILL" not in os.environ
 
 
@@ -178,7 +179,7 @@ def _ab_run(wall, busy, tokens, host=2.0):
 
 
 def _ab_invoke_seq(seq):
-    it = iter(seq)
+    it = iter([*seq, seq[0]])  # final same-arm canary, excluded from arm statistics
 
     def fake(args):
         return next(it)
@@ -202,10 +203,10 @@ def test_ab_warns_on_host_share_contamination_and_degenerate_tokens(monkeypatch,
         ),
     )
     out = tmp_path / "ab.json"
-    rc = pg.main(["--model", "m", "--ab-fused-route", "--json", str(out)])
+    rc = pg.main(["--model", "m", "--max-new-tokens", "4", "--ab-fused-route", "--json", str(out)])
     payload = json.loads(out.read_text(encoding="utf-8"))
-    assert rc == 0
-    assert payload["status"] == "measured"  # 只警告不改判定（口径争议未决）
+    assert rc == 1
+    assert payload["status"] == "invalid"  # enforce the existing graph protocol
     warn_runs = payload["host_share_warnings"]
     assert warn_runs and warn_runs[0]["i"] == 1 and warn_runs[0]["host_share_pct"] == 6.3
     assert payload["degenerate_trajectory"] is True
@@ -221,16 +222,16 @@ def test_ab_reports_busy_drift_for_graph_arms(monkeypatch, tmp_path):
             [
                 _ab_run(2.00, 1.80, tok),
                 _ab_run(1.90, 1.75, tok),
-                _ab_run(2.01, 2.00, tok),  # busy +11% > 5%
+                _ab_run(2.01, 2.00, tok),  # paired baseline
                 _ab_run(1.91, 1.76, tok),
             ]
         ),
     )
     out = tmp_path / "ab.json"
-    pg.main(["--model", "m", "--ab-fused-route", "--json", str(out)])
+    pg.main(["--model", "m", "--max-new-tokens", "4", "--ab-fused-route", "--json", str(out)])
     payload = json.loads(out.read_text(encoding="utf-8"))
-    assert payload["busy_drift_pct"] == pytest.approx(11.111, abs=0.01)
-    assert payload["busy_stable"] is False
+    assert payload["busy_drift_pct"] == 0.0
+    assert payload["busy_stable"] is True
 
 
 def test_ab_missing_wall_fails_closed_not_crash(monkeypatch, tmp_path):
@@ -249,7 +250,7 @@ def test_ab_missing_wall_fails_closed_not_crash(monkeypatch, tmp_path):
         ),
     )
     out = tmp_path / "ab.json"
-    rc = pg.main(["--model", "m", "--ab-fused-route", "--json", str(out)])
+    rc = pg.main(["--model", "m", "--max-new-tokens", "3", "--ab-fused-route", "--json", str(out)])
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert rc == 1
     assert payload["status"] == "invalid"
@@ -273,7 +274,7 @@ def test_ab_reports_median_and_stat_label(monkeypatch, tmp_path):
         ),
     )
     out = tmp_path / "ab.json"
-    pg.main(["--model", "m", "--ab-fused-route", "--json", str(out)])
+    pg.main(["--model", "m", "--max-new-tokens", "3", "--ab-fused-route", "--json", str(out)])
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["stat"] == "mean_of_run_p50s"
     assert payload["median_wall_baseline_ms"] == pytest.approx(2.01, abs=1e-6)
@@ -296,7 +297,7 @@ def test_ab_routing_carries_both_key_families(monkeypatch, tmp_path):
         ),
     )
     out = tmp_path / "ab.json"
-    pg.main(["--model", "m", "--ab-fused-route", "--json", str(out)])
+    pg.main(["--model", "m", "--max-new-tokens", "3", "--ab-fused-route", "--json", str(out)])
     payload = json.loads(out.read_text(encoding="utf-8"))
     for key in (
         "fused_faster_pct",

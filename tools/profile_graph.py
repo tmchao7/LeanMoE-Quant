@@ -21,13 +21,18 @@ per-kernel ms 的工件全是 E2 时代 hf 旧路径（147/56 ms gpu_total）—
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata
 import json
 import os
+import statistics
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 from benchmarks.runner import run_cudagraph
+from tools.round_canary import drift_pct, finite_number, json_safe
 
 ABLATE_ARM_ENV = "LEMOQ_FUSED_ROUTE"
 MASK_FILL_ARM_ENV = "LEMOQ_SKIP_MASK_FILL"
@@ -82,117 +87,170 @@ def _run_env_ab(
     generated_by: str,
     note: str,
 ) -> dict[str, Any]:
-    """env=0/env=1 交替 N 轮的同进程 A/B（通用核心）。
+    """Interleave adjacent pairs, then a separate same-arm tail canary.
 
-    验收三件套（spec skip-mask-fill [S2.3]，routing-fusion 同款）：
-      ① 金丝雀 = 基线臂（arm_a）首尾 wall 漂移 ≤5%（超了整轮无效）；
-      ② 全部 run 的 token 序列逐位相同（候选不得改变贪心轨迹）；
-      ③ arm_b 臂 wall 对 arm_a 臂的同进程均值差（方向如实记录）。
+    `measured` means protocol-valid diagnostic evidence, never adoption approval.
+    The tail is checked for correctness/contamination but excluded from arm statistics.
     """
-    rounds = max(int(args.ab_rounds), 1)
-    seq = [arm_a, arm_b] * rounds
+    rounds = args.ab_rounds
+    if type(rounds) is not int or rounds < 1:
+        raise ValueError("ab_rounds must be a positive integer")
+    if type(args.max_new_tokens) is not int or args.max_new_tokens < 1:
+        raise ValueError("max_new_tokens must be a positive integer")
+    if env_var == MASK_FILL_ARM_ENV and args.attn != "kernel":
+        raise ValueError("skip-mask-fill requires the mask-independent kernel backend")
+    seq = [arm_a, arm_b] * rounds + [arm_a]
+    switches = (ABLATE_ARM_ENV, MASK_FILL_ARM_ENV, ROPE_ARM_ENV)
+    saved = {key: os.environ.get(key) for key in switches}
     runs: list[dict[str, Any]] = []
-    saved = os.environ.get(env_var)
+    reasons: list[str] = []
     try:
+        for key in switches:
+            os.environ[key] = "0"
         for i, arm in enumerate(seq):
             os.environ[env_var] = "1" if arm == arm_b else "0"
-            one = _extract_ab(_invoke(args))
-            one.update({"i": i, "arm": arm})
+            one = {
+                "i": i,
+                "arm": arm,
+                "role": "tail_canary" if i == len(seq) - 1 else "pair",
+                "fusion_env": {key: os.environ[key] for key in switches},
+            }
+            try:
+                one.update(_extract_ab(_invoke(args)))
+            except Exception as exc:  # preserve partial evidence and always restore env
+                one.update(
+                    wall_p50_ms=None,
+                    gpu_busy_ms=None,
+                    host_share_pct=None,
+                    tokens=None,
+                    seed_token=None,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                reasons.append("run i=%d failed: %s" % (i, one["error"]))
             runs.append(one)
             print(
-                "[ab] run %d arm=%s wall_p50=%.4f ms busy=%.4f ms tokens=%s"
-                % (i, arm, one["wall_p50_ms"] or -1, one["gpu_busy_ms"] or -1, one["tokens"])
+                "[ab] run %d arm=%s wall_p50=%r busy=%r"
+                % (i, arm, one["wall_p50_ms"], one["gpu_busy_ms"])
             )
+            if "error" in one:
+                break
     finally:
-        if saved is None:
-            os.environ.pop(env_var, None)
-        else:
-            os.environ[env_var] = saved
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
-    base = [r for r in runs if r["arm"] == arm_a]
-    treat = [r for r in runs if r["arm"] == arm_b]
-    reasons: list[str] = []
-    # ★ fail-closed（review P2）：任一 run 的 wall/busy/host_share 缺失 ⇒ 判 invalid，
-    #   不崩在 `sum(None)` 上（原实现遇到 gap 不完整的 run 会 TypeError 丢整轮数据）。
-    missing = [
-        r
-        for r in runs
-        if r["wall_p50_ms"] is None or r["gpu_busy_ms"] is None or r["host_share_pct"] is None
-    ]
-    if missing:
-        reasons.append(
-            "指标缺失（wall/busy/host_share 为 None，run i=%s）——按 fail-closed 判无效"
-            % [r["i"] for r in missing]
-        )
-    drift = None
-    if len(base) >= 2 and base[0]["wall_p50_ms"] and base[-1]["wall_p50_ms"]:
-        drift = round(
-            100.0 * (base[-1]["wall_p50_ms"] - base[0]["wall_p50_ms"]) / base[0]["wall_p50_ms"],
-            3,
-        )
-        if abs(drift) > 5.0:
-            reasons.append("%s 金丝雀漂移 %.3f%% > 5%%" % (arm_a, drift))
-    else:
-        reasons.append("%s 臂不足两次，金丝雀缺失" % arm_a)
-    # ★ busy 双口径（review P1；fused-rope Journey log ① 的建议）：wall 金丝雀会被 host
-    #   噪声打爆而 busy 不动 —— 把基线臂首尾的 gpu_busy 漂移单列，供判读时对照。
-    busy_drift = None
-    if len(base) >= 2 and base[0]["gpu_busy_ms"] and base[-1]["gpu_busy_ms"]:
-        busy_drift = round(
-            100.0 * (base[-1]["gpu_busy_ms"] - base[0]["gpu_busy_ms"]) / base[0]["gpu_busy_ms"],
-            3,
-        )
-    busy_stable = busy_drift is not None and abs(busy_drift) <= 5.0
-    # ★ 图格污染观察（review P1）：AGENTS §6 的 host_share>5% ⇒ 污染。**只警告不改判定** ——
-    #   "treatment 本身降 host" 时该判据要重释（skip-mask-fill Journey log ④），
-    #   判定语义的变更需用户批准；这里先把观察暴露出来。
+    paired = [r for r in runs if r["role"] == "pair"]
+    base = [r for r in paired if r["arm"] == arm_a]
+    treat = [r for r in paired if r["arm"] == arm_b]
+    if len(runs) != len(seq) or runs[-1]["role"] != "tail_canary":
+        reasons.append("尾金丝雀缺失 / round incomplete")
+    invalid_metrics = []
+    for r in runs:
+        for key in ("wall_p50_ms", "gpu_busy_ms", "host_share_pct"):
+            valid = finite_number(
+                r[key],
+                positive=key != "host_share_pct",
+                maximum=100.0 if key == "host_share_pct" else None,
+            )
+            if not valid:
+                invalid_metrics.append({"i": r["i"], "field": key, "value": r[key]})
+    if invalid_metrics:
+        reasons.append("指标缺失或无效（wall/busy须有限正数，host须为[0,100]，见 invalid_metrics）")
     host_share_warnings = [
         {"i": r["i"], "arm": r["arm"], "host_share_pct": r["host_share_pct"]}
         for r in runs
-        if r["host_share_pct"] is not None and r["host_share_pct"] > 5.0
+        if finite_number(r["host_share_pct"]) and r["host_share_pct"] > 5.0
     ]
-    token_sets = {json.dumps(r["tokens"]) for r in runs}
-    tokens_equal = len(token_sets) == 1
-    if not tokens_equal:
-        reasons.append("跨臂 token 序列不一致（%s→%s 改变了贪心轨迹）" % (arm_a, arm_b))
-    # ★ 轨迹退化警告（review P3）：合成 prompt 下 token 全同 ⇒ tokens_equal 近乎空判据
-    #   （routing-fusion Report 已自认）。只标记，不否决 —— 相等性结论仍成立，只是证据弱。
-    degenerate = False
-    if tokens_equal and runs:
-        degenerate = len(set(runs[0]["tokens"] or [])) <= 1
+    if host_share_warnings:
+        reasons.append("图格 host_share > 5%：轮次无效，不能采纳")
 
-    def _mean_median(vals: list[Any]) -> tuple[float | None, float | None]:
-        if any(v is None for v in vals) or not vals:
-            return None, None
-        ordered = sorted(vals)
-        n = len(ordered)
-        median = ordered[n // 2] if n % 2 else (ordered[n // 2 - 1] + ordered[n // 2]) / 2.0
-        return sum(ordered) / n, float(median)
+    def drift_of(key):
+        if len(runs) != len(seq) or not all(
+            finite_number(r[key], positive=True) for r in (runs[0], runs[-1])
+        ):
+            return None
+        value = drift_pct(runs[0][key], runs[-1][key])
+        return value if finite_number(abs(value)) else None
 
-    mean_a, median_a = _mean_median([r["wall_p50_ms"] for r in base])
-    mean_b, median_b = _mean_median([r["wall_p50_ms"] for r in treat])
-    delta_pct = round(100.0 * (mean_a - mean_b) / mean_a, 2) if mean_a and mean_b else None
-    return {
-        "generated_by": generated_by,
-        "env_var": env_var,
-        "status": "measured" if not reasons else "invalid",
-        "reasons": reasons,
-        "canary_drift_pct": drift,
-        "tokens_equal": tokens_equal,
-        "mean_wall_baseline_ms": round(mean_a, 4) if mean_a else None,
-        "mean_wall_treatment_ms": round(mean_b, 4) if mean_b else None,
-        "treatment_faster_pct": delta_pct,
-        # ---- 观察字段（review P1/P2/P3）：不参与 status 判定，供判读 ----
-        "stat": "mean_of_run_p50s",
-        "median_wall_baseline_ms": round(median_a, 4) if median_a is not None else None,
-        "median_wall_treatment_ms": round(median_b, 4) if median_b is not None else None,
-        "busy_drift_pct": busy_drift,
-        "busy_stable": busy_stable,
-        "host_share_warnings": host_share_warnings,
-        "degenerate_trajectory": degenerate,
-        "runs": runs,
-        "note": note,
-    }
+    drift = drift_of("wall_p50_ms")
+    busy_drift = drift_of("gpu_busy_ms")
+    if drift is None or abs(drift) > 5.0:
+        reasons.append("金丝雀缺失或 wall 漂移超过 5%")
+    valid_tokens = all(
+        isinstance(r["tokens"], list)
+        and len(r["tokens"]) == args.max_new_tokens
+        and all(type(t) is int and t >= 0 for t in r["tokens"])
+        and type(r["seed_token"]) is int
+        and r["seed_token"] >= 0
+        for r in runs
+    )
+    tokens_equal = valid_tokens and all(r["tokens"] == runs[0]["tokens"] for r in runs)
+    seeds_equal = valid_tokens and all(r["seed_token"] == runs[0]["seed_token"] for r in runs)
+    if not tokens_equal or not seeds_equal:
+        reasons.append("token/seed 证据缺失、不合法或跨臂不一致")
+    degenerate = bool(tokens_equal and len(set(runs[0]["tokens"])) <= 1)
+
+    def stats(arm):
+        vals = [r["wall_p50_ms"] for r in arm]
+        if not vals or not all(finite_number(v, positive=True) for v in vals):
+            return None, None, None
+        median = statistics.median(vals)
+        return statistics.mean(vals), median, statistics.median(abs(v - median) for v in vals)
+
+    mean_a, median_a, mad_a = stats(base)
+    mean_b, median_b, mad_b = stats(treat)
+    deltas = [
+        a["wall_p50_ms"] - b["wall_p50_ms"]
+        for a, b in zip(base, treat)
+        if finite_number(a["wall_p50_ms"], positive=True)
+        and finite_number(b["wall_p50_ms"], positive=True)
+    ]
+    delta_median = statistics.median(deltas) if deltas else None
+    return json_safe(
+        {
+            "generated_by": generated_by,
+            "protocol_version": 2,
+            "env_var": env_var,
+            "status": "measured" if not reasons else "invalid",
+            "reasons": reasons,
+            "adoption_verdict": "not_evaluated",
+            "adoption_requirements": "Independent oracle + natural-text gate + GPU regression; diagnostic A/B alone is insufficient.",
+            "canary_drift_pct": round(drift, 3) if drift is not None else None,
+            "tokens_equal": tokens_equal,
+            "seeds_equal": seeds_equal,
+            "mean_wall_baseline_ms": round(mean_a, 4) if mean_a is not None else None,
+            "mean_wall_treatment_ms": round(mean_b, 4) if mean_b is not None else None,
+            "treatment_faster_pct": (
+                round(100 * (mean_a - mean_b) / mean_a, 2) if mean_a and mean_b else None
+            ),
+            "stat": "mean_of_run_p50s",
+            "median_wall_baseline_ms": median_a,
+            "median_wall_treatment_ms": median_b,
+            "mad_wall_baseline_ms": mad_a,
+            "mad_wall_treatment_ms": mad_b,
+            "paired_wall": {
+                "n": len(deltas),
+                "delta_ms": deltas,
+                "wins": sum(d > 0 for d in deltas),
+                "ties": sum(d == 0 for d in deltas),
+                "win_rate": sum(d > 0 for d in deltas) / len(deltas) if deltas else None,
+                "median_delta_ms": delta_median,
+                "mad_delta_ms": (
+                    statistics.median(abs(d - delta_median) for d in deltas) if deltas else None
+                ),
+            },
+            "busy_drift_pct": round(busy_drift, 3) if busy_drift is not None else None,
+            "busy_stable": busy_drift is not None and abs(busy_drift) <= 5.0,
+            "host_share_warnings": host_share_warnings,
+            "invalid_metrics": invalid_metrics,
+            "degenerate_trajectory": degenerate,
+            "inherited_fusion_env": saved,
+            "runs": runs,
+            "note": note,
+        }
+    )
 
 
 def run_routing_ab(args: argparse.Namespace) -> dict[str, Any]:
@@ -296,6 +354,30 @@ def print_table(payload: dict[str, Any]) -> None:
         print("  … tail of ~%.0f more kernel occurrences/step not in the top table" % tail)
 
 
+def _source_identity() -> dict[str, Any]:
+    """Record checkout identity and tracked working diff without exposing patch content."""
+    root = Path(__file__).resolve().parents[1]
+    try:
+
+        def git(*args):
+            return subprocess.check_output(["git", *args], cwd=root, stderr=subprocess.DEVNULL)
+
+        diff = git("diff", "HEAD", "--binary")
+        code_hash = hashlib.sha256()
+        for directory in ("src", "benchmarks", "tools", "tests"):
+            for path in sorted((root / directory).rglob("*.py")):
+                code_hash.update(str(path.relative_to(root)).encode() + b"\0")
+                code_hash.update(path.read_bytes() + b"\0")
+        return {
+            "commit": git("rev-parse", "HEAD").decode().strip(),
+            "dirty": bool(git("status", "--porcelain")),
+            "tracked_diff_sha256": hashlib.sha256(diff).hexdigest(),
+            "code_sha256_including_untracked": code_hash.hexdigest(),
+        }
+    except (OSError, subprocess.CalledProcessError):
+        return {"commit": None, "dirty": None, "tracked_diff_sha256": None}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--model", required=True)
@@ -327,7 +409,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="fused-rope 候选 A/B：off→on 交替 N 轮（同进程），金丝雀+跨臂 token 比对",
     )
-    ap.add_argument("--ab-rounds", type=int, default=2, help="A/B 的 (off,on) 对数；2 ⇒ 4 次 run")
+    ap.add_argument(
+        "--ab-rounds",
+        type=int,
+        default=2,
+        help="相邻 A/B 对数；2 ⇒ 4 次配对 run + 1 次尾 canary（探索性）",
+    )
     args = ap.parse_args(argv)
     ab_flags = {
         "fused_route": args.ab_fused_route,
@@ -356,7 +443,19 @@ def main(argv: list[str] | None = None) -> int:
         "ab_fused_rope": bool(args.ab_fused_rope),
         "ab_rounds": args.ab_rounds if ab_mode else None,
     }
+    cfg["fusion_env"] = {
+        key: os.environ.get(key, "0") for key in (ABLATE_ARM_ENV, MASK_FILL_ARM_ENV, ROPE_ARM_ENV)
+    }
+    cfg["source"] = _source_identity()
+    cfg["versions"] = {}
+    for package in ("torch", "triton", "transformers"):
+        try:
+            cfg["versions"][package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            cfg["versions"][package] = None
     out = Path(args.json)
+    if out.exists():
+        ap.error("输出已存在；请使用新的 --json 路径，保留旧轮次证据")
     try:
         if ab_mode == "fused_route":
             payload = run_routing_ab(args)
