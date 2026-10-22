@@ -534,6 +534,7 @@ class StaticCacheDecodeSession:
         #   不替换 attention 的路径（HF 自己）完全不受影响。
         self.cache._lemoq_filled_len = self.buffers.filled_len
         self.graph = None
+        self._captured_mask_independent = False
         self.stream = None
         self.logits = None
         self._capture_token_id: int | None = None
@@ -611,7 +612,32 @@ class StaticCacheDecodeSession:
             self.torch.cuda.synchronize()
         return logits
 
+    def _decode_mask_independent(self) -> bool:
+        """Capability of the exact OLMoE decode forwards used during capture."""
+        from lemoq.kernels.attn_decode import _decode_forward_impl
+
+        config = getattr(self.model, "config", None)
+        if getattr(config, "model_type", None) != "olmoe" or getattr(
+            config, "output_attentions", False
+        ):
+            return False
+        layers = getattr(getattr(self.model, "model", None), "layers", ())
+        if not layers:
+            return False
+        for layer in layers:
+            attn = getattr(layer, "self_attn", None)
+            if (
+                getattr(attn, "_lemoq_attn_backend", None) != "triton"
+                or getattr(getattr(attn, "forward", None), "__func__", None)
+                is not _decode_forward_impl
+                or getattr(attn, "num_key_value_groups", 1) != 1
+            ):
+                return False
+        return True
+
     def _set_step_inputs(self, *, skip_mask: bool = False) -> None:
+        if skip_mask and not getattr(self, "_captured_mask_independent", False):
+            raise RuntimeError("skip-mask-fill requires a captured mask-independent kernel backend")
         if self.current_token_id is None:
             raise RuntimeError("prefill must run before decode")
         torch = self.torch
@@ -685,6 +711,8 @@ class StaticCacheDecodeSession:
                 self.logits = output.logits
             self.stream.synchronize()
             self.graph = graph
+            self._captured_mask_independent = self._decode_mask_independent()
+            self.capture_info["mask_independent_decode"] = self._captured_mask_independent
             self.capture_info["capture_success"] = True
             self.capture_info["stream"] = "dedicated CUDA stream"
             return dict(self.capture_info)

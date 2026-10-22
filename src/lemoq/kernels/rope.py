@@ -88,7 +88,6 @@ if _HAS_TRITON:  # pragma: no cover - 仅 GPU 机器
         out_ptr,
         cos_ptr,
         sin_ptr,
-        H,
         D,
         sx_h,
         sx_d,
@@ -129,8 +128,12 @@ def _decode_shape_guard(q: Any, k: Any, cos_u: Any, sin_u: Any) -> bool:
 
     if not (_HAS_TRITON and q.is_cuda and k.is_cuda):
         return False
+    if q.ndim != 4 or k.ndim != 4:
+        return False
     if q.dtype not in (torch.float16, torch.float32):
         return False  # bf16 的 1 ulp ≈ 8e-3 过不了 K1 的 1e-3 —— 本项目只跑 fp16
+    if any(t.dtype != q.dtype or t.device != q.device or not t.is_cuda for t in (k, cos_u, sin_u)):
+        return False  # mixed types promote differently in HF; mixed devices cannot launch safely
     if q.shape[0] != 1 or k.shape[0] != 1:
         return False  # batch=1 only
     if q.ndim != 4 or k.ndim != 4 or q.shape[2] != 1 or k.shape[2] != 1:
@@ -141,6 +144,8 @@ def _decode_shape_guard(q: Any, k: Any, cos_u: Any, sin_u: Any) -> bool:
     if d % 2 != 0 or d < 2:
         return False
     if tuple(cos_u.shape) != (1, 1, 1, d) or tuple(sin_u.shape) != (1, 1, 1, d):
+        return False
+    if cos_u.stride(-1) != sin_u.stride(-1) or q.shape[1] < 1 or k.shape[1] < 1:
         return False
     return True
 
@@ -157,7 +162,12 @@ def apply_rotary_pos_emb_fused(
 
     任何不满足守卫的输入（CPU、prefill、batch>1、dtype 不支持、cos 形状不是
     decode 的 (1,1,1,D)）都**原样退回 HF 实现**——回退与 HF 逐位相同。
+
+    `position_ids` 非 None 保留保守 HF 回退。固定的 transformers 4.57.6 中该参数
+    已弃用且未使用；这项限制不是“修复 HF 按位置索引”的证据。
     """
+    if position_ids is not None:
+        return _hf_apply(q, k, cos, sin, position_ids=position_ids, unsqueeze_dim=unsqueeze_dim)
     cos_u = cos.unsqueeze(unsqueeze_dim)
     sin_u = sin.unsqueeze(unsqueeze_dim)
     if not _decode_shape_guard(q, k, cos_u, sin_u):
@@ -180,7 +190,6 @@ def apply_rotary_pos_emb_fused(
             out,
             cos_t,
             sin_t,
-            heads,
             d,
             int(x.stride(1)),
             int(x.stride(3)),

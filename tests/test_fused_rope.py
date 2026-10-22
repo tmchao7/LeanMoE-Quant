@@ -123,17 +123,18 @@ def test_gpu_parity_fused_vs_hf(d, dtype):
         rot = torch.cat((-x2, x1), dim=-1)
         return (xf * c.double().unsqueeze(1) + rot * s.double().unsqueeze(1)).to(dtype)
 
-    err_k = (got_q - oracle(q, cos, sin)).abs().max().item()
-    err_b = (want_q - oracle(q, cos, sin)).abs().max().item()
     tol = {
         "tol_atol": 1e-3,
         "tol_rtol": 1e-3,
         "tol_slack": 1.5,
     }  # 与 attn_decode.PARITY_GATE 同口径
-    assert err_k <= err_b * tol["tol_slack"] + 1e-12, "err_kernel=%g err_baseline=%g" % (
-        err_k,
-        err_b,
-    )
+    for x, got, want in ((q, got_q, want_q), (k, got_k, want_k)):
+        err_k = (got - oracle(x, cos, sin)).abs().max().item()
+        err_b = (want - oracle(x, cos, sin)).abs().max().item()
+        assert err_k <= err_b * tol["tol_slack"] + 1e-12, "err_kernel=%g err_baseline=%g" % (
+            err_k,
+            err_b,
+        )
     assert torch.allclose(got_q, want_q, atol=tol["tol_atol"], rtol=tol["tol_rtol"])
     assert torch.allclose(got_k, want_k, atol=tol["tol_atol"], rtol=tol["tol_rtol"])
 
@@ -157,3 +158,41 @@ def test_gpu_bf16_falls_back_bitwise():
     got = rope.apply_rotary_pos_emb_fused(q, k, cos, sin)
     want = _hf_apply(q, k, cos, sin)
     assert torch.equal(got[0], want[0]) and torch.equal(got[1], want[1])
+
+
+# ---------------------------------------------------------------------------
+# review 2026-10-22（P4/P5）：position_ids 守卫 + 死参数
+# ---------------------------------------------------------------------------
+
+
+def test_position_ids_falls_back_to_hf_before_guard(monkeypatch):
+    """P4: position_ids 非 None ⇒ 直接回退 HF（不进 kernel 路径，不静默算错）。"""
+    calls = []
+
+    def rec(q, k, cos, sin, **kw):
+        calls.append(kw.get("position_ids"))
+        return q, k
+
+    def guard_bomb(*a, **k):
+        raise AssertionError("position_ids 非 None 时不应走到 kernel 守卫")
+
+    monkeypatch.setattr(rope, "_hf_apply", rec)
+    monkeypatch.setattr(rope, "_decode_shape_guard", guard_bomb)
+    q, k, cos, sin = _inputs(d=64, dtype=torch.float32)
+    pos = torch.zeros(1, 1, dtype=torch.long)
+    rope.apply_rotary_pos_emb_fused(q, k, cos, sin, position_ids=pos)
+    assert calls and calls[0] is pos
+
+
+def test_kernel_has_no_dead_params():
+    """P5: `_rope_one_kernel` 签名里不留未使用的参数（曾有 H 传入但从不用）。"""
+    from pathlib import Path
+
+    src = Path(rope.__file__).read_text(encoding="utf-8")
+    start = src.index("def _rope_one_kernel(")
+    end = src.index("):", start)
+    params = [p.strip().rstrip(":").split(":")[0].strip() for p in src[start:end].split(",")]
+    params = [p for p in params if p and "(" not in p]
+    assert "H" not in params, params
+    # 调用处也不能再传死参数（launch 参数个数 = 签名参数个数）
+    assert "            heads,\n            d," not in src

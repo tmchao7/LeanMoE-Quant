@@ -40,6 +40,7 @@ def _bare_session() -> StaticCacheDecodeSession:
     )
     sess.position = POSITION
     sess.current_token_id = 42
+    sess._captured_mask_independent = True  # mock a captured, verified kernel backend
     return sess
 
 
@@ -111,3 +112,49 @@ def test_set_step_inputs_default_is_off():
     param = sig.parameters.get("skip_mask")
     assert param is not None
     assert param.default is False
+
+
+def test_skip_mode_leaves_mask_stale_contract():
+    """P6（review 2026-10-22）：skip 模式下 mask 是陈旧数据 —— 契约被单测钉住。
+
+    skip_mask=True 时 attention_mask 逐字节不动（含 position 前缀），filled_len 照更。
+    契约：**skip 模式下 mask 未定义，禁止任何图外消费者读它**；eager 路径永远重填。
+    """
+    sess = _bare_session()
+    before = sess.buffers.attention_mask.clone()
+    sess.position = 10
+    sess._set_step_inputs(skip_mask=True)
+    assert torch.equal(sess.buffers.attention_mask, before)  # mask 陈旧
+    assert int(sess.buffers.filled_len.item()) == 11  # 长度语义仍正确
+    # eager 路径（默认参数）永远重填 —— 陈旧数据不会被带回 eager
+    sess._set_step_inputs()
+    assert not torch.equal(sess.buffers.attention_mask, before)
+
+
+def test_skip_mask_refuses_unproven_consumer_before_mutation():
+    sess = _bare_session()
+    sess._captured_mask_independent = False
+    before = sess.buffers.token.clone()
+    with pytest.raises(RuntimeError, match="mask-independent"):
+        sess._set_step_inputs(skip_mask=True)
+    assert torch.equal(sess.buffers.token, before)
+
+
+def test_mask_capability_requires_all_layers_and_real_forward():
+    from types import MethodType, SimpleNamespace
+
+    from lemoq.kernels.attn_decode import _decode_forward_impl
+
+    sess = _bare_session()
+    attn = SimpleNamespace(_lemoq_attn_backend="triton", num_key_value_groups=1)
+    attn.forward = MethodType(_decode_forward_impl, attn)
+    sess.model = SimpleNamespace(
+        config=SimpleNamespace(model_type="olmoe", output_attentions=False),
+        model=SimpleNamespace(layers=[SimpleNamespace(self_attn=attn)]),
+    )
+    assert sess._decode_mask_independent()
+    attn._lemoq_attn_backend = "oracle"
+    assert not sess._decode_mask_independent()
+    attn._lemoq_attn_backend = "triton"
+    sess.model.model.layers.append(SimpleNamespace(self_attn=SimpleNamespace()))
+    assert not sess._decode_mask_independent()
