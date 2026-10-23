@@ -181,9 +181,14 @@ ramp-up 的 kernel 几乎是全部时间（实测 5.05 µs/次，gap 2.3 µs/次
 - 候选已实现、**默认关**：`src/lemoq/kernels/packed_qkv.py` + 环境变量
   `LEMOQ_PACKED_QKV=1`（只对 w8 / `dequant=fused` / 对称 / 无 bias / `attn=kernel` 生效，
   其余**显式拒绝**，不静默退回三次调用）；是否生效记进 payload 的 `config.packed_qkv`。
-- 验收状态：CPU 契约测试 8 条（含 reference 路径的打包等价）；GPU 的 **K1 逐位对照**
-  已写好（`tests/test_packed_qkv.py`，`-m gpu`）。**隔离/图内 A/B 还没跑**，所以
-  0.07–0.10 ms 仍是 **est**，不是已测收益。
+- 验收状态：CPU 契约测试 8 条（含 reference 路径的打包等价）；GPU **K1 逐位对照 PASS**
+  （packed 一次 launch 与三次独立调用**逐位相同**，最大误差 0）。
+- **同进程交替 A/B 已跑（2026-10-23），但按本项目的 `host_share` 规则判 VOID**：
+  `tools/profile_graph --ab-packed-qkv`，3 对交替 + 尾金丝雀，`tokens_equal=true`、
+  canary 2.404%，但**每轮 `host_share` 5.4–6.6% > 5% ⇒ 整轮 `invalid`，不能采纳**。
+  可信的 host 无关信号：**GPU busy 1.8839 → 1.7852 ms（−98.7 µs，−5.24%，3/3 对获胜）**，
+  约为该 kernel 149 µs 地板缺口的 2/3，与 F2 的机理一致；wall 差 +4.57% 同向但**不作数**。
+  下一步：安静机器上用 `benchmarks.runner` 重测（归档 + graph 金丝雀 + 23 格刷新）才算采纳。
 
 #### 改法
 
