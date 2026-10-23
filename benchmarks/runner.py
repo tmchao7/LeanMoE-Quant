@@ -1667,6 +1667,8 @@ def build_payload(
     }
     payload["hardware"] = _hardware_from_probe(probe)
     payload["runtime"] = _runtime()
+    from lemoq.kernels.fusion_switches import fusion_payload_fields  # noqa: PLC0415
+
     payload["config"] = {
         "bit_width": cfg.get("bit_width") or "fp16",
         "group_size": cfg.get("group_size"),
@@ -1678,7 +1680,9 @@ def build_payload(
         "moe_blocks_replaced": res.get("moe_blocks_replaced"),
         # ★ P2i：decode 的 RMSNorm 实现（fused = 本仓库 kernel / hf = transformers 原链）
         **_rmsnorm_payload_fields(res, cfg),
-        # ★ F2 候选：q/k/v 是否走了打包投影（cell id 里没有这个轴，必须进 payload）
+        # ★ 融合候选的**有效**状态（env 覆盖 + 代码默认）：采纳 = 改默认，记录自动跟随
+        **fusion_payload_fields(),
+        # F2 的实测状态（安装数量）比"开关想要"更强：两者不一致时以这里为准
         "packed_qkv": res.get("packed_qkv"),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
@@ -1918,6 +1922,8 @@ def build_cudagraph_payload(
     #   见 EXP-p4b-01-truncation 记录 §2.7 的「P3 的真实工作量」。
     bit_width = str(cfg.get("bit_width") or "fp16")
     quantized = bit_width != "fp16"
+    from lemoq.kernels.fusion_switches import fusion_payload_fields  # noqa: PLC0415
+
     payload["config"] = {
         "bit_width": bit_width,
         "group_size": cfg.get("group_size") if quantized else None,
@@ -1929,7 +1935,9 @@ def build_cudagraph_payload(
         "moe_blocks_replaced": res.get("moe_blocks_replaced"),
         # ★ 这一块**覆盖**上面那块 —— 字段必须在这里也出现（见 `_rmsnorm_payload_fields`）
         **_rmsnorm_payload_fields(res, cfg),
-        # ★ F2 候选：q/k/v 是否走了打包投影（cell id 里没有这个轴，必须进 payload）
+        # ★ 融合候选的**有效**状态（env 覆盖 + 代码默认）：采纳 = 改默认，记录自动跟随
+        **fusion_payload_fields(),
+        # F2 的实测状态（安装数量）比"开关想要"更强：两者不一致时以这里为准
         "packed_qkv": res.get("packed_qkv"),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),

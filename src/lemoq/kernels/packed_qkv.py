@@ -25,7 +25,6 @@ decode. `o_proj` is untouched.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,7 +33,9 @@ SWITCH = "LEMOQ_PACKED_QKV"
 
 def packed_qkv_enabled() -> bool:
     """Runtime switch; read at install time (the buffers are built once)."""
-    return os.environ.get(SWITCH, "0") == "1"
+    from lemoq.kernels.fusion_switches import fusion_enabled  # noqa: PLC0415
+
+    return fusion_enabled("packed_qkv")
 
 
 def _attention_modules(model: Any) -> list[Any]:

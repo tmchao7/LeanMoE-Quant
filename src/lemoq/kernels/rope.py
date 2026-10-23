@@ -29,7 +29,6 @@ HF 的 `rotate_half` 链每层 10 个 kernel、全步 160 个，**散在四个 f
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 __all__ = ["apply_rotary_pos_emb_fused", "fused_rope_available", "warm"]
@@ -37,7 +36,9 @@ __all__ = ["apply_rotary_pos_emb_fused", "fused_rope_available", "warm"]
 
 def _fused_rope_enabled() -> bool:
     """候选开关（默认关 = 走 HF 原路，已录格子零影响）。"""
-    return os.environ.get("LEMOQ_FUSED_ROPE", "0") == "1"
+    from lemoq.kernels.fusion_switches import fusion_enabled  # noqa: PLC0415
+
+    return fusion_enabled("fused_rope")
 
 
 try:  # pragma: no cover - triton 只在 GPU 机器上存在

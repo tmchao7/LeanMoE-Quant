@@ -486,9 +486,10 @@ def _skip_mask_fill_enabled() -> bool:
     capture 烘焙；eager `decode_eager()` 与 capture warmup 不读它 —— eager 臂
     依赖新鲜 mask，capture 期保持与已录路径逐字节一致。采纳为默认需另行批准。
     """
-    import os
 
-    return os.environ.get("LEMOQ_SKIP_MASK_FILL", "0") == "1"
+    from lemoq.kernels.fusion_switches import fusion_enabled  # noqa: PLC0415
+
+    return fusion_enabled("skip_mask_fill")
 
 
 class StaticCacheDecodeSession:

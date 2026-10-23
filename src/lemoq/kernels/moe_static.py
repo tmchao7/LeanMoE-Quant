@@ -253,9 +253,10 @@ def _fused_route_enabled() -> bool:
     在 Python 相位（prefill / capture）读取 ⇒ capture 烘焙所选实现；
     采纳前不改默认值（见 docs/compose/spec/routing-fusion.md [S3]）。
     """
-    import os
 
-    return os.environ.get("LEMOQ_FUSED_ROUTE", "0") == "1"
+    from lemoq.kernels.fusion_switches import fusion_enabled  # noqa: PLC0415
+
+    return fusion_enabled("fused_route")
 
 
 def _route(x: Any, router_weight: Any, *, top_k: int, norm_topk_prob: bool):
