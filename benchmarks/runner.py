@@ -923,6 +923,16 @@ def run_cudagraph(
         raise ValueError("the CUDA Graph arm supports batch=1 and ctx >= 1 only")
     CudaGraphConfig(ctx=ctx, max_new_tokens=max_new_tokens, batch=batch).validate_timing(timed)
 
+    # ★ F2 候选（packed q/k/v）第一轮只挂在 attn=kernel 的图路径上；其他组合**显式拒绝**，
+    #   而不是静默退回三次投影 —— 否则会把"候选没生效"量成"候选没收益"。
+    from lemoq.kernels.packed_qkv import packed_qkv_enabled  # noqa: PLC0415
+
+    if packed_qkv_enabled() and attn != "kernel":
+        raise ValueError(
+            "LEMOQ_PACKED_QKV=1 目前只支持 attn=kernel 的 cudagraph 格；得到 attn=%r" % (attn,)
+        )
+    packed_qkv_modules = 0
+
     qspec = quant_spec_for_cfg(quant_cfg) if quant_cfg else None
 
     tr = VramTracker()
@@ -986,6 +996,13 @@ def run_cudagraph(
         attn_replaced = replace_attention_cores(model, backend="triton")
         torch.cuda.synchronize()
         tr.mark("after_attn_replace")
+        if packed_qkv_enabled():
+            # F2 候选：q/k/v 打包成一份 buffer（在 capture 之前建好，见 packed_qkv.py）。
+            from lemoq.kernels.packed_qkv import install_packed_qkv  # noqa: PLC0415
+
+            packed_qkv_modules = install_packed_qkv(model)
+            torch.cuda.synchronize()
+            tr.mark("after_packed_qkv")
         attn_warm = warm_attn(
             heads=int(model.config.num_attention_heads),
             head_dim=int(
@@ -1097,6 +1114,8 @@ def run_cudagraph(
 
     res["rmsnorm"] = str(getattr(model, "_lemoq_rmsnorm_impl", rmsnorm))
     res["rms_norms_replaced"] = int(rms_norms_replaced(model))
+    res["packed_qkv"] = bool(packed_qkv_modules)
+    res["packed_qkv_modules"] = int(packed_qkv_modules)
     res["kernel_warm"] = kernel_warm
     res["moe_blocks_replaced"] = int(moe_replaced)
     res["quantize_report"] = None if qreport is None else qreport.to_dict()
@@ -1152,6 +1171,12 @@ def run_baseline(
     from benchmarks.hostgap import measure_host_gap
     from benchmarks.timing import summarize
     from benchmarks.vram import VramTracker, split_report
+    from lemoq.kernels.packed_qkv import packed_qkv_enabled  # noqa: PLC0415
+
+    if packed_qkv_enabled():
+        raise ValueError(
+            "LEMOQ_PACKED_QKV=1 只挂在 attn=kernel 的 cudagraph 路径；eager 臂显式拒绝"
+        )
 
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[
         dtype_name
@@ -1363,6 +1388,8 @@ def run_baseline(
         "moe_blocks_replaced": int(moe_replaced),
         "rmsnorm": str(getattr(model, "_lemoq_rmsnorm_impl", rmsnorm)),
         "rms_norms_replaced": int(getattr(model, "_lemoq_rms_norms_replaced", 0)),
+        # F2 候选只挂在 attn=kernel 的 cudagraph 路径；eager 臂在这里恒为 False（env 已拒绝）。
+        "packed_qkv": False,
         "breakdown": breakdown,
         "moe_block": moe_block_bench,
         "ttft": ttft,
@@ -1651,6 +1678,8 @@ def build_payload(
         "moe_blocks_replaced": res.get("moe_blocks_replaced"),
         # ★ P2i：decode 的 RMSNorm 实现（fused = 本仓库 kernel / hf = transformers 原链）
         **_rmsnorm_payload_fields(res, cfg),
+        # ★ F2 候选：q/k/v 是否走了打包投影（cell id 里没有这个轴，必须进 payload）
+        "packed_qkv": res.get("packed_qkv"),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
         "batch": cfg.get("batch"),
@@ -1900,6 +1929,8 @@ def build_cudagraph_payload(
         "moe_blocks_replaced": res.get("moe_blocks_replaced"),
         # ★ 这一块**覆盖**上面那块 —— 字段必须在这里也出现（见 `_rmsnorm_payload_fields`）
         **_rmsnorm_payload_fields(res, cfg),
+        # ★ F2 候选：q/k/v 是否走了打包投影（cell id 里没有这个轴，必须进 payload）
+        "packed_qkv": res.get("packed_qkv"),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
         "batch": cfg.get("batch"),
