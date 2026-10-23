@@ -61,14 +61,18 @@ for p in sorted(glob.glob("results/EXP-*__*/result.json")):
         args += ["--group-size", str(c["group_size"])]
     if c.get("batch"):
         args += ["--batch", str(c["batch"])]
-    print("%s|%s|%s" % (exp, " ".join(args), cell))
+    packed = "1" if (os.environ.get("LEMOQ_PACKED_QKV") == "1" and "--attn kernel" in " ".join(args)) else "0"
+    print("%s|%s|%s|%s" % (exp, " ".join(args), cell, packed))
 PYEOF
 echo "清单 $(wc -l < "$LIST") 格" >> "$LOG"; cat "$LIST" >> "$LOG"
 
 # ---- 2) 归档 + 重跑 + 逐格自检 ----
 run_one () {
-  local exp=$1 args=$2 cell=$3 label
+  local exp=$1 args=$2 cell=$3 packed=${4:-0} label
   label=$(basename "$cell")
+  # F2 只对 attn=kernel 的格生效（hook 只装在那条 forward 上）；其余格必须关掉，
+  # 否则 runner 的显式拒绝会把它们写成 blocked。
+  if [ "$packed" = "1" ]; then export LEMOQ_PACKED_QKV=1; else unset LEMOQ_PACKED_QKV; fi
   [ -f "$OUT/archive/$label.json" ] || cp -p "$cell/result.json" "$OUT/archive/$label.json" 2>/dev/null
   snap "$label-pre"
   echo "=== [$label] $exp $args start $(date -Is)" >> "$LOG"
@@ -101,16 +105,16 @@ PYEOF
 CANARY_CELL=results/EXP-p4b-01-truncation__bit_width=w8a16_execution=cudagraph_ctx=1024
 CANARY_EXP=EXP-p4b-01-truncation
 CANARY_ARGS="--ctx 1024 --bit-width w8a16 --execution cudagraph --moe grouped --dequant fused"
-run_one "$CANARY_EXP" "$CANARY_ARGS" "$CANARY_CELL"
+run_one "$CANARY_EXP" "$CANARY_ARGS" "$CANARY_CELL" 1
 cp -p "$CANARY_CELL/result.json" "$OUT/canary_head.json" 2>/dev/null || true
 
-while IFS='|' read -r exp args cell; do
+while IFS='|' read -r exp args cell packed; do
   [ -z "${exp:-}" ] && continue
   [ "$cell" = "$CANARY_CELL" ] && continue   # 金丝雀已跑过；尾金丝雀统一放最后
-  run_one "$exp" "$args" "$cell"
+  run_one "$exp" "$args" "$cell" "${packed:-0}"
 done < "$LIST"
 
-run_one "$CANARY_EXP" "$CANARY_ARGS" "$CANARY_CELL"
+run_one "$CANARY_EXP" "$CANARY_ARGS" "$CANARY_CELL" 1
 cp -p "$CANARY_CELL/result.json" "$OUT/canary_tail.json" 2>/dev/null || true
 
 # ---- 4) 判定：金丝雀漂移（fail-closed，非零退出 = 整轮 VOID）----
