@@ -102,9 +102,9 @@
 |---|---|---|
 | batch 1→8：step p50 **87.20→86.29 ms 近平坦**，tok/s **11.47→92.71（8.08×）**，canary −3.448% | `results/batch_sweep.json` | ✅ 带"fp16 单臂、同轮"限定 |
 | occupancy 上界：三族 kernel blocks/SM ≤12/≤12/≤6，**上界 100%**（解析值非 ncu） | `results/occupancy.json` | ⚠️ 必须注明"解析上界" |
-| 测试 **501 passed**（Mac CPU，`-m "not gpu"`，2026-10-11 在 `opt/fused-rope`）；main 为 480 | 本地 pytest | ✅ 写"500+ 单测" |
+| 测试 **657 passed**（Mac CPU，`-m "not gpu"`，2026-10-23 在 `codex/quant-w4-calibration`）；main 为 480 | 本地 pytest | ✅ 写"600+ 单测" |
 | 自研 Triton kernel 族：**4 已采纳 + fused-RoPE 候选（第 5 个）** | `src/lemoq/kernels/` | ✅ "4–5 个自研 kernel" |
-| 实验矩阵 64 格 / 98 份 result.json / 三轮 VOID 不发数 | `configs/experiments.yaml`、`results/` | ✅ 方法论 |
+| 实验矩阵 64 格 / 101 份 result.json（84 done） / 三轮 VOID 不发数 | `configs/experiments.yaml`、`results/` | ✅ 方法论 |
 
 ### ❌ 永远不写
 
@@ -240,8 +240,10 @@ bash scripts/run_gpu_suite.sh --dry-run
 
 - **规模小**：1B 激活 / 7B 总参、单卡、batch=1 单流；不能外推成服务性能（有一整段
   applicability 声明在每份 payload 里）。
-- **量化算法简单**：per-group 对称 **RTN**，没有 GPTQ/AWQ/校准集；卖点在**执行与评估闭环**，
-  不在算法新颖度。
+- **量化算法：已从 RTN 扩到 GPTQ + 校准集，但 4-bit 仍过不了门**：主力是 per-group 对称 RTN；
+  2026-10-23 实现了 GPTQ 与校准/退路流程并在 5090 上实测——W4 RTN / W4 GPTQ / ≤25% 整层 W8
+  退路**全部 FAIL**，负结果已入档（`experiments/EXP-p1-05-w4-expert-calibration.md`）。卖点仍在
+  **执行与评估闭环**，不在算法新颖度；AWQ 未做。
 - **ncu 计数拿不到**：宿主策略阻断（`RmProfilingAdminOnly: 1` + 无 `CAP_SYS_ADMIN`），
   已交出替代口径（解析字节 / 隔离计时）但没有 stall / occupancy 归因（见 `docs/reference/NCU_EVIDENCE.md`）。
 - **两条声明了但未跑的**：FP8 / MXFP4（矩阵里有条目，未跑）。

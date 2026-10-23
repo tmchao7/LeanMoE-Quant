@@ -431,7 +431,12 @@ class StaticShapedMoE:
 
 
 def replace_moe_blocks(
-    model: Any, *, verbose: bool = False, impl: str = "gather", quant: Any = None
+    model: Any,
+    *,
+    verbose: bool = False,
+    impl: str = "gather",
+    quant: Any = None,
+    prequantized: dict[int, Any] | None = None,
 ) -> int:
     """把模型里每个 `OlmoeSparseMoEBlock` 就地换成固定形状版本。
 
@@ -454,15 +459,44 @@ def replace_moe_blocks(
     if impl not in VALID_MOE_IMPLS:
         raise ValueError("unknown impl %r; expected one of %s" % (impl, VALID_MOE_IMPLS))
 
+    if prequantized is not None:
+        from types import SimpleNamespace
+
+        from lemoq.quant.expert_calibration import validate_packed
+
+        if impl != "grouped" or quant is not None:
+            raise ValueError("prequantized requires grouped and forbids re-quantization")
+        if set(prequantized) != set(range(len(model.model.layers))):
+            raise ValueError("prequantized must cover all model layers exactly")
+        # Validate all layers before mutating any layer; never call fuse_experts/RTN.
+        for index, layer in enumerate(model.model.layers):
+            experts = layer.mlp.experts
+            validate_packed(
+                prequantized[index],
+                experts=len(experts),
+                hidden=experts[0].gate_proj.in_features,
+                ffn=experts[0].down_proj.in_features,
+            )
+
     replaced = 0
-    for layer in model.model.layers:
+    for index, layer in enumerate(model.model.layers):
         block = getattr(layer, "mlp", None)
         if block is None or not hasattr(block, "experts"):
             continue
         if not hasattr(block, "gate") or not hasattr(block, "top_k"):
             continue  # 不是 sparse MoE（例如 dense 层）
 
-        static = StaticShapedMoE(block, impl=impl, quant=quant)
+        if prequantized is None:
+            static = StaticShapedMoE(block, impl=impl, quant=quant)
+        else:
+            static = SimpleNamespace(
+                fused=prequantized[index].to(device=block.gate.weight.device),
+                router_weight=block.gate.weight.detach(),
+                top_k=int(block.top_k),
+                norm_topk_prob=bool(getattr(block, "norm_topk_prob", False)),
+                act_fn=getattr(block, "act_fn", None),
+                impl=impl,
+            )
 
         # 释放原始 experts，避免显存翻倍
         del block.experts

@@ -70,11 +70,20 @@ settled — do not re-derive them and do not re-run their cells:
   (4.478 ms = **44.2%** of GPU busy) and **quantization-invariant** (4.478 / 4.512 / 4.526 / 4.555 ms
   for fp16 → w4a16) — the cap the plan predicted. The grouped path already removed it; see P2b.
 
+- **★ W4 expert quantization is CLOSED as a negative result (2026-10-23, `EXP-p1-05`).** On the 5090,
+  W8-RTN control passes the gate (KL 0.001154 / top-1 0.981818 / PPL +0.0443%); W4-RTN fails
+  (0.044720 / 0.903030 / +4.39%), W4-GPTQ fails harder (0.054835 / 0.915152 / +7.15%), and the
+  pre-registered ≤25% whole-layer W8 fallback (layers 0/13/14/15, bytes −36.92%) still fails
+  (0.026455 / 0.933333 / +4.19%). Per the hypothesis's own refutation clause the expansion **stops**:
+  no ctx=4096, no test split, no 4-bit latency. Do **not** re-run it; the record is
+  `experiments/EXP-p1-05-w4-expert-calibration.md` and the artifacts are on the GPU box +
+  `lemoq-artifacts/EXP-p1-05-2026-10-23/` (outside git). 4-bit stays gated by rule 2.
+
 Read, in this order: **`RESULTS.md`** (the one-page result with a citation per number),
 **`configs/experiments.yaml`** (the only source of hypotheses and cells), the **record** of the
 experiment you are about to touch (`experiments/<EXP-ID>.md`), then
-**`docs/handoff/HANDOFF_2026-10-10.md`** (the current state summary; superseded handoffs are
-deleted — history lives in git).
+**`docs/handoff/HANDOFF_2026-10-23.md`** (the current GPU-validation handoff;
+the 2026-10-10 handoff remains linked as historical context).
 
 Two rules come before everything else: **do not redo what §3 lists as done**, and **ask the user**
 before changing a matrix axis, a cell id, or overwriting a recorded `result.json` (§6).
@@ -141,6 +150,7 @@ in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`
 | In-graph attention × quantization, 8 cells | done — **supported**; **canonical = v3** (fused RMSNorm, §5.7): quantized **1.1955/1.3034** @1024, **1.0875/1.2555** @4096, best cell **1.87× / 3.11×** vs fp16 × sdpa | `experiments/EXP-p4c-01-in-graph-attention.md` |
 | E4 routing overhead | done — **supported**: 44.2% of GPU busy, and **quantization-invariant** (4.478/4.512/4.526/4.555 ms for fp16/w8a16/w8a8/w4a16) | `experiments/EXP-p4-01-moe-routing-overhead.md` |
 | The elementwise/copy tail (0.90 ms, "~330 kernels") | done — classified: it is **~13 named families × 16–83 calls/step**, not a flat tail; module-level attribution VOID (its own K1 failed) | `experiments/EXP-p4c-02-elementwise-tail.md` |
+| W4 expert calibration (4-bit) | **done 2026-10-23 — negative result** (RTN / GPTQ / ≤25% whole-layer W8 fallback all fail the gate; no latency published) | `experiments/EXP-p1-05-w4-expert-calibration.md` |
 | E5 expert sensitivity, E6 KV INT8, E8 cross-bandwidth, FP8/MXFP4, dense curves, quant × batch (E3) | **not run**（batch sweep 的 **fp16 曲线已测**：G2 done 2026-10-10，金丝雀 −3.448%，`results/batch_sweep.json`；未跑的是矩阵里的**量化 × batch**） | `configs/experiments.yaml`, `PLAN.md` §7, `tools/batch_sweep.py` |
 | ncu evidence (a Phase 2 deliverable) | **partly delivered 2026-10-08** — the counter path is **blocked by the host** (`RmProfilingAdminOnly: 1` + no `CAP_SYS_ADMIN` in the container; even the counter-free `gpu__time_duration.sum` is refused). Substitute delivered: kernel/call-level bandwidth attainment from hand-computed necessary bytes ÷ isolated cold timing ÷ measured achievable bandwidth, with an L2 flush and an explicit event-floor subtraction. Headline: fp16 grouped GEMV **71.0%** of the wall, fused dequant-GEMM **94.9%**, and the expert GEMV alone accounts for **90%** of E7's step-level saving. Occupancy **analytic bounds** delivered 2026-10-10 (`tools/occupancy_probe.py`, `status=done`: blocks/SM ≤12/≤12/≤6). Missing: stall attribution (needs counters) | `docs/reference/NCU_EVIDENCE.md`, `results/ncu_evidence/isolated.json`, `results/occupancy.json`, `tools/ncu_evidence.py`, `tools/occupancy_probe.py` |
 
@@ -167,8 +177,9 @@ that the science was not done — read the record first.
 | P2j | ✅ **done 2026-10-08** (31 cells re-run, canary +0.13%): **13 graph cells adopted** (host ≤5%) — e.g. p4b's cudagraph set (E7 now **1.1911/1.0888**; 1.1927 was the canary-first denominator), p2-02 4.08→3.68, p2-04 3.11/3.48→2.63/3.00, p2-05 3.01/3.24→2.51/2.75; **18 host-bound cells VOID** (co-tenant CPU load; proved by the `--rmsnorm hf` control: `kernels_per_call`/`gpu_busy` match the archive exactly while `host_p50` goes 1.5 → 35.2 ms) ⇒ their pre-P2i payloads were **restored as canonical** and the contended refresh copies are kept in `results/EXP-p2j-refresh/contended/`. `w8a8@4096`'s gate flip is documented as a re-adjudication (borderline) | the norm swap made every recorded ms stale | per-record "★ P2j 刷新" sections + `results/EXP-p2j-refresh/` | done |
 | P2k | **Re-run the 18 host-bound cells on a quiet box** (p0-02 ×2, p0-04 ×2, p2-01 ×6, p4b eager ×8) | their refresh was VOID on the shared card; their conclusions don't depend on the norm (~0.4 ms in an 8–272 ms step) so this is about record hygiene, not science | the same protocol (archive → re-run → canary → per-record update); if the box is never quiet, keep the pre-P2i labels | no (just needs a quiet machine) |
 | P2c | Widen the routing classifier (torch `topk`/`sort`/`index_select`/`gather`/`scatter`) so the **grouped** path's routing cost can be quoted | `EXP-p4-01` §5.3: the classifier's 0.0% on the grouped path is a **blind spot**, not a measurement | new rules + tests; the number must be produced in its own round | **YES — it changes the meaning of the `routing_share_pct` field** |
-| P3 | Breadth: E5 (`EXP-p4-02`), E6 (`EXP-p5-01`), E8 (`EXP-p8-01`, needs the V100), E1's group axis under the corrected prompt set, dense curves, batch sweep (E3 — today it has **no** experiment), FP8/MXFP4 (`EXP-p3-01/02`), repairing the W4A16 gate | each closes a declared hypothesis or lever; several need a matrix entry that does not exist | per matrix entry; E8 only after the same protocol passes on the V100 | partial: new matrix entries need approval |
+| P3 | Breadth: E5 (`EXP-p4-02`), E6 (`EXP-p5-01`), E8 (`EXP-p8-01`, needs the V100), E1's group axis under the corrected prompt set, dense curves, batch sweep (E3 — today it has **no** experiment), FP8/MXFP4 (`EXP-p3-01/02`); W4A16 is **closed as a negative result** (`EXP-p1-05`), so only a >25% mixed-bit fallback would be a new experiment | each closes a declared hypothesis or lever; several need a matrix entry that does not exist | per matrix entry; E8 only after the same protocol passes on the V100 | partial: new matrix entries need approval |
 | P4 | ✅ **done 2026-10-08 (except the counters)**: `tools/ncu_evidence.py` (counter path written, blocked on this host) + `docs/reference/NCU_EVIDENCE.md` + `RESULTS.md` + 3 charts generated from artifacts by `tools/make_figures.py` + README/HANDOFF corrections | closes Phase 2's last deliverable and Phase 7 | charts regenerate from `result.json` via `python -m tools.make_figures`; every number in RESULTS.md cites an artifact or record | no |
+| W4 | ✅ **done 2026-10-23** (`EXP-p1-05`, GPU diagnostic — **negative**): W8 control PASS; W4 RTN / W4 GPTQ / ≤25% whole-layer W8 fallback all FAIL ⇒ pre-registered refutation clause stops the expansion; no matrix registration, no `GATE_CITATIONS` change | 4-bit was the last unclosed bit-width in the quantization-ceiling story | record + artifacts rsynced to `lemoq-artifacts/EXP-p1-05-2026-10-23/` (outside git) | done |
 
 ## 5. Wrap-up (docs/config only — **done 2026-10-07**)
 
@@ -240,10 +251,10 @@ machine, re-run there, and rsync `results/` back to the Mac.
 Never call bare `python3` (Xcode 3.9.6, violates `requires-python>=3.10`). Nothing measured here
 is reportable.
 
-**Rented RTX 5090 (primary; ours).** `ssh -p 43086 root@connect.weste.seetacloud.com`
-(alias `5090b`). Verified set: Python 3.12.3, `torch 2.8.0+cu128`, `triton 3.4.0`,
+**Rented RTX 5090 (primary; ours).** `ssh -p 43594 root@connect.weste.seetacloud.com`
+(alias `5090b`；端口随租用实例变化，以当前 `docs/handoff/HANDOFF_*.md` 为准). Verified set: Python 3.12.3, `torch 2.8.0+cu128`, `triton 3.4.0`,
 `transformers 4.57.6`, driver 595.71.05, sm_120 with 170 SMs, **measured** read bandwidth
-1561.9 GB/s.
+1560.3 GB/s（只读；同一工件的 copy 是 1529.5；旧实例曾 1561.9，`results/machine_probe.json`）.
 
 ```bash
 export PATH=/root/miniconda3/bin:$PATH          # python AND uv live here (uv 0.12.17)
@@ -287,7 +298,7 @@ the V100 box, the Mac) diverge, so:
 | `experiments/<EXP-ID>.md` | the authoritative record of each experiment (status, results, applicability) |
 | `docs/reference/NCU_EVIDENCE.md` | kernel-level evidence; why ncu counters are blocked on this host and what replaced them |
 | `docs/reference/NCU_PLAN.md` | **换机才能做**的 ncu 补测清单：要测哪些 kernel、抓哪些 counter、验收判据（当前 blocked） |
-| `docs/handoff/HANDOFF_2026-10-10.md` | **当前状态的唯一权威摘要**：分支/提交、已实测数字、剩下的唯一一件事（上机命令）、纪律红线、坑位清单 |
+| `docs/handoff/HANDOFF_2026-10-23.md` | **当前 GPU 验证交接**：分支/提交、已测与待测、工件位置、预算、下一步和纪律红线 |
 | `docs/apply/PORTFOLIO.md` | 面向实习投递的自述：简历 bullet（中英）、面试必问三题的标准答法、岗位映射与如实缺口（**不引入任何新数字**） |
 | `docs/figures/` | the three charts, regenerated from artifacts by `python -m tools.make_figures` |
 | `docs/README.md` | 文档地图：`docs/` 下每份文档是什么、给谁看 |

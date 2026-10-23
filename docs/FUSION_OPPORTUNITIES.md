@@ -99,6 +99,27 @@ python -m tools.profile_graph --model $M --ctx 1024 --ab-fused-route
 python -m tools.profile_graph --model $M --ctx 1024 --ab-mask-fill
 ```
 
+#### ★ 2026-10-23 账本复核 + 采纳前正确性证据
+
+- **账本基准格仍有效**：`EXP-p4c-01__bit_width=w8a16_attn=kernel_ctx=1024` 的 payload 仍是
+  **p50 1.9241 ms / 539 kernel/步 / `host_share` 2.8% / `rmsnorm=fused`**，与本文生成时一致。
+- **需要刷新的 graph 格实算 23 个**（`execution=cudagraph` 且 `status=done`，按
+  `(exp_id, bit_width, attn, ctx)` 去重）。
+- **三项候选都过了自然文本正确性门**：`tools/check_fusion_candidate.py --ctx 1024 --steps 32
+  --windows 5 --execute`（独立 HF 参考 + 两臂 graph/eager 自检 + 跨臂自由 greedy 轨迹）：
+
+| 候选 | `correctness_gate` | 跨臂轨迹 | 两臂 vs HF（165 位置汇总） | 工件 |
+| --- | --- | --- | --- | --- |
+| `rope` | **PASS** | 5/5 一致 | baseline KL 0.001302 / top-1 0.9758；candidate KL 0.001345 / top-1 0.9758，均 PASS | `fusion-check/rope-natural-20261023.json` |
+| `routing` | **PASS** | 5/5 一致 | KL 0.001302 → 0.001298，top-1 均 0.9758，均 PASS | `fusion-check/routing-natural-20261023.json` |
+| `mask` | **PASS** | 5/5 一致 | KL 0.001302 → 0.001302，top-1 均 0.9758，均 PASS | `fusion-check/mask-natural-20261023.json` |
+
+★ 逐窗口看，**window 1 在 baseline 那一臂也同样是 FAIL**（33 位置、top-1 0.9394）——那是
+w8a16 量化门在单个窗口上的边界，不是候选的问题；工具按 165 位置汇总判定，两臂汇总门均 PASS。
+工件在 GPU 机 `/root/autodl-tmp/lemoq-w4-data/fusion-check/`，Mac 镜像在
+`lemoq-artifacts/EXP-p1-05-2026-10-23/fusion-check/`（仓库外、不入 git）。
+**这不是**性能轮次、不改 `GATE_CITATIONS`、不翻默认；三项 A/B 的收益仍**不得相加**。
+
 #### ★ 纪律红线：三份 A/B **不得相加或相乘**
 
 三份工件的基线不同（1.9655 / 1.9521 / 2.0111 ms），是**三轮独立测量**。按硬规则 3，
@@ -408,6 +429,7 @@ done
 | [RESULTS.md](../RESULTS.md) | 已采纳结果的唯一权威；本文的任何采纳动作都要回填到这里 |
 | [ROADMAP.md](ROADMAP.md) | 展望与岗位映射；本文是其中"性能优化"这一支的可执行细化 |
 | [reference/NCU_EVIDENCE.md](reference/NCU_EVIDENCE.md) | kernel 级达成率的出处与口径 |
+| [reference/FUSION_RESEARCH.md](reference/FUSION_RESEARCH.md) | 联网调研：方法 + 十条避坑点（§3/§4 的外部依据扩展版；公开报告值非实测） |
 | [handoff/HANDOFF_2026-10-10.md](handoff/HANDOFF_2026-10-10.md) | 交接摘要（状态，不是任务） |
 | `scripts/rounds/run_p2j_refresh.sh` | F1 采纳流程的模板（31 格刷新的实际脚本） |
 | [AGENTS.md](../AGENTS.md) | 硬规则与四门；本文所有"验收"都以它为准 |

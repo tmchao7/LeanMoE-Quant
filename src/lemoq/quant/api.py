@@ -89,21 +89,47 @@ class QuantizedLinear:
 
 
 def quantize_linear(
-    weight, *, bits: int = 4, group_size: int = 128, scheme: str = "rtn", symmetric: bool = True
+    weight,
+    *,
+    bits: int = 4,
+    group_size: int = 128,
+    scheme: str = "rtn",
+    symmetric: bool = True,
+    calibration: Any = None,
+    block_size: int = 128,
+    damp: float = 0.01,
+    min_samples: int = 256,
 ) -> QuantizedLinear:
-    """Quantize a 2-D weight. Only `scheme="rtn"` is implemented in this baseline.
+    """Quantize a 2-D weight; GPTQ explicitly requires calibration, RTN stays default.
 
     The signature is deliberately the stable public one so later schemes
     (GPTQ / AWQ) can be added without changing callers.
     """
-    if scheme != "rtn":
+    if scheme not in ("rtn", "gptq"):
         raise NotImplementedError(
-            "scheme=%r 尚未实现。当前基线的合法取值：'rtn'。"
+            "scheme=%r 尚未实现。合法取值：'rtn'、显式校准的 'gptq'。"
             "兜底阶梯见 lemoq.quant.REMEDIATION_LADDER。" % (scheme,)
         )
-    from lemoq.quant import rtn as _rtn
+    if scheme == "gptq":
+        from lemoq.quant.gptq import quantize_gptq
 
-    q = _rtn.quantize_rtn(weight, bits=bits, group_size=group_size, symmetric=symmetric)
+        if not symmetric:
+            raise ValueError("GPTQ v1 requires symmetric quantization")
+        q = quantize_gptq(
+            weight,
+            bits=bits,
+            group_size=group_size,
+            calibration=calibration,
+            block_size=block_size,
+            damp=damp,
+            min_samples=min_samples,
+        )
+    else:
+        from lemoq.quant import rtn as _rtn
+
+        if calibration is not None:
+            raise ValueError("RTN does not consume calibration; use scheme='gptq'")
+        q = _rtn.quantize_rtn(weight, bits=bits, group_size=group_size, symmetric=symmetric)
     return QuantizedLinear(
         codes=q["codes"],
         scale=q["scale"],
@@ -113,7 +139,16 @@ def quantize_linear(
         symmetric=symmetric,
         scheme=scheme,
         shape=q["shape"],
-        meta={"n_groups": q["n_groups"], "padded_in": q["padded_in"], "device": q.get("device")},
+        meta={
+            "n_groups": q["n_groups"],
+            "padded_in": q["padded_in"],
+            "device": q.get("device"),
+            **(
+                {"calibration": q["calibration"], "algorithm": q["algorithm"]}
+                if scheme == "gptq"
+                else {}
+            ),
+        },
     )
 
 

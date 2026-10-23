@@ -478,7 +478,14 @@ def _filled_tensor(filled_len: Any, *, device: Any, seq_len: int) -> Any:
             raise ValueError(
                 "filled_len 与 k/v 不在同一设备：%s vs %s" % (filled_len.device, device)
             )
+        if filled_len.device.type == "cpu":
+            n = int(filled_len.item())
+            if n < 0 or n > seq_len:
+                raise ValueError("filled_len=%d 必须在 [0, %d] 内" % (n, seq_len))
+        # CUDA scalar bounds remain the caller's contract; do not add a host .item() sync.
         return filled_len.reshape(1)
+    if type(filled_len) is not int:
+        raise ValueError("filled_len 必须为 int 或单元素 int32 张量")
     n = int(filled_len)
     if n < 0 or n > seq_len:
         raise ValueError("filled_len=%d 必须在 [0, %d] 内" % (n, seq_len))
@@ -530,16 +537,31 @@ def attn_decode_forward(
         raise NotImplementedError("attn_decode 只处理 batch=1 / q_len=1")
     if tuple(k.shape) != tuple(v.shape):
         raise ValueError("k 与 v 形状必须相同")
+    if int(k.shape[0]) != 1 or int(k.shape[3]) != int(q.shape[3]):
+        raise ValueError("k/v 必须为 batch=1 且 head_dim 与 q 相同")
+    if q.device != k.device or q.device != v.device:
+        raise ValueError("q/k/v 必须在同一设备")
+    if int(q.shape[1]) < 1 or int(k.shape[2]) < 1:
+        raise ValueError("head 数与 cache 容量必须为正")
+    if k.stride(2) != k.shape[3] or v.stride(2) != v.shape[3]:
+        raise ValueError("k/v 的序列 stride 必须等于 head_dim")
+    if k.stride(1) != v.stride(1) or k.stride(1) < k.shape[2] * k.shape[3]:
+        raise ValueError("k/v 必须有相同且不重叠的 head stride")
     if int(k.shape[1]) != int(q.shape[1]):
         raise NotImplementedError("attn_decode 不做 GQA（见 docstring）")
     if k.dtype != v.dtype:
         raise ValueError("k/v dtype 必须相同")
     if q.dtype != k.dtype:
         raise ValueError("q 与 k/v dtype 必须相同（%s vs %s）" % (q.dtype, k.dtype))
+    if backend != "oracle" and q.dtype != torch.float16:
+        raise ValueError("triton attention 仅支持 fp16；oracle 可使用其他浮点类型")
 
     heads = int(q.shape[1])
     head_dim = int(q.shape[3])
     seq_len = int(k.shape[2])
+    if (heads - 1) * k.stride(1) + seq_len * head_dim >= _MAX_OFFSET:
+        raise ValueError("k/v 的实际 stride 偏移超过 int32 上限")
+    filled = _filled_tensor(filled_len, device=q.device, seq_len=seq_len)
     num_splits = resolve_num_splits(cfg.get("num_splits"), heads=heads, device=k.device)
     plan = launch_plan(
         heads=heads,
@@ -556,10 +578,7 @@ def attn_decode_forward(
     vc = v.reshape(heads, seq_len, head_dim)
 
     if backend == "oracle":
-        if torch.is_tensor(filled_len):
-            n = int(filled_len.reshape(-1)[0].item())
-        else:
-            n = int(filled_len)
+        n = int(filled.item())
         acc = split_kv_oracle(
             q, k, v, n, num_splits=num_splits, scale=scale, block_n=plan["BLOCK_N"]
         )
@@ -568,7 +587,8 @@ def attn_decode_forward(
     triton, kernels = _kernels()
     _ = triton  # 只为导入副作用（编译后端注册）
     dev = q.device
-    filled = _filled_tensor(filled_len, device=dev, seq_len=seq_len)
+    if not q.is_cuda:
+        raise RuntimeError("triton backend 需要 CUDA 张量")
     m = torch.empty(plan["split"]["m_shape"], dtype=torch.float32, device=dev)
     l = torch.empty(plan["split"]["l_shape"], dtype=torch.float32, device=dev)
     acc = torch.empty(plan["split"]["acc_shape"], dtype=torch.float32, device=dev)

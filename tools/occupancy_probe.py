@@ -1,10 +1,10 @@
-"""occupancy_probe — register / occupancy **下限估计**（GPU 待执行，METRICS §6 G3）。
+"""occupancy_probe — register / occupancy **解析上界估计**（METRICS §6 G3）。
 
 ## 为什么需要它
 
 `docs/reference/METRICS.md` §5 与审查清单都要求："算子融合后要重新评估 register / occupancy，
 否则可能引入新的瓶颈"。本项目的两个融合杠杆（fused RMSNorm、grouped MoE kernel）
-**至今没有 occupancy 数据** —— ncu 在这台宿主上被策略阻断
+**已有解析上界，仍缺计数器实测** —— ncu 在这台宿主上被策略阻断
 （`RmProfilingAdminOnly: 1` + 容器无 `CAP_SYS_ADMIN`），见 `docs/reference/NCU_EVIDENCE.md` §1。
 
 ## 它不是 ncu 的替代品
@@ -53,7 +53,8 @@ from typing import Any
 # 各 compute capability 的 SM 资源上限。优先用运行时设备属性覆盖（见 `_limits`），
 # 这张表是**查不到时的兜底**，值取自 CUDA 编程指南的 per-SM 表。
 _SM_LIMITS = {
-    (12, 0): {"regs_per_sm": 65536, "smem_per_sm": 228 * 1024, "max_threads_sm": 1536},
+    # NVIDIA Blackwell tuning guide §1.4.1.1: sm_120, 128 KiB/SM, 48 warps.
+    (12, 0): {"regs_per_sm": 65536, "smem_per_sm": 128 * 1024, "max_threads_sm": 1536},
     (9, 0): {"regs_per_sm": 65536, "smem_per_sm": 228 * 1024, "max_threads_sm": 2048},
     (8, 9): {"regs_per_sm": 65536, "smem_per_sm": 100 * 1024, "max_threads_sm": 1536},
     (8, 6): {"regs_per_sm": 65536, "smem_per_sm": 100 * 1024, "max_threads_sm": 1536},
@@ -112,7 +113,7 @@ def _limits(torch_mod: Any) -> dict[str, int]:
         props = None
     if props is not None:
         cc = (int(getattr(props, "major", 0)), int(getattr(props, "minor", 0)))
-        base = dict(_SM_LIMITS.get(cc) or _SM_LIMITS[(12, 0)])
+        base = dict(_SM_LIMITS.get(cc) or {})
         for key, attr in (
             ("regs_per_sm", "regs_per_multiprocessor"),
             ("smem_per_sm", "shared_memory_per_multiprocessor"),
@@ -121,8 +122,10 @@ def _limits(torch_mod: Any) -> dict[str, int]:
             val = getattr(props, attr, None)
             if isinstance(val, int) and val > 0:
                 base[key] = val
+        if len(base) != 3:
+            raise ValueError("unknown SM %r with incomplete runtime limits" % (cc,))
         return base
-    return dict(_SM_LIMITS[(12, 0)])
+    raise ValueError("无法获取设备身份，不能猜测 sm_120 资源上限")
 
 
 def _iter_compiled(obj: Any, depth: int = 0):
@@ -368,10 +371,16 @@ def main(argv: list[str] | None = None) -> int:
             ],
         }
 
-    any_measured = any(v["status"] == "measured_estimate" for v in subjects.values())
+    all_measured = bool(subjects) and all(
+        v["status"] == "measured_estimate" for v in subjects.values()
+    )
     payload = {
         "generated_by": "tools/occupancy_probe.py",
-        "status": "done" if any_measured else "planned",
+        "status": "done" if all_measured else "planned",
+        "coverage": {
+            "measured": sum(v["status"] == "measured_estimate" for v in subjects.values()),
+            "expected": len(subjects),
+        },
         "device": torch.cuda.get_device_name(0),
         "sm_limits": limits,
         "subjects": subjects,
@@ -379,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
         "note": (
             "★ 所有数值都是 `kind=estimate` / `bound=upper` 的**解析上界**，不是 ncu 实测："
             "测不到 stall / bank conflict / warp divergence（见 docs/reference/NCU_EVIDENCE.md §1）。"
-            "`status=planned` 表示编译产物取不到 —— 那种情况下**没有产出任何数字**。"
+            "`status=planned` 表示至少一族编译产物缺失；已取得的逐族估计保留，覆盖率见 coverage。"
         ),
     }
     out = args.json or "results/occupancy.json"
@@ -396,7 +405,7 @@ def main(argv: list[str] | None = None) -> int:
             % (out, n_measured, len(payload["subjects"]))
         )
     else:
-        print("wrote %s (status=planned —— 未产出数字)" % out)
+        print("wrote %s (status=planned —— 覆盖不完整，见 coverage/subjects)" % out)
     return 0
 
 

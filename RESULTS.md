@@ -5,7 +5,9 @@
 > [docs/reference/METRICS.md](docs/reference/METRICS.md) §1。逐格记录见 [`experiments/`](experiments/)。
 >
 > **前提**：OLMoE-1B-7B-0924（64 专家 / top-8，16 层，hidden 2048），batch=1 单流 decode，
-> RTX 5090（sm_120），**实测可达带宽 1561.9 GB/s**（不是规格值）。
+> RTX 5090（sm_120），**实测可达带宽 1560.3 GB/s（只读；同一工件的 copy 是 1529.5）**
+> ——旧实例曾测到 1561.9，decode 是读主导所以用只读值；两者差 0.1%，地板与结论不动
+> （`results/machine_probe.json`，不是规格值）。
 > 参考实现为 fp16，性能数字只在**过了正确性门**的配置上报（硬规则 2）。
 
 > ## ⚠️ 适用范围（读任何数字之前）
@@ -72,7 +74,8 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | ⇒ 该 kernel 解释了步级收益的 | **90.4%**（16 层 × Δ0.029 ms = 0.524 / 0.580 ms） | 同上 §4.3 |
 
 **读法**：量化确实兑现了，但它能兑现的天花板**不是 4×，是 1.74×** —— 因为权重只占一步的 42%。
-而且我们已经把这个上限的**九成**拿到了，并且能定位到具体 kernel。
+专家 GEMV 解释了**已测步级延迟节省的 90.4%**；这是收益归因，
+不表示已获得结构性上限的九成。
 
 ### 3.1 量化"能不能用"：任务级证据（2026-10-09 新测）
 
@@ -99,6 +102,7 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | **torch 的 `F.rms_norm` 比 HF 原链慢 5%** | [EXP-p4c-02](experiments/EXP-p4c-02-elementwise-tail.md) §5.5：2.5474 vs 2.4143 ms，**0/15 轮获胜**（虽然数值等价） | 它保留了同一个 `MeanOps` reduce，却多出 65 次 fp32 行乘 ⇒ 只有自研 kernel 能赢 |
 | **权重 ÷4 拿不到延迟 ÷4** | [docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md) §4.2：字节 ÷3.88，时间只 ÷2.24，达成率 71% → 44% | 瓶颈从 DRAM 挪到了 kernel 内解包 —— 这才是"字节预算"的真实边界 |
 | **`EXP-p0-03`（HF 路径 + cudagraph）** | 记录里是 `blocked` **by design**：动态 cache 不可 capture | 说明"能不能进图"是这条路径的硬约束 |
+| **W4 专家量化过不了精度门——换 GPTQ 也不行** | [EXP-p1-05](experiments/EXP-p1-05-w4-expert-calibration.md)：W4 RTN top-1 **0.9030** / PPL **+4.39%**；W4 GPTQ **0.9152** / **+7.15%**；≤25% 整层 W8 退路 **0.9333** / **+4.19%**（字节 −36.92%）——三条都 FAIL | 4-bit 的墙不在 kernel：`GATE_CITATIONS` 的 W4A16 FAIL 不是"修 kernel"能解决的；按预注册反证条件停止扩展，4-bit 延迟收益**不发布** |
 
 还有一条**内部的负结果**：`EXP-p4c-02` 的模块级归因被它自己预注册的 K1 判据否掉了
 （eager/graph top-8 kernel 重叠只有 5/8）—— 记录里写的是"这条归因 **VOID**"，而不是把它当结论引用。
@@ -108,9 +112,9 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | 项 | 量 |
 | --- | --- |
 | 自研 kernel 族（全部过 K1 parity 门 1e-3） | **4**：grouped MoE GEMV（fp16 + 8/4-bit）、dense 融合反量化 GEMM、split-KV decode attention、融合 RMSNorm |
-| Python（不含虚拟环境） | **30235 行 / 83 文件**（`src` + `tools` + `benchmarks` + `tests` + `scripts`，不含 `__pycache__`；2026-10-10 实测） |
-| 测试 | **28 个 `test_*.py`**；Mac CPU **480 passed / 0 failed / 10 deselected**（2026-10-10 实测）；服务器 **474 passed / 6 skipped / 0 failed**（同套 480，skip 为无 uv 等环境性跳过；★ deselected = `-m "not gpu"` 主动排除，skipped = 用例自行 skip） |
-| 实验矩阵 | 21 条声明 / 64 格展开；**16 条已执行**，`results/**/result.json` 98 份（81 done / 13 planned / 4 blocked） |
+| Python（不含虚拟环境） | **35,400 行 / 103 文件**（`src` + `tools` + `benchmarks` + `tests` + `scripts`，不含 `__pycache__`；2026-10-23 实测） |
+| 测试 | **38 个 `test_*.py`**；Mac CPU **657 passed / 0 failed / 32 deselected**（2026-10-23 实测；deselected = `-m "not gpu"` 主动排除）；GPU 标记用例单独跑（交接轮 31 passed / 1 skipped） |
+| 实验矩阵 | 21 条声明 / **64 格展开**（`benchmarks.harness.expand(arch=sm_120)` 实算）；**16 条已执行**，`results/**/result.json` **101 份（84 done / 13 planned / 4 blocked）**（2026-10-23 复核） |
 | 度量纪律 | 实测带宽而非规格值；KL/top-1 门先于性能；schema 强制"门失败 ⇒ latency 为 null"；首尾同格金丝雀；同租户记录不 kill；覆盖前先归档 |
 
 ## 6. 明确的缺口（不含糊）
@@ -124,11 +128,14 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | **batch 曲线** | ✅ **已测（G2，2026-10-10 单轮有效）**：金丝雀 **−3.448%** ≤5%（此前两轮 VOID 的冷态根因已由 `9729dde` 修复）。fp16、ctx=1024、同轮 4 点（n=5、丢 1 轮）：batch 1/2/4/8 → step p50 **87.20 / 85.88 / 86.82 / 86.29 ms**，tok/s **11.47 / 23.29 / 46.07 / 92.71**（工件 `results/batch_sweep.json`，单列表）。仅 fp16 单臂 ⇒ **量化衰减对比仍是缺口**；本项目仍是有意的 batch=1 单流课题 |
 | **任务级精度（GSM8K）** | 生成式口径在基座模型上贴地板（fp16 8-shot 0/15）⇒ **放弃并如实记录**；MMLU 已测并过门（§3.1） |
 | 18 个 host 主导格子的刷新 | 刷新值 VOID（共租 CPU），规范 payload 保留 pre-P2i 版本；列为 P2k。结论不依赖它 |
-| 一处口径不一致（在修） | `AGENTS.md` §0 写的 `1.1927` 用了金丝雀首值 3.0084 做分母；**记录采用值 3.0124 ⇒ 1.1911**。本文用 1.1911 |
+| **W4 专家量化（4-bit）** | **已试，负结果**：W4 RTN / W4 GPTQ / ≤25% 整层 W8 退路都过不了精度门（[EXP-p1-05](experiments/EXP-p1-05-w4-expert-calibration.md)）；4-bit 的延迟收益因此**仍未测、也不得发布**（先门后性能）。>25% 的混合位宽属新实验，须先改规格 |
+| ~~一处口径不一致~~ ✅ 已解决 | `AGENTS.md` §0 曾写 `1.1927`（用了金丝雀首值 3.0084 做分母）；现全文统一为**记录采用值 3.0124 ⇒ 1.1911** |
 
 ## 7. 一句话总结
 
 > 在一个 82.6 ms → 1.6 ms 字节下限的带宽受限 decode 上，本项目用**执行方式、量化、
 > 注意力实现、融合 norm、投影 kernel** 五条各自独立的 A/B 把差距收窄，并**实测出**
 > "权重只占一步 42% ⇒ 量化上限 1.74×"这个结构性边界；其中九成收益已定位到具体 kernel。
+> 量化这条杠杆**只兑现到 8-bit**：4-bit 专家量化（RTN 与 GPTQ）连同 ≤25% 整层 W8 退路都过不了
+> 精度门（EXP-p1-05），所以 4-bit 延迟收益不发布。
 > 四个自研 Triton kernel 全部有 parity 门，负结果与阻断同样留在库里。

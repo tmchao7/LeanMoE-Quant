@@ -10,8 +10,8 @@
       ⇒ 形状静态、无 autotune ⇒ **CUDA Graph capture 安全**；
     - softmax 按与 ATen 相同的 fp32 语义（max-subtract + exp-sum）；
     - top-K 用 **K 轮 argmax + one-hot 置 -inf**（O(K·E)，E/K constexpr 时被展开），
-      **不依赖 `tl.sort`**；平局时 argmax 取最低 lane 序号 —— 与"等值专家集合"语义
-      等价（加权求和可交换），输出正确性由 1e-3 parity 与 A/B token 序列兜底；
+      **不依赖 `tl.sort`**；平局时 argmax 取最低 lane 序号。若平局跨越 K 边界，
+      可能与 torch.topk 选择不同的专家，等权不能推出专家输出相同。候选尚待独立门验证；
     - `E` 非 2 的幂时用 `E_POW` 装载 + mask（OLMoE 是 64，但测试覆盖非幂）。
 
     **默认不启用**：`_route` 只有在 `LEMOQ_FUSED_ROUTE=1` 时才走这里（见
@@ -94,20 +94,28 @@ def routing_softmax_topk(
     top-K 权重和归一化。**不含** router 线性层（`F.linear` 仍走 ATen）。
     """
     global _KERNEL
-    triton = _require_cuda_triton()
+    if not torch.is_tensor(logits):
+        raise TypeError("logits 必须为张量")
     if logits.ndim != 2:
         raise ValueError("logits 必须是 (T, E)，得到 shape %s" % (tuple(logits.shape),))
     t_tokens, e = int(logits.shape[0]), int(logits.shape[1])
-    if not (0 < top_k <= e):
-        raise ValueError("top_k=%d 必须在 (0, %d] 内" % (top_k, e))
+    if type(top_k) is not int or not (0 < top_k <= e):
+        raise ValueError("top_k=%r 必须是 (0, %d] 内的整数" % (top_k, e))
+    if not logits.is_floating_point():
+        raise ValueError("logits 必须为浮点张量")
     contiguous = logits if logits.is_contiguous() else logits.contiguous()
     top_w = torch.empty((t_tokens, top_k), dtype=torch.float32, device=logits.device)
     top_i = torch.empty((t_tokens, top_k), dtype=torch.int64, device=logits.device)
+    if t_tokens == 0:
+        return top_w, top_i  # no CUDA initialization or launch for empty input
+    triton = _require_cuda_triton()
+    if not logits.is_cuda:
+        raise RuntimeError("routing_softmax_topk 需要 CUDA 张量")
     if _KERNEL is None:
         _KERNEL = _triton_kernel()
     e_pow = triton.next_power_of_2(e)
     k_pow = triton.next_power_of_2(top_k)
-    _KERNEL[(max(t_tokens, 1),)](
+    _KERNEL[(t_tokens,)](
         contiguous,
         top_w,
         top_i,
