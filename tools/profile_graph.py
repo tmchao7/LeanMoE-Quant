@@ -37,6 +37,7 @@ from tools.round_canary import drift_pct, finite_number, json_safe
 ABLATE_ARM_ENV = "LEMOQ_FUSED_ROUTE"
 MASK_FILL_ARM_ENV = "LEMOQ_SKIP_MASK_FILL"
 ROPE_ARM_ENV = "LEMOQ_FUSED_ROPE"
+PACKED_QKV_ENV = "LEMOQ_PACKED_QKV"
 
 
 def _invoke(args: argparse.Namespace) -> dict[str, Any]:
@@ -99,8 +100,10 @@ def _run_env_ab(
         raise ValueError("max_new_tokens must be a positive integer")
     if env_var == MASK_FILL_ARM_ENV and args.attn != "kernel":
         raise ValueError("skip-mask-fill requires the mask-independent kernel backend")
+    if env_var == PACKED_QKV_ENV and args.attn != "kernel":
+        raise ValueError("packed q/k/v requires attn=kernel (the F2 first-round scope)")
     seq = [arm_a, arm_b] * rounds + [arm_a]
-    switches = (ABLATE_ARM_ENV, MASK_FILL_ARM_ENV, ROPE_ARM_ENV)
+    switches = (ABLATE_ARM_ENV, MASK_FILL_ARM_ENV, ROPE_ARM_ENV, PACKED_QKV_ENV)
     saved = {key: os.environ.get(key) for key in switches}
     runs: list[dict[str, Any]] = []
     reasons: list[str] = []
@@ -305,6 +308,22 @@ def run_fused_rope_ab(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+def run_packed_qkv_ab(args: argparse.Namespace) -> dict[str, Any]:
+    """off→on 交替 A/B（F2 packed q/k/v 候选专用）。"""
+    return _run_env_ab(
+        args,
+        env_var=PACKED_QKV_ENV,
+        arm_a="off",
+        arm_b="on",
+        generated_by="tools/profile_graph.py --ab-packed-qkv",
+        note=(
+            "同进程交替 A/B；treatment_faster_pct>0 = q/k/v 打包成一次 launch 更快。"
+            "tokens_equal 必须为 True（行局部布局 ⇒ 期望逐位一致）；"
+            "本工具不写 result.json，采纳仍需归档 + 23 格刷新。"
+        ),
+    )
+
+
 def build_payload(res: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
     """把 run_cudagraph 的结果收成定位用 JSON（gap 原样保留）。"""
     gap = res.get("gap") or {}
@@ -410,6 +429,11 @@ def main(argv: list[str] | None = None) -> int:
         help="fused-rope 候选 A/B：off→on 交替 N 轮（同进程），金丝雀+跨臂 token 比对",
     )
     ap.add_argument(
+        "--ab-packed-qkv",
+        action="store_true",
+        help="F2 packed q/k/v 候选 A/B：off→on 交替 N 轮（同进程），金丝雀+跨臂 token 比对",
+    )
+    ap.add_argument(
         "--ab-rounds",
         type=int,
         default=2,
@@ -420,9 +444,12 @@ def main(argv: list[str] | None = None) -> int:
         "fused_route": args.ab_fused_route,
         "mask_fill": args.ab_mask_fill,
         "fused_rope": args.ab_fused_rope,
+        "packed_qkv": args.ab_packed_qkv,
     }
     if sum(bool(v) for v in ab_flags.values()) > 1:
-        ap.error("--ab-fused-route / --ab-mask-fill / --ab-fused-rope 互斥（一次一个变量）")
+        ap.error(
+            "--ab-fused-route / --ab-mask-fill / --ab-fused-rope / --ab-packed-qkv 互斥（一次一个变量）"
+        )
     ab_mode = next((name for name, on in ab_flags.items() if on), None)
     cfg = {
         "model": args.model,
@@ -441,10 +468,12 @@ def main(argv: list[str] | None = None) -> int:
         "ab_fused_route": bool(args.ab_fused_route),
         "ab_mask_fill": bool(args.ab_mask_fill),
         "ab_fused_rope": bool(args.ab_fused_rope),
+        "ab_packed_qkv": bool(args.ab_packed_qkv),
         "ab_rounds": args.ab_rounds if ab_mode else None,
     }
     cfg["fusion_env"] = {
-        key: os.environ.get(key, "0") for key in (ABLATE_ARM_ENV, MASK_FILL_ARM_ENV, ROPE_ARM_ENV)
+        key: os.environ.get(key, "0")
+        for key in (ABLATE_ARM_ENV, MASK_FILL_ARM_ENV, ROPE_ARM_ENV, PACKED_QKV_ENV)
     }
     cfg["source"] = _source_identity()
     cfg["versions"] = {}
@@ -465,6 +494,9 @@ def main(argv: list[str] | None = None) -> int:
             payload["config"] = cfg
         elif ab_mode == "fused_rope":
             payload = run_fused_rope_ab(args)
+            payload["config"] = cfg
+        elif ab_mode == "packed_qkv":
+            payload = run_packed_qkv_ab(args)
             payload["config"] = cfg
         else:
             res = _invoke(args)

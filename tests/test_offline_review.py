@@ -59,7 +59,12 @@ def _ab(monkeypatch, mutate=None, rounds=2):
         seen.append(
             {
                 key: pg.os.environ.get(key)
-                for key in (pg.ROPE_ARM_ENV, pg.ABLATE_ARM_ENV, pg.MASK_FILL_ARM_ENV)
+                for key in (
+                    pg.ROPE_ARM_ENV,
+                    pg.ABLATE_ARM_ENV,
+                    pg.MASK_FILL_ARM_ENV,
+                    pg.PACKED_QKV_ENV,
+                )
             }
         )
         res = {
@@ -121,7 +126,7 @@ def test_ab_encloses_round_and_keeps_tail_out_of_statistics(monkeypatch):
 
 
 def test_ab_isolates_other_switches_and_restores_on_success(monkeypatch):
-    for key in (pg.ROPE_ARM_ENV, pg.ABLATE_ARM_ENV, pg.MASK_FILL_ARM_ENV):
+    for key in (pg.ROPE_ARM_ENV, pg.ABLATE_ARM_ENV, pg.MASK_FILL_ARM_ENV, pg.PACKED_QKV_ENV):
         monkeypatch.setenv(key, "1")
     p, seen = _ab(monkeypatch)
     assert all(r[pg.ABLATE_ARM_ENV] == "0" and r[pg.MASK_FILL_ARM_ENV] == "0" for r in seen)
