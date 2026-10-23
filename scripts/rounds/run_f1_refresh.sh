@@ -15,8 +15,8 @@
 # 产出：每格新 payload 的 config 里 fused_rope/fused_route/skip_mask_fill/packed_qkv
 #       都是**有效状态**（采纳后为 true）；`result.json` 覆盖前进 archive/。
 set -u
-cd /root/LeanMoE-Quant || exit 1
-PY=/root/miniconda3/bin/python
+cd "${REPO_ROOT:-/root/LeanMoE-Quant}" || exit 1
+PY=${PY:-/root/miniconda3/bin/python}
 M=/root/autodl-tmp/ms/models/allenai--OLMoE-1B-7B-0924/snapshots/master
 OUT=results/EXP-f1-refresh
 mkdir -p "$OUT/archive"
