@@ -73,8 +73,8 @@ settled — do not re-derive them and do not re-run their cells:
 Read, in this order: **`RESULTS.md`** (the one-page result with a citation per number),
 **`configs/experiments.yaml`** (the only source of hypotheses and cells), the **record** of the
 experiment you are about to touch (`experiments/<EXP-ID>.md`), then
-**`docs/handoff/HANDOFF_2026-10-10.md`** (the current state summary; superseded handoffs are
-deleted — history lives in git).
+**`docs/handoff/HANDOFF_2026-10-23.md`** (the current GPU-validation handoff;
+the 2026-10-10 handoff remains linked as historical context).
 
 Two rules come before everything else: **do not redo what §3 lists as done**, and **ask the user**
 before changing a matrix axis, a cell id, or overwriting a recorded `result.json` (§6).
@@ -287,7 +287,7 @@ the V100 box, the Mac) diverge, so:
 | `experiments/<EXP-ID>.md` | the authoritative record of each experiment (status, results, applicability) |
 | `docs/reference/NCU_EVIDENCE.md` | kernel-level evidence; why ncu counters are blocked on this host and what replaced them |
 | `docs/reference/NCU_PLAN.md` | **换机才能做**的 ncu 补测清单：要测哪些 kernel、抓哪些 counter、验收判据（当前 blocked） |
-| `docs/handoff/HANDOFF_2026-10-10.md` | **当前状态的唯一权威摘要**：分支/提交、已实测数字、剩下的唯一一件事（上机命令）、纪律红线、坑位清单 |
+| `docs/handoff/HANDOFF_2026-10-23.md` | **当前 GPU 验证交接**：分支/提交、已测与待测、工件位置、预算、下一步和纪律红线 |
 | `docs/apply/PORTFOLIO.md` | 面向实习投递的自述：简历 bullet（中英）、面试必问三题的标准答法、岗位映射与如实缺口（**不引入任何新数字**） |
 | `docs/figures/` | the three charts, regenerated from artifacts by `python -m tools.make_figures` |
 | `docs/README.md` | 文档地图：`docs/` 下每份文档是什么、给谁看 |
