@@ -183,13 +183,18 @@ ramp-up 的 kernel 几乎是全部时间（实测 5.05 µs/次，gap 2.3 µs/次
   其余**显式拒绝**，不静默退回三次调用）；是否生效记进 payload 的 `config.packed_qkv`。
 - 验收状态：CPU 契约测试 8 条（含 reference 路径的打包等价）；GPU **K1 逐位对照 PASS**
   （packed 一次 launch 与三次独立调用**逐位相同**，最大误差 0）。
-- **同进程交替 A/B 跑了两轮（2026-10-23），两轮都按 `host_share` 规则判 VOID**：
-  `tools/profile_graph --ab-packed-qkv`，3 对交替 + 尾金丝雀，两轮 `tokens_equal=true`、
-  canary 2.404% / 2.65%，但每轮 `host_share` 5.4–7.1% > 5% ⇒ 两轮都 `invalid`，不能采纳。
-  可复现的 host 无关信号：**GPU busy 1.8839 → 1.7852（−98.7 µs，−5.24%，3/3）** 与
-  **1.8829 → 1.7846（−98.3 µs，−5.22%，3/3）** —— 两轮相差 <0.5 µs，约为该 kernel
-  149 µs 地板缺口的 2/3；wall 差 +4.57% / +3.98% 同向但**不作数**。下一步：安静机器上用
-  `benchmarks.runner` 做合规 A/B（归档 + graph 金丝雀 + 23 格刷新）才算采纳。
+- **同进程交替 A/B 跑了三轮（2026-10-23），三轮都按 `host_share` 规则判 VOID**：
+  `tools/profile_graph --ab-packed-qkv`，3 对交替 + 尾金丝雀，三轮 `tokens_equal=true`、
+  canary 2.40% / 2.65% / 3.14%，但每轮 `host_share` 5.4–7.1% > 5% ⇒ 三轮都 `invalid`。
+  可复现的 host 无关信号（每轮 3/3 对获胜）：
+  **1.8839 → 1.7852（−98.7 µs，−5.24%）**、**1.8829 → 1.7846（−98.3 µs，−5.22%）**、
+  **1.8813 → 1.7852（−96.1 µs，−5.11%）** —— 三轮极差 <3 µs，约为该 kernel 149 µs
+  地板缺口的 2/3；wall 差 +4.57% / +3.98% / +4.32% 同向但**不作数**。
+  ★ 结构性原因：两臂的绝对 host 开销几乎相同（≈0.115 ms/step），而打包臂的 wall 更小
+  ⇒ 同一个 host 开销在它身上占的比例更高，`host_share` 更容易越过 5%。所以**合规轮必须在
+  安静的机器上做**（runner 的图格路径在该状态下曾测到 2.8%）；这台共享机今天做不到。
+  下一步：安静窗口用 `scripts/rounds/run_f1_refresh.sh` 的同类协议（归档 + graph 金丝雀）
+  做合规 A/B，再与 F1 一起 combined 采纳 + 23 格刷新。
 - **打包形状的 config 重扫（2026-10-23）**：`tools/bench_dequant_gemm_graph --out-dim 6144`
   （16 层 × 1 次打包调用/步，N=6144、K=2048，7 个 config 交错 15 轮）：赢家 `B8K256w4s3`
   只比默认 `B4K256w2s3` 快 **+0.21%**（9.378 vs 9.398 µs/call，11/15 轮）⇒ **config 不动**
