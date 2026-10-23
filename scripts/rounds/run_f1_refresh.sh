@@ -61,17 +61,33 @@ for p in sorted(glob.glob("results/EXP-*__*/result.json")):
         args += ["--group-size", str(c["group_size"])]
     if c.get("batch"):
         args += ["--batch", str(c["batch"])]
-    packed = "1" if (os.environ.get("LEMOQ_PACKED_QKV") == "1" and "--attn kernel" in " ".join(args)) else "0"
-    print("%s|%s|%s|%s" % (exp, " ".join(args), cell, packed))
+    joined = " ".join(args)
+    kernel = "1" if "--attn kernel" in joined else "0"
+    packed = "1" if (os.environ.get("LEMOQ_PACKED_QKV") == "1" and kernel == "1") else "0"
+    print("%s|%s|%s|%s|%s" % (exp, joined, cell, kernel, packed))
 PYEOF
 echo "清单 $(wc -l < "$LIST") 格" >> "$LOG"; cat "$LIST" >> "$LOG"
+if [ "${DRY:-0}" = "1" ]; then
+  echo "--- DRY：只列清单（exp | args | cell | kernel | packed）---"
+  cat "$LIST"
+  exit 0
+fi
 
 # ---- 2) 归档 + 重跑 + 逐格自检 ----
 run_one () {
-  local exp=$1 args=$2 cell=$3 packed=${4:-0} label
+  local exp=$1 args=$2 cell=$3 kernel=${4:-0} packed=${5:-0} label
   label=$(basename "$cell")
-  # F2 只对 attn=kernel 的格生效（hook 只装在那条 forward 上）；其余格必须关掉，
-  # 否则 runner 的显式拒绝会把它们写成 blocked。
+  # ★ 三个开关的生效范围不同（2026-10-23 实测）：
+  #   route        —— moe_static/moe_grouped 的路由，所有格都生效；
+  #   rope / mask  —— 只在 `_decode_forward_impl`（attn=kernel）里；
+  #                   在别的格上开 mask 会**显式拒绝**（不是 no-op）。
+  #   packed_qkv   —— 同样只在 attn=kernel 的 forward 上。
+  export LEMOQ_FUSED_ROUTE=1
+  if [ "$kernel" = "1" ]; then
+    export LEMOQ_FUSED_ROPE=1 LEMOQ_SKIP_MASK_FILL=1
+  else
+    unset LEMOQ_FUSED_ROPE LEMOQ_SKIP_MASK_FILL
+  fi
   if [ "$packed" = "1" ]; then export LEMOQ_PACKED_QKV=1; else unset LEMOQ_PACKED_QKV; fi
   [ -f "$OUT/archive/$label.json" ] || cp -p "$cell/result.json" "$OUT/archive/$label.json" 2>/dev/null
   snap "$label-pre"
@@ -88,10 +104,12 @@ p50 = lat["per_token_p50_ms"] if lat["per_token_p50_ms"] is not None else ev.get
 warn = []
 if d["status"] != "done": warn.append("status=%s" % d["status"])
 if (att["host_share_pct"] or 0) > 5: warn.append("host_share=%.1f%%>5%%" % att["host_share_pct"])
-for k in ("fused_rope", "fused_route", "skip_mask_fill"):
-    if cfg.get(k) is not True: warn.append("%s=%r（应为 true）" % (k, cfg.get(k)))
+if cfg.get("fused_route") is not True: warn.append("fused_route=%r（应为 true）" % (cfg.get("fused_route"),))
+kernel = str(cfg.get("attn")) == "kernel"
+if kernel and cfg.get("fused_rope") is not True: warn.append("fused_rope=%r（应为 true）" % (cfg.get("fused_rope"),))
+if kernel and cfg.get("skip_mask_fill") is not True: warn.append("skip_mask_fill=%r（应为 true）" % (cfg.get("skip_mask_fill"),))
 import os
-if os.environ.get("LEMOQ_PACKED_QKV") == "1" and cfg.get("attn") == "kernel" and cfg.get("packed_qkv") is not True:
+if kernel and os.environ.get("LEMOQ_PACKED_QKV") == "1" and cfg.get("packed_qkv") is not True:
     warn.append("packed_qkv=%r（应为 true）" % (cfg.get("packed_qkv"),))
 print("    [%s] bw=%-6s attn=%-6s ctx=%-5s exec=%-9s dq=%-8s gate=%-4s p50=%-9s host=%-5s kernels=%-4s %s" % (
     lbl, cfg.get("bit_width"), cfg.get("attn"), cfg.get("ctx"), cfg.get("execution"), cfg.get("dequant"),
@@ -105,16 +123,16 @@ PYEOF
 CANARY_CELL=results/EXP-p4b-01-truncation__bit_width=w8a16_execution=cudagraph_ctx=1024
 CANARY_EXP=EXP-p4b-01-truncation
 CANARY_ARGS="--ctx 1024 --bit-width w8a16 --execution cudagraph --moe grouped --dequant fused"
-run_one "$CANARY_EXP" "$CANARY_ARGS" "$CANARY_CELL" 0
+run_one "$CANARY_EXP" "$CANARY_ARGS" "$CANARY_CELL" 0 0
 cp -p "$CANARY_CELL/result.json" "$OUT/canary_head.json" 2>/dev/null || true
 
-while IFS='|' read -r exp args cell packed; do
+while IFS='|' read -r exp args cell kernel packed; do
   [ -z "${exp:-}" ] && continue
   [ "$cell" = "$CANARY_CELL" ] && continue   # 金丝雀已跑过；尾金丝雀统一放最后
-  run_one "$exp" "$args" "$cell" "${packed:-0}"
+  run_one "$exp" "$args" "$cell" "${kernel:-0}" "${packed:-0}"
 done < "$LIST"
 
-run_one "$CANARY_EXP" "$CANARY_ARGS" "$CANARY_CELL" 0
+run_one "$CANARY_EXP" "$CANARY_ARGS" "$CANARY_CELL" 0 0
 cp -p "$CANARY_CELL/result.json" "$OUT/canary_tail.json" 2>/dev/null || true
 
 # ---- 4) 判定：金丝雀漂移（fail-closed，非零退出 = 整轮 VOID）----
