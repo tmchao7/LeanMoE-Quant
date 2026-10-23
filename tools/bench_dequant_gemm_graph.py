@@ -90,7 +90,13 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--layers", type=int, default=16)
     ap.add_argument("--projections", type=int, default=4, help="每层几个投影（q/k/v/o = 4）")
-    ap.add_argument("--dim", type=int, default=2048, help="OLMoE: hidden = N = K = 2048")
+    ap.add_argument("--dim", type=int, default=2048, help="OLMoE: hidden = K = 2048")
+    ap.add_argument(
+        "--out-dim",
+        type=int,
+        default=None,
+        help="N（默认 = --dim）；打包 q/k/v 后 N=3*hidden=6144，K 仍是 hidden",
+    )
     ap.add_argument("--group-size", type=int, default=128)
     ap.add_argument("--bits", type=int, default=8, choices=[4, 8])
     ap.add_argument("--rounds", type=int, default=15, help="交错重放的轮数")
@@ -111,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     from lemoq.quant import rtn as qrtn  # noqa: PLC0415
 
     dev = "cuda"
+    out_dim = int(args.out_dim or args.dim)
     n_groups = args.dim // args.group_size
     names = args.configs or [
         "B4K256w2s3",  # ← 生产默认（EXP-p2-01 隔离扫描的赢家）
@@ -126,24 +133,24 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- 权重：真实 RTN + 打包口径（与 QuantLinear 的 8-bit 路径一致）----
     print(
-        "构造 %d 层 × %d 投影 的权重（N=K=%d, %d-bit, g=%d）"
-        % (args.layers, args.projections, args.dim, args.bits, args.group_size)
+        "构造 %d 层 × %d 投影 的权重（N=%d, K=%d, %d-bit, g=%d）"
+        % (args.layers, args.projections, out_dim, args.dim, args.bits, args.group_size)
     )
     torch.manual_seed(0)
     packed, scales = [], []
     for _ in range(args.layers * args.projections):
-        w = (torch.randn(args.dim, args.dim, device=dev) * 0.02).float()
+        w = (torch.randn(out_dim, args.dim, device=dev) * 0.02).float()
         q = qrtn.quantize_rtn(w, bits=args.bits, group_size=args.group_size)
         codes = q["codes_padded"]
         if args.bits == 8:
-            qw = codes.to(torch.int8).reshape(args.dim, args.dim).contiguous()
+            qw = codes.to(torch.int8).reshape(out_dim, args.dim).contiguous()
         else:
             from lemoq.quant import pack as qpack  # noqa: PLC0415
 
             flat = codes.reshape(int(codes.numel()) // args.dim, args.dim)
-            qw = qpack.pack_4bit(flat).reshape(args.dim, -1).contiguous()
+            qw = qpack.pack_4bit(flat).reshape(out_dim, -1).contiguous()
         packed.append(qw)
-        scales.append(q["scale"].half().reshape(args.dim, n_groups).contiguous())
+        scales.append(q["scale"].half().reshape(out_dim, n_groups).contiguous())
     x = (torch.randn(1, args.dim, device=dev, dtype=torch.float16) * 0.5).contiguous()
     total_bytes = sum(
         p.numel() * p.element_size() + s.numel() * s.element_size() for p, s in zip(packed, scales)
