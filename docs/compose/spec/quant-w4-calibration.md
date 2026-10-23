@@ -112,8 +112,15 @@ test PPL 使用前 8192 token / 8×1024 窗口；ctx4096 的五窗口门至少�
 逐层输出传播、非专家参数保持原样、packed 导出/重载及“不再次 RTN”的推理集成。
 另覆盖 split/哈希/冻结证据、预算耗尽、部分 bundle、参数上限与防覆盖；GPU 新用例只 collection。
 
-最终 CPU 结果：**656 passed / 32 deselected**；其中新增 66 个 CPU 用例与 1 个 GPU 用例。
+最终 CPU 结果：**656 passed / 32 deselected**（当前仓库 657——后续 packed parity 用例 +1）；
+其中新增 66 个 CPU 用例与 1 个 GPU 用例。
 ruff、black（103 个文件）、check_docs（57 份 Markdown）和 `git diff --check` 全通过。
 新增 GPU 用例只完成 collection。旧极值 oracle 的一条 overflow warning 保留，不放宽任何门。
-W4 过门、W8 GPU 回归、峰值显存、实际耗时、速度提升均为 **未测**。本轮不注册矩阵、不修改 gate
-引用，不变更默认融合，不重跑 done cells。此前离线修复状态见 [前序记录](offline-validation-2026-10-22.md)。
+
+**2026-10-23 已在 RTX 5090 上按本规格执行一轮诊断**：W8 控制过门（KL 0.001154 / top-1 0.981818 /
+PPL +0.0443%）；W4 RTN、W4 GPTQ 与 ≤25% 整层 W8 退路都**未过门**（退路字节 −36.92%、top-1 0.9333、
+PPL +4.19%）。按预注册反证条件停止扩展：**未做 ctx=4096、test split、性能 A/B**，峰值显存与正式
+速度仍未测。数字、逐层 MSE、provenance 与工件位置见
+[EXP-p1-05 记录](../../../experiments/EXP-p1-05-w4-expert-calibration.md) §GPU 诊断结果。
+本轮不注册矩阵、不修改 gate 引用，不变更默认融合，不重跑 done cells。此前离线修复状态见
+[前序记录](offline-validation-2026-10-22.md)。
