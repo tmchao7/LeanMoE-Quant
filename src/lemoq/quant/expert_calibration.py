@@ -48,10 +48,12 @@ def validate_packed(q: QuantFusedExperts, *, experts: int, hidden: int, ffn: int
             or not value.is_contiguous()
         ):
             raise ValueError("packed shape/dtype/layout mismatch: " + name)
+        # RTN computes scales in fp32, then stores fp16. Tiny, valid groups can
+        # underflow to zero; the existing inference kernel dequantizes them to zero.
         if name.startswith("scale") and (
-            not bool(torch.isfinite(value).all()) or not bool((value > 0).all())
+            not bool(torch.isfinite(value).all()) or not bool((value >= 0).all())
         ):
-            raise ValueError("scales must be finite and positive")
+            raise ValueError("scales must be finite and nonnegative")
     if len({getattr(q, name).device for name in shapes}) != 1:
         raise ValueError("packed buffers must share a device")
 

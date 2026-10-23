@@ -185,6 +185,18 @@ def test_invalid_packed_payload_rejected_before_any_replacement(calibrated):
     assert all(hasattr(layer.mlp, "experts") for layer in original.model.layers)
 
 
+def test_fp16_underflow_scale_is_valid_but_negative_scale_is_not(calibrated):
+    from lemoq.quant.expert_calibration import validate_packed
+
+    _, _, packed, _, _ = calibrated
+    q = packed[0]
+    q.scale_down[0, 0, 0] = 0  # RTN's fp32 scale may underflow when stored as fp16.
+    validate_packed(q, experts=2, hidden=16, ffn=8)
+    q.scale_down[0, 0, 0] = -1
+    with pytest.raises(ValueError, match="scales"):
+        validate_packed(q, experts=2, hidden=16, ffn=8)
+
+
 def test_rtn_arm_needs_no_calibration_and_budget_stops_export():
     model = _model()
     rows = calibrate_model(
