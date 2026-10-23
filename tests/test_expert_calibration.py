@@ -321,8 +321,9 @@ def test_gptq_packed_weights_match_independent_dense_oracle_on_gpu():
     x = torch.randn(1, 256, device="cuda", dtype=torch.float16) * 0.1
     ids = torch.tensor([[0, 1]], device="cuda", dtype=torch.int64)
     weights = torch.tensor([[0.6, 0.4]], device="cuda", dtype=torch.float16)
-    got = grouped_moe_forward_quant(x, q, ids, weights)
-    baseline = grouped_moe_forward_quant(x, q, ids, weights, backend="oracle")
+    config = {"down_sum": {"SPLIT_K": 1}}  # tiny FFN=128 cannot use production SPLIT_K=4
+    got = grouped_moe_forward_quant(x, q, ids, weights, config=config)
+    baseline = grouped_moe_forward_quant(x, q, ids, weights, config=config, backend="oracle")
     gw, dw = q.dequant_gate_up(dtype=torch.float64), q.dequant_down(dtype=torch.float64)
     truth = torch.zeros(256, device="cuda", dtype=torch.float64)
     for i in range(2):
