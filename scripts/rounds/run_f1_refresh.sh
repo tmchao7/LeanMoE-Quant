@@ -63,7 +63,9 @@ for p in sorted(glob.glob("results/EXP-*__*/result.json")):
         args += ["--batch", str(c["batch"])]
     joined = " ".join(args)
     kernel = "1" if "--attn kernel" in joined else "0"
-    packed = "1" if (os.environ.get("LEMOQ_PACKED_QKV") == "1" and kernel == "1") else "0"
+    # F2 还要求格是**量化**的：fp16 的 q/k/v 是 nn.Linear，install 会显式拒绝。
+    quantized = (c.get("bit_width") or "fp16") != "fp16"
+    packed = "1" if (os.environ.get("LEMOQ_PACKED_QKV") == "1" and kernel == "1" and quantized) else "0"
     print("%s|%s|%s|%s|%s" % (exp, joined, cell, kernel, packed))
 PYEOF
 echo "清单 $(wc -l < "$LIST") 格" >> "$LOG"; cat "$LIST" >> "$LOG"
