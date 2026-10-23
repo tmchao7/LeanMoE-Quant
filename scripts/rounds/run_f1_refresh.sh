@@ -105,7 +105,7 @@ PYEOF
 CANARY_CELL=results/EXP-p4b-01-truncation__bit_width=w8a16_execution=cudagraph_ctx=1024
 CANARY_EXP=EXP-p4b-01-truncation
 CANARY_ARGS="--ctx 1024 --bit-width w8a16 --execution cudagraph --moe grouped --dequant fused"
-run_one "$CANARY_EXP" "$CANARY_ARGS" "$CANARY_CELL" 1
+run_one "$CANARY_EXP" "$CANARY_ARGS" "$CANARY_CELL" 0
 cp -p "$CANARY_CELL/result.json" "$OUT/canary_head.json" 2>/dev/null || true
 
 while IFS='|' read -r exp args cell packed; do
@@ -114,7 +114,7 @@ while IFS='|' read -r exp args cell packed; do
   run_one "$exp" "$args" "$cell" "${packed:-0}"
 done < "$LIST"
 
-run_one "$CANARY_EXP" "$CANARY_ARGS" "$CANARY_CELL" 1
+run_one "$CANARY_EXP" "$CANARY_ARGS" "$CANARY_CELL" 0
 cp -p "$CANARY_CELL/result.json" "$OUT/canary_tail.json" 2>/dev/null || true
 
 # ---- 4) 判定：金丝雀漂移（fail-closed，非零退出 = 整轮 VOID）----
