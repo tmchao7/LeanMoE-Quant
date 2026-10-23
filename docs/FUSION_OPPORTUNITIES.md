@@ -172,6 +172,19 @@ ramp-up 的 kernel 几乎是全部时间（实测 5.05 µs/次，gap 2.3 µs/次
 ★ 附带教训：`BLOCK_N=4` 是**隔离微基准**里的大 N 最优解（`_dequant_triton.py:83` 注释），
 而图内每次只有 2048 行。**同一配置在不同尺度下最优解不同** —— 融合前必须按图内的真实形状重扫。
 
+#### ★ 2026-10-23 定位复核 + 候选状态
+
+- 用图内 `w8a16 × attn=kernel × ctx=1024` 那一格（p50 1.9241 ms）复算：
+  `_dequant_gemm_kernel` **0.3233 ms/步、占步 16.8%、达成率 54.0%、离地板 149 µs** ——
+  三个自研 kernel 里**最差**，也是整步最大的可回收缺口（`_gate_up_act` 绝对最大但已
+  78.8%；`_down_sum` 67.7%）。所以"量化上线后问题最大的算子"就是它。
+- 候选已实现、**默认关**：`src/lemoq/kernels/packed_qkv.py` + 环境变量
+  `LEMOQ_PACKED_QKV=1`（只对 w8 / `dequant=fused` / 对称 / 无 bias / `attn=kernel` 生效，
+  其余**显式拒绝**，不静默退回三次调用）；是否生效记进 payload 的 `config.packed_qkv`。
+- 验收状态：CPU 契约测试 8 条（含 reference 路径的打包等价）；GPU 的 **K1 逐位对照**
+  已写好（`tests/test_packed_qkv.py`，`-m gpu`）。**隔离/图内 A/B 还没跑**，所以
+  0.07–0.10 ms 仍是 **est**，不是已测收益。
+
 #### 改法
 
 - 把 `q_proj/k_proj/v_proj` 三份权重在 host 侧**打包成一份连续 buffer**（N = 2048×3 = 6144），
