@@ -82,8 +82,9 @@ settled — do not re-derive them and do not re-run their cells:
 Read, in this order: **`RESULTS.md`** (the one-page result with a citation per number),
 **`configs/experiments.yaml`** (the only source of hypotheses and cells), the **record** of the
 experiment you are about to touch (`experiments/<EXP-ID>.md`), then
-**`docs/handoff/HANDOFF_2026-10-23.md`** (the current GPU-validation handoff;
-the 2026-10-10 handoff remains linked as historical context).
+**`docs/handoff/HANDOFF_2026-10-24.md`** (the current handoff: next-boot runbook for adopting
+F1+F2 and the pre-registered S2 operator rule; the 2026-10-23 and 2026-10-10 handoffs remain
+linked as historical context).
 
 Two rules come before everything else: **do not redo what §3 lists as done**, and **ask the user**
 before changing a matrix axis, a cell id, or overwriting a recorded `result.json` (§6).
@@ -180,6 +181,9 @@ that the science was not done — read the record first.
 | P3 | Breadth: E5 (`EXP-p4-02`), E6 (`EXP-p5-01`), E8 (`EXP-p8-01`, needs the V100), E1's group axis under the corrected prompt set, dense curves, batch sweep (E3 — today it has **no** experiment), FP8/MXFP4 (`EXP-p3-01/02`); W4A16 is **closed as a negative result** (`EXP-p1-05`), so only a >25% mixed-bit fallback would be a new experiment | each closes a declared hypothesis or lever; several need a matrix entry that does not exist | per matrix entry; E8 only after the same protocol passes on the V100 | partial: new matrix entries need approval |
 | P4 | ✅ **done 2026-10-08 (except the counters)**: `tools/ncu_evidence.py` (counter path written, blocked on this host) + `docs/reference/NCU_EVIDENCE.md` + `RESULTS.md` + 3 charts generated from artifacts by `tools/make_figures.py` + README/HANDOFF corrections | closes Phase 2's last deliverable and Phase 7 | charts regenerate from `result.json` via `python -m tools.make_figures`; every number in RESULTS.md cites an artifact or record | no |
 | W4 | ✅ **done 2026-10-23** (`EXP-p1-05`, GPU diagnostic — **negative**): W8 control PASS; W4 RTN / W4 GPTQ / ≤25% whole-layer W8 fallback all FAIL ⇒ pre-registered refutation clause stops the expansion; no matrix registration, no `GATE_CITATIONS` change | 4-bit was the last unclosed bit-width in the quantization-ceiling story | record + artifacts rsynced to `lemoq-artifacts/EXP-p1-05-2026-10-23/` (outside git) | done |
+| **S1** | **Adopt F1+F2** (next boot, ≈2 h): re-take F2's raw A/B payloads → 23-graph-cell refresh (`DRY=1 F2=1` first) → flip `FUSION_DEFAULTS` → sync every number per `ADOPTION_SYNC_2026-10-24.md` → merge `main` | the only measured-but-unshipped lever (≈0.34 ms, est sum) | refresh exit code 0 + canary ≤5% + per-cell `host_share` ≤5% + `packed_qkv_effective` correct on exactly the 2 quantized `attn=kernel` cells + four gates green | no |
+| **S2** | **One operator, picked by the pre-registered rule** (expected: F4 KV direct write ≈98 µs; fallback F3 residual epilogue 48 µs), behind its own switch, default off | largest *capturable* gap once F2 is in (the rule discounts bandwidth-only gaps to 0.3 and latency removal to 0.9) | isolated bench + K1 parity + fresh-process adjacent A/B (`ENV_OFF` needed once a default is on) before any default flip | no |
+| **S3** | `lm_head` w8 (≈63 µs) **or** E6/E8 breadth | the last piece of the quantization lever, or the cheapest Tier B closure | **new gate row from a new measurement** (new experiment) before any latency is published | **YES** (new experiment / new `GATE_CITATIONS` row) |
 
 ## 5. Wrap-up (docs/config only — **done 2026-10-07**)
 
@@ -298,7 +302,10 @@ the V100 box, the Mac) diverge, so:
 | `experiments/<EXP-ID>.md` | the authoritative record of each experiment (status, results, applicability) |
 | `docs/reference/NCU_EVIDENCE.md` | kernel-level evidence; why ncu counters are blocked on this host and what replaced them |
 | `docs/reference/NCU_PLAN.md` | **换机才能做**的 ncu 补测清单：要测哪些 kernel、抓哪些 counter、验收判据（当前 blocked） |
-| `docs/handoff/HANDOFF_2026-10-23.md` | **当前 GPU 验证交接**：分支/提交、已测与待测、工件位置、预算、下一步和纪律红线 |
+| `docs/handoff/HANDOFF_2026-10-24.md` | **当前交接**：下一次开机的执行手册（补 F2 证据 → 23 格刷新 → 翻默认 → 同步数字）、S2 算子的预注册选择规则、预算与中止条件 |
+| `docs/handoff/HANDOFF_2026-10-23.md` | 此前一轮：W4 负结果、F2 定位与合规 A/B、刷新轮作用域（历史上下文） |
+| `docs/handoff/ISSUES_2026-10-23.md` | 遗留问题清单 + **2026-10-24 复盘**（N1–N4 四条新发现与处置、剩余项按 S1/S2/S3 归属） |
+| `docs/handoff/ADOPTION_SYNC_2026-10-24.md` | 采纳后的数字同步映射 + 翻默认的连锁（测试/refusal/`packed_qkv_effective`） |
 | `docs/apply/PORTFOLIO.md` | 面向实习投递的自述：简历 bullet（中英）、面试必问三题的标准答法、岗位映射与如实缺口（**不引入任何新数字**） |
 | `docs/figures/` | the three charts, regenerated from artifacts by `python -m tools.make_figures` |
 | `docs/README.md` | 文档地图：`docs/` 下每份文档是什么、给谁看 |

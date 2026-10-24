@@ -67,7 +67,7 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | 量 | 值 | 出处 |
 | --- | --- | --- |
 | E7 步级量化收益（w8a16，图内） | **1.1911×** / 1.0888× | [EXP-p4b-01](experiments/EXP-p4b-01-truncation.md) §P2j |
-| 权重流占一个 graph 步的比例 | **42%**（1024）/ **23%**（4096） | 同上 §4 |
+| 权重流占一个 graph 步的比例 | **42.1%**（1024）/ **22.1%**（4096） | 同上 §4（按 payload 的 `floor_w_ms / p50` 算：1.5095/3.5881、1.5095/6.8269） |
 | ⇒ 完美权重路径的**结构性上限** | **~1.74×** / **~1.30×** | 同上 |
 | 专家 GEMV 实测占一步 GPU 时间 | **1.540 ms / 3.5881 ms = 42.9%** | [docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md) §4.3 |
 | kernel 级量化收益（专家 GEMV，隔离测） | 96.3 → 63.5 µs = **1.52×** | 同上 §3 |
@@ -113,7 +113,7 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | --- | --- |
 | 自研 kernel 族（全部过 K1 parity 门 1e-3） | **4**：grouped MoE GEMV（fp16 + 8/4-bit）、dense 融合反量化 GEMM、split-KV decode attention、融合 RMSNorm |
 | Python（不含虚拟环境） | **35,400 行 / 103 文件**（`src` + `tools` + `benchmarks` + `tests` + `scripts`，不含 `__pycache__`；2026-10-23 实测） |
-| 测试 | **38 个 `test_*.py`**；Mac CPU **657 passed / 0 failed / 32 deselected**（2026-10-23 实测；deselected = `-m "not gpu"` 主动排除）；GPU 标记用例单独跑（交接轮 31 passed / 1 skipped） |
+| 测试 | **40 个 `test_*.py`**；Mac CPU **672 passed / 0 failed / 33 deselected**（2026-10-24 实测；deselected = `-m "not gpu"` 主动排除）；GPU 标记用例单独跑（交接轮 31 passed / 1 skipped） |
 | 实验矩阵 | 21 条声明 / **64 格展开**（`benchmarks.harness.expand(arch=sm_120)` 实算）；**16 条已执行**，`results/**/result.json` **101 份（84 done / 13 planned / 4 blocked）**（2026-10-23 复核） |
 | 度量纪律 | 实测带宽而非规格值；KL/top-1 门先于性能；schema 强制"门失败 ⇒ latency 为 null"；首尾同格金丝雀；同租户记录不 kill；覆盖前先归档 |
 

@@ -27,7 +27,7 @@ METRICS §6/§2、PORTFOLIO §2b 两条占位、README、ROADMAP、HANDOFF 横�
 README 投递首屏（T6）已于上午提前交付。
 
 **Verification** — Mac 四门多轮全绿（**该次交付时**：ruff ✓ / black ✓ / pytest **480 passed / 0
-failed** / check_docs 37 md ✓；当前仓库为 671 passed / 107 md，见 `RESULTS.md` §5）；服务器 pytest **474 passed / 6 skipped**（同套 480）；
+failed** / check_docs 37 md ✓；当前仓库为 672 passed / 33 deselected、`check_docs` 61 md，见 `RESULTS.md` §5）；服务器 pytest **474 passed / 6 skipped**（同套 480）；
 G2 金丝雀 −3.448% 写进工件（`void:false`）；G3 真机 `status=done` 且三族上界经评审用
 工件限值逐 config 复算 MATCH；独立评审总判 **APPROVE、无 critical**，其 4 处 major
 （测试计数 466→480、METRICS/PORTFOLIO/AGENTS 三处 batch 口径残留）与全部 minor 已修复

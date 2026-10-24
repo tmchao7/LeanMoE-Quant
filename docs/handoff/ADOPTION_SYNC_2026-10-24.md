@@ -58,7 +58,7 @@
 | --- | --- | --- |
 | `route` | **所有** MoE 格（`moe_static` / `moe_grouped`） | 含 fp16 的非 kernel 格 |
 | `rope` / `skip_mask_fill` | `attn=kernel` 的 6 格 | 非 kernel 格上 `mask-fill` 会**显式拒绝** |
-| `packed_qkv`（F2） | 其中**量化**的 2 格（p4c-01 w8a16×kernel 1024/4096） | fp16 kernel 格是 `nn.Linear`，install 拒绝 |
+| `packed_qkv`（F2） | 其中**量化**的 2 格（p4c-01 w8a16×kernel 1024/4096） | fp16 kernel 格是 `nn.Linear` ⇒ 不适用，**no-op**（`packed_qkv_effective=false`） |
 
 ⇒ 刷新轮之后：`p0-04/p2-02/p4b/p4c-sdpa` 只反映 `route`；`p2-05/p4c-kernel` 反映
 `route`（fp16 kernel 格）或 `route+rope+mask+F2`（w8a16 kernel 2 格）。
@@ -66,7 +66,31 @@
 ## 4. 刷新后的验收顺序
 
 1. 逐格读刷新 payload：`status=done`、`gate`、`host_share≤5%`、`config.fused_route=true`
-   （kernel 格再查 `fused_rope`/`skip_mask_fill`/`packed_qkv`）；
+   （kernel 格再查 `fused_rope`/`skip_mask_fill`；**F2 看 `config.packed_qkv_effective`**，
+   不看 `config.packed_qkv` —— 后者是"请求"，采纳后 21/23 格会是 `true` 而实际没装）；
 2. 整轮 `round_canary`（首尾同格 graph）非零 ⇒ **VOID，什么都不改**；
 3. 通过后才改 `FUSION_DEFAULTS`（四个 True）→ 按 §1 表填数字 → 四门 → 提交；
 4. 每份记录加"★ 2026-10-2x 刷新"小节，**注明该轮是 combined（F1+F2）**。
+
+## 5. 翻默认会碰到的连锁（2026-10-24 已在本地理顺，照此核对）
+
+| 连锁 | 现在的行为 |
+| --- | --- |
+| `packed_qkv` 有两个前置（`attn=kernel` **且** 量化） | 不适用 ⇒ **no-op**（不安装、不报错）；payload 记 `packed_qkv`（请求）+ `packed_qkv_effective`（生效）。`blocked`/`failed` 的 payload 生效恒为 `False` |
+| 两个测试曾写死"默认全 False" | 已改成对着 `FUSION_DEFAULTS` 断言 + 新增 `packed_qkv_applicable` 用例 ⇒ **翻默认不需要改测试** |
+| 显式请求的 A/B（`--ab-packed-qkv`） | 仍**拒绝** fp16 / 非 kernel 格：那是主动比较，静默 no-op 会量出假的 0% |
+| `scripts/rounds/run_ab_fresh_process.sh` 在翻默认之后 | off 臂必须给 `ENV_OFF="LEMOQ_PACKED_QKV=0"`；不给 ⇒ fail-closed 拒绝（否则两臂同实现） |
+| `scripts/rounds/run_f1_refresh.sh` 的开关写法 | 四个开关**显式写 0/1**（不再 `unset`），所以采纳前后行为一致；断点跳过按本格期望值判断 |
+
+## 6. 刷新后顺手要订正的计数（与采纳无关，但同一次提交做完）
+
+`RESULTS.md` §5 的测试计数、`ROADMAP` §1、`PORTFOLIO` L105 已按 2026-10-24 实测订正为
+**672 passed / 33 deselected / 40 个测试文件**；刷新后再按新的 `results/` 复核 `payload` 计数
+（当前 101 份：84 done / 13 planned / 4 blocked）。
+
+## 7. 刷新后重排算子账本（S2 的输入）
+
+用刷新后的 `EXP-p4c-01__bit_width=w8a16_attn=kernel_ctx=1024` 取 `bottleneck.top_kernels`，
+按"HANDOFF_2026-10-24 §5"的预注册规则算 `gap` 与可捕获量，再把
+`docs/FUSION_OPPORTUNITIES.md` §1 的账本整表换成新值（该文 §1.2 的字节数**不随刷新变**，
+只有实测 ms 与达成率变）。**不要**用旧账本挑选 S2 的算子。
