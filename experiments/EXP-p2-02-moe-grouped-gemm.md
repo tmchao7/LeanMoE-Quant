@@ -13,6 +13,8 @@
   - `results/EXP-p2-02-grouped-gemm/kernel_sweep.json` / `kernel_sweep_refine.json` / `kernel_compare.json`
 - **对照**: `EXP-p0-04-cudagraph-static-moe`，**同一台机器、同一个 driver** 上重测
 
+★ **2026-10-24 采纳刷新**：route 融合默认开后同轮重测，采用 p50 **3.5340 ms**（P2j 值 3.6828 留上文；`results/EXP-f1-refresh/`）。
+
 ## Hypothesis（跑之前写）
 
 ```text

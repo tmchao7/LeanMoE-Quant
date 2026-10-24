@@ -50,9 +50,9 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | # | 杠杆 | 实测 | 口径 | 出处 |
 | --- | --- | --- | --- | --- |
 | 1 | **执行轴**（eager → cudagraph，同一实现、**同一轮**） | **2.43×** @1024 / **1.35×** @4096 | fp16：9.8841 → 4.0670 / 9.8716 → 7.3211 ms；`host_share` 67.3% → 1.4%。★ 用归档里那一轮的两个 payload，**不**用"pre-P2i eager vs post-P2j graph"（跨轮，会造出假的 2.75×） | 归档 `results/EXP-p2j-refresh/archive/EXP-p4b-01-*`；[EXP-p4b-01](experiments/EXP-p4b-01-truncation.md) §2.8.2 |
-| 2 | **量化**（w8a16 vs fp16，图内 fused 臂） | **1.1911×** @1024 / **1.0888×** @4096 | 同一实现只换 bit-width；canary ±0.13% | 同上 §P2j（采用列 3.5881 / 3.0124） |
-| 3 | **注意力实现**（HF sdpa → 自研 split-KV，图内） | **1.3034×** @1024 / **1.2555×** @4096（w8a16 格） | vs **同格 fp16**；最好格 **1.87× / 3.11×** vs fp16×sdpa | [EXP-p4c-01](experiments/EXP-p4c-01-in-graph-attention.md) §5.7 |
-| 4 | **融合 RMSNorm**（7 kernel → 1 kernel） | **1.2358×** 全步；kernel/步 **994 → 539** | 同进程交错 A/B，**15/15 轮获胜**；同一个 cudagraph 格在 P2j 前后 **4.0670 → 3.5881 ms（1.13×）** 是它的端到端兑现 | [EXP-p4c-02](experiments/EXP-p4c-02-elementwise-tail.md) §5.6 |
+| 2 | **量化**（w8a16 vs fp16，图内 fused 臂） | **1.1974×** @1024 / **1.0912×** @4096 | 同一实现只换 bit-width；★ 2026-10-24 采纳刷新（canary 0.30%） | 同上 §采纳刷新（采用列 3.5421 / 2.9582） |
+| 3 | **注意力实现**（HF sdpa → 自研 split-KV，图内） | **1.4392×** @1024 / **1.3711×** @4096（w8a16 格） | vs **同格 fp16**；最好格 **2.27× / 3.73×** vs fp16×sdpa（★ 采纳刷新轮，F1+F2 默认开） | [EXP-p4c-01](experiments/EXP-p4c-01-in-graph-attention.md) §采纳刷新 |
+| 4 | **融合 RMSNorm**（7 kernel → 1 kernel） | **1.2358×** 全步；kernel/步 **994 → 539** | 同进程交错 A/B，**15/15 轮获胜**；同一个 cudagraph 格在 P2j 前后 **4.0670 → 3.5881 ms（1.13×）**、采纳刷新后 **3.5421 ms** 是它的端到端兑现 | [EXP-p4c-02](experiments/EXP-p4c-02-elementwise-tail.md) §5.6 |
 | 5 | **投影 kernel 修复**（每元素 gather → 每 tile 装载+广播） | 每调用 **8.14 → 5.15 µs**（**523 → 826 GB/s**） | 图内配置扫描；模型桶 0.5245 → 0.3254 ms | [EXP-p4c-01](experiments/EXP-p4c-01-in-graph-attention.md) §5.4 |
 
 ![每条杠杆各自的同轮 A/B](docs/figures/fig1_per_axis_speedups.svg)
@@ -66,15 +66,15 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 
 | 量 | 值 | 出处 |
 | --- | --- | --- |
-| E7 步级量化收益（w8a16，图内） | **1.1911×** / 1.0888× | [EXP-p4b-01](experiments/EXP-p4b-01-truncation.md) §P2j |
-| 权重流占一个 graph 步的比例 | **42.1%**（1024）/ **22.1%**（4096） | 同上 §4（按 payload 的 `floor_w_ms / p50` 算：1.5095/3.5881、1.5095/6.8269） |
-| ⇒ 完美权重路径的**结构性上限** | **~1.74×** / **~1.30×** | 同上 |
-| 专家 GEMV 实测占一步 GPU 时间 | **1.540 ms / 3.5881 ms = 42.9%** | [docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md) §4.3 |
+| E7 步级量化收益（w8a16，图内） | **1.1974×** / 1.0912×（采纳刷新轮） | [EXP-p4b-01](experiments/EXP-p4b-01-truncation.md) §P2j |
+| 权重流占一个 graph 步的比例 | **42.7%**（1024）/ **22.3%**（4096） | 同上 §4（采纳刷新 payload：1.5111/3.5421、1.5111/6.7841） |
+| ⇒ 完美权重路径的**结构性上限** | **~1.74×** / **~1.29×** | 同上（fp16 臂同轮含 route 融合，地板不变） |
+| 专家 GEMV 实测占一步 GPU 时间 | **1.540 ms / 3.5421 ms = 43.5%**（采纳刷新分母） | [docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md) §4.3 |
 | kernel 级量化收益（专家 GEMV，隔离测） | 96.3 → 63.5 µs = **1.52×** | 同上 §3 |
-| ⇒ 该 kernel 解释了步级收益的 | **90.4%**（16 层 × Δ0.029 ms = 0.524 / 0.580 ms） | 同上 §4.3 |
+| ⇒ 该 kernel 解释了步级收益的 | **89.9%**（16 层 × Δ0.0328 ms = 0.525 / 0.584 ms，采纳刷新步级差） | 同上 §4.3 |
 
 **读法**：量化确实兑现了，但它能兑现的天花板**不是 4×，是 1.74×** —— 因为权重只占一步的 42%。
-专家 GEMV 解释了**已测步级延迟节省的 90.4%**；这是收益归因，
+专家 GEMV 解释了**已测步级延迟节省的 89.9%**（采纳刷新轮口径）；这是收益归因，
 不表示已获得结构性上限的九成。
 
 ### 3.1 量化"能不能用"：任务级证据（2026-10-09 新测）

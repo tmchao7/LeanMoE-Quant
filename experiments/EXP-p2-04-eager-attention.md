@@ -11,6 +11,8 @@
 - **对照**: `EXP-p2-02-moe-grouped-gemm`（ctx=1024，同批重测）与
   `EXP-p0-04-cudagraph-static-moe`（ctx=4096，同机同 driver）
 
+★ **2026-10-24 采纳刷新**：同轮重测采用 p50 **2.5642 / 2.9275 ms**（P2j 值 2.6258/3.0004 留上文；`results/EXP-f1-refresh/`）。
+
 ## Hypothesis（跑之前写）
 
 ```text

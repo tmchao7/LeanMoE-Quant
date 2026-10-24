@@ -287,6 +287,10 @@ kernel 尾多一条 load + add，**零额外字节**（省掉一次读 + 一次�
 
 `index_elementwise_kernel ×32`（0.0546）+ `CatArrayBatchedCopy ×32`（0.0544）= **0.1090 ms**，
 只为了把 32 个 8 KB 的 KV 写进 `StaticCache`。平均 **1.7 µs/次**写 8 KB —— 纯 launch。
+★ **2026-10-24 刷新后正式账本**（`tools/operator_ledger`，canonical payload p50 1.5586 ms）：
+`kv_write_idx` 32 次 × 实测 **0.0560 ms**、gap **55.9 µs**、可捕获 **50.3 µs —— 排名第 1**；
+F3 残差 gap 24.1 µs **低于 30 µs 入榜线**（不再是被选退路）；lm_head gap −5.3 µs 照旧被过滤。
+**S2 = F4 确认**（预注册规则机械执行）。
 
 #### 改法（两条路，选一条）
 

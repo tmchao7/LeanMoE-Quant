@@ -16,6 +16,8 @@
 - **对照**: `EXP-p4b-01-truncation`（E7：量化 × execution 轴）、`EXP-p2-05-attn-kernel`
   （点：fp16 + kernel 的图内对照；本实验是它的**量化 × kernel 的 2×2 交互**）
 
+★ **2026-10-24 采纳刷新 = v4（canonical）**：F1+F2 默认开后的同轮重测（`results/EXP-f1-refresh/`）。量化收益：sdpa 臂 **1.1948**@1024 / **1.0912**@4096；kernel 臂 **1.4392**@1024 / **1.3711**@4096；最好格 `w8a16×kernel` = **1.5586/1.8140 ms**，vs `fp16×sdpa`（3.5344/6.7734）= **2.27× / 3.73×**（v3 值 1.1955/1.3034、1.87×/3.11× 留 §5.7，跨轮不混比）。开关作用域与 ADOPTION_SYNC §3 预告一致：route 全 MoE 格、rope/mask 限 kernel 格（kernel/步 377）、packed 仅量化 kernel 2 格（kernels/步 345）。
+
 ## 1. Hypothesis（跑之前写 —— 已随矩阵在 `25f7868` 提交，本文件没有事后修改它）
 
 ```text
