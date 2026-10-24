@@ -169,6 +169,8 @@ def blocked_result(
     #   **被阻塞的量化格**以 fp16 的名义落盘（P3 的第二处同类坑；第一处是
     #   `build_payload_cudagraph` 的 config 段）。实测过：w8a16 × cudagraph 的一次
     #   capture OOM 写出的 payload 里 bit_width=fp16，那是错的记录。
+    from lemoq.kernels.fusion_switches import fusion_payload_fields  # noqa: PLC0415
+
     bit_width = str(config.get("bit_width") or "fp16")
     payload["hypothesis"] = {
         "statement": (
@@ -193,6 +195,9 @@ def blocked_result(
             "max_new_tokens": config.get("max_new_tokens"),
             "warmup": config.get("warmup"),
             "timed": config.get("timed"),
+            # ★ 候选开关的**有效状态**：blocked 的格也必须能被自检读出用的是哪条臂，
+            #   否则刷新轮会把"开关没生效"和"格被阻塞"混为一谈（2026-10-23 实测）。
+            **fusion_payload_fields(),
         }
     )
     payload["correctness"] = {

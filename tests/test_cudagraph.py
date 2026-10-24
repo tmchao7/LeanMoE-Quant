@@ -54,6 +54,56 @@ def test_blocked_result_keeps_performance_unmeasured():
     assert validate_result(payload) == []
 
 
+def test_blocked_and_failed_results_record_effective_fusion_switches(monkeypatch):
+    """A blocked cell must still say which arm it was *attempted* with.
+
+    ★ 2026-10-23：刷新轮的自检在 blocked 格上读到 `fused_route=None`，把"格被阻塞"
+    误报成"开关没生效"。blocked/failed payload 走的是另一条组装路径，必须也带
+    `fusion_payload_fields()` 的四个键（有效状态 = env 覆盖 + 代码默认）。
+    """
+    from benchmarks.cudagraph import blocked_result, failed_result
+
+    switches = (
+        "LEMOQ_FUSED_ROPE",
+        "LEMOQ_FUSED_ROUTE",
+        "LEMOQ_SKIP_MASK_FILL",
+        "LEMOQ_PACKED_QKV",
+    )
+    for key in switches:
+        monkeypatch.delenv(key, raising=False)
+    cfg = {"ctx": 1024, "batch": 1, "max_new_tokens": 32, "warmup": 5, "timed": 20}
+    keys = ("fused_rope", "fused_route", "skip_mask_fill", "packed_qkv")
+
+    default = blocked_result(
+        exp_id="EXP-x__ctx=1024",
+        config=cfg,
+        failure={"stage": "capture", "type": "RuntimeError", "message": "x"},
+    )
+    assert {k: default["config"][k] for k in keys} == dict.fromkeys(keys, False)
+    assert validate_result(default) == []
+
+    monkeypatch.setenv("LEMOQ_FUSED_ROPE", "1")
+    monkeypatch.setenv("LEMOQ_PACKED_QKV", "1")
+    armed = blocked_result(
+        exp_id="EXP-x__ctx=1024",
+        config=cfg,
+        failure={"stage": "capture", "type": "RuntimeError", "message": "x"},
+    )
+    assert armed["config"]["fused_rope"] is True
+    assert armed["config"]["packed_qkv"] is True
+    assert armed["config"]["fused_route"] is False  # 未被覆盖的开关不受影响
+
+    failed = failed_result(
+        exp_id="EXP-x__ctx=1024",
+        config=cfg,
+        correctness={"kl": 0.1, "top1_agreement": 0.5},
+        note="gate failed",
+    )
+    assert failed["status"] == "failed"
+    assert {k: failed["config"][k] for k in keys} == {k: armed["config"][k] for k in keys}
+    assert validate_result(failed) == []
+
+
 def test_compare_logits_accepts_cpu_tensors_and_reports_graph_gate_metrics():
     """CPU 张量要能过（cuda:0 / cpu 混设备的那个真实 bug），而且**必须能分辨差异**。
 
