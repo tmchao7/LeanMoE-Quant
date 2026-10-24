@@ -116,7 +116,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="本地 jsonl 目录（避免依赖 HF 下载；见 REQUIRED_DATA_FILES）",
     )
-    ap.add_argument("--arms", default=",".join(DEFAULT_ARMS))
+    ap.add_argument(
+        "--arms",
+        default=",".join(DEFAULT_ARMS),
+        help="逗号分隔：fp16 + 量化臂名（w8a16/w4a16/w8a16_lmhead——后者为 F5 的 "
+        "lm_head 组合臂，targets 含 lm_head）",
+    )
     ap.add_argument("--json", default=None)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--max-new-tokens", type=int, default=256)
@@ -457,18 +462,31 @@ def _run(args: argparse.Namespace) -> int:
 
     # ---- 量化臂 ----
     if quant_arms:
-        # 快照 fp16 权重（量化臂之间共享一次快照）
+        # ★ 臂名 → (scheme, targets, keep_lm_head_fp16)。targets 是**臂语义的一部分**：
+        #   快照必须覆盖所有臂的并集、spec 必须逐臂一致 —— 硬编码 attention+experts
+        #   会让 lm_head 臂"静默不量 lm_head"（那是另一次测量，不是这一次）。
+        #   F5（EXP-p1-06）加 `w8a16_lmhead`：lm_head 也量化（组合生产配置）。
+        arm_spec_of = {
+            "w8a16": ("w8a16", ("attention", "experts"), True),
+            "w4a16": ("w4a16", ("attention", "experts"), True),
+            "w8a16_lmhead": ("w8a16", ("attention", "experts", "lm_head"), False),
+        }
+        unknown = [a for a in quant_arms if a not in arm_spec_of]
+        if unknown:
+            raise SystemExit("未知量化臂 %s；支持：%s" % (unknown, sorted(arm_spec_of)))
         all_names: list[str] = []
         for arm in quant_arms:
-            all_names.extend(_candidate_names(model, targets=["attention", "experts"], layers=None))
+            all_names.extend(
+                _candidate_names(model, targets=list(arm_spec_of[arm][1]), layers=None)
+            )
         all_names = sorted(set(all_names))
         snapshot = _snapshot(model, all_names)
         from lemoq.quant.linear import SchemeSpec, quantize_model
 
         for arm in quant_arms:
             _restore(model, snapshot)
-            bits = 4 if arm.startswith("w4") else 8
-            spec = SchemeSpec.from_flags("w%da16" % bits, 128, targets=("attention", "experts"))
+            scheme, targets, keep = arm_spec_of[arm]
+            spec = SchemeSpec.from_flags(scheme, 128, targets=targets, keep_lm_head_fp16=keep)
             print("=== arm %s（quantize in-place）===" % arm, flush=True)
             quantize_model(model, spec, names=None)
             res = _run_arm(model, tok, arm, data, max_new, fp16_traces=fp16_traces, tasks=task_list)
