@@ -1,4 +1,4 @@
-"""fused rope — decode 路径 `apply_rotary_pos_emb` 的单 kernel 融合候选（默认关）。
+"""fused rope — decode 路径 `apply_rotary_pos_emb` 的单 kernel 融合（默认开，2026-10-24 采纳；env=0 回 HF 原路）。
 
 ## 为什么值得做（证据：`results/graph_profile.json`，wall 1.94 ms / busy 1.876 ms）
 
@@ -22,7 +22,7 @@ HF 的 `rotate_half` 链每层 10 个 kernel、全步 160 个，**散在四个 f
   （`rotate_half` 半切：`cat((-x2, x1))`），kernel 内 fp32 计算、按原 dtype 舍入。
 - **形状/环境守卫**：只处理 decode 形状 `(1, H, 1, D)`（D 为偶数）且 CUDA +
   triton 可用；其余（prefill、batch>1、CPU/Mac）**退回 HF 原函数**——不静默算错。
-- 开关 `LEMOQ_FUSED_ROPE`（默认关）由 call site（`attn_decode`）读取；
+- 开关 `LEMOQ_FUSED_ROPE`（默认开）由 call site（`attn_decode`）读取；
   本模块只提供实现。Python 相位读取 ⇒ capture 烘焙所选实现。
 - K1（fused vs HF，`PARITY_GATE` 1e-3）由 GPU 测试钉住；回退路径与 HF **逐位相同**。
 """
@@ -35,7 +35,7 @@ __all__ = ["apply_rotary_pos_emb_fused", "fused_rope_available", "warm"]
 
 
 def _fused_rope_enabled() -> bool:
-    """候选开关（默认关 = 走 HF 原路，已录格子零影响）。"""
+    """开关（默认开 = 走融合；env=0 走 HF 原路）。"""
     from lemoq.kernels.fusion_switches import fusion_enabled  # noqa: PLC0415
 
     return fusion_enabled("fused_rope")

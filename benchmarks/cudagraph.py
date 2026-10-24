@@ -488,11 +488,11 @@ def measure_graph_gap(
 
 
 def _skip_mask_fill_enabled() -> bool:
-    """候选开关：graph 臂每步跳过两次 attention_mask 更新（默认关）。
+    """开关：graph 臂每步跳过两次 attention_mask 更新（默认开，2026-10-24 采纳）。
 
     只在 `replay()` / `replay_at_position()`（图**外**、每步）读取，因此不进
     capture 烘焙；eager `decode_eager()` 与 capture warmup 不读它 —— eager 臂
-    依赖新鲜 mask，capture 期保持与已录路径逐字节一致。采纳为默认需另行批准。
+    依赖新鲜 mask，capture 期保持与已录路径逐字节一致。已于 2026-10-24 采纳为默认（刷新轮验收）。
     """
 
     from lemoq.kernels.fusion_switches import fusion_enabled  # noqa: PLC0415

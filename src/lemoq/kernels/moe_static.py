@@ -248,10 +248,10 @@ def static_moe_forward(
 
 
 def _fused_route_enabled() -> bool:
-    """候选融合路由的开关（默认关 = 走 ATen 原路，已录格子零影响）。
+    """融合路由的开关（默认开，2026-10-24 采纳 = 走融合；env=0 走 ATen 原路）。
 
     在 Python 相位（prefill / capture）读取 ⇒ capture 烘焙所选实现；
-    采纳前不改默认值（见 docs/compose/spec/routing-fusion.md [S3]）。
+    已于 2026-10-24 采纳（刷新轮 canary 0.30% 验收）。
     """
 
     from lemoq.kernels.fusion_switches import fusion_enabled  # noqa: PLC0415

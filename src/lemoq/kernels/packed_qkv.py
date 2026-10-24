@@ -1,6 +1,6 @@
 """F2 candidate — packed q/k/v projection: **one** fused dequant-GEMM launch.
 
-`LEMOQ_PACKED_QKV=1` (default off) installs, per OLMoE attention module, one
+`LEMOQ_PACKED_QKV=1` (default on since 2026-10-24; `=0` selects the off arm) installs, per OLMoE attention module, one
 concatenation of the three w8 `QuantLinear` projections along the output
 dimension. Decode (`q_len=1`, `attn=kernel`) then computes q/k/v with a single
 kernel call instead of three.

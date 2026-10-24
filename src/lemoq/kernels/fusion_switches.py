@@ -5,12 +5,14 @@ defaults must live in code (not in a shell export) and must be recorded in every
 payload — exactly like `config.rmsnorm` after P2i.
 
     name            env var                  default   what it switches
-    fused_rope      LEMOQ_FUSED_ROPE         False     fused RoPE candidate
-    fused_route     LEMOQ_FUSED_ROUTE        False     fused routing candidate
-    skip_mask_fill  LEMOQ_SKIP_MASK_FILL     False     mask-fill skip candidate
-    packed_qkv      LEMOQ_PACKED_QKV         False     F2 packed q/k/v projection
+    fused_rope      LEMOQ_FUSED_ROPE         True      fused RoPE (adopted 2026-10-24)
+    fused_route     LEMOQ_FUSED_ROUTE        True      fused routing (adopted 2026-10-24)
+    skip_mask_fill  LEMOQ_SKIP_MASK_FILL     True      mask-fill skip (adopted 2026-10-24)
+    packed_qkv      LEMOQ_PACKED_QKV         True      F2 packed q/k/v (adopted 2026-10-24)
 
-Adoption is a one-line change to `FUSION_DEFAULTS` per candidate **after** a valid
+2026-10-24: F1+F2 adopted — all four True after the valid refresh round
+(canary 0.30%, 23/23 cells, per-cell host_share ≤ 3.4%). Historical note: adoption
+was a one-line change to `FUSION_DEFAULTS` per candidate **after** a valid
 round (F1: three same-round A/Bs; F2: a compliant A/B), followed by the graph-cell
 refresh. Env vars stay as an explicit override for A/B arms and bisection; the
 payload records the *effective* state, so a flipped default is visible without
@@ -30,10 +32,10 @@ ENV_VARS: dict[str, str] = {
 }
 
 FUSION_DEFAULTS: dict[str, bool] = {
-    "fused_rope": False,
-    "fused_route": False,
-    "skip_mask_fill": False,
-    "packed_qkv": False,
+    "fused_rope": True,
+    "fused_route": True,
+    "skip_mask_fill": True,
+    "packed_qkv": True,
 }
 
 

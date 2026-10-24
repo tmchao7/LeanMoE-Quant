@@ -14,7 +14,7 @@
       可能与 torch.topk 选择不同的专家，等权不能推出专家输出相同。候选尚待独立门验证；
     - `E` 非 2 的幂时用 `E_POW` 装载 + mask（OLMoE 是 64，但测试覆盖非幂）。
 
-    **默认不启用**：`_route` 只有在 `LEMOQ_FUSED_ROUTE=1` 时才走这里（见
+    **默认启用（2026-10-24 采纳）**：`_route` 默认走这里，`LEMOQ_FUSED_ROUTE=0` 回 ATen（见
     `moe_static._route`）。这是**候选**路径 —— 采纳需要重测 grouped 路径的全部
     已录格（P2d/P2j 同款流程），不在本 feature 范围内。
 """

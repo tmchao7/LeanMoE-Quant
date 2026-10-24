@@ -765,7 +765,7 @@ def _decode_forward_impl(
     packed = getattr(self, "_lemoq_packed_qkv", None)
     if packed is not None and packed_qkv_enabled():
         # F2 候选：q/k/v 一次 launch，逐行结果与三次独立调用逐位一致
-        # （行局部布局；默认关，见 `lemoq/kernels/packed_qkv.py` 与 FUSION_OPPORTUNITIES §F2）。
+        # （行局部布局；默认开（2026-10-24 采纳），见 `lemoq/kernels/packed_qkv.py`）。
         q_states, k_states, v_states = packed.project(hidden_states)
         query_states = self.q_norm(q_states)
         key_states = self.k_norm(k_states)
@@ -792,7 +792,7 @@ def _decode_forward_impl(
     cos, sin = position_embeddings
     if _fused_rope_enabled():
         # 候选路径：rotate_half 链（neg/cat/mul/add ×10/层）融合为 2 kernel/层。
-        # Python 相位读 env ⇒ capture 烘焙；默认关走 HF 原路（已录格零影响）。
+        # Python 相位读 env ⇒ capture 烘焙；默认开走融合，env=0 走 HF 原路。
         # 见 docs/compose/spec/fused-rope.md。
         from lemoq.kernels.rope import apply_rotary_pos_emb_fused  # noqa: PLC0415
 
