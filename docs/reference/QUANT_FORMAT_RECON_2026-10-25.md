@@ -4,6 +4,15 @@
 > `experiments.yaml` 注释说 FP8/MXFP4 必须"先切 `tl.dot` 路径"——**该前置可以退役**。
 > 用途：决定 EXP-p3-01/02 的实施顺序与形态。规则红线不变（AGENTS §2 规则 9/10）。
 
+## ★ 裁决（2026-10-25 当窗实测，工件 `results/EXP-p3-02-gate-mxfp4-ctx1024.json`）
+
+RTN-MXFP4 精度门 **FAIL**：KL mean **0.0739**（阈值 0.05；5 窗口 min 0.0438 也不过线）、
+top-1 **0.879**（阈值 0.95）——**比 int4-RTN（KL 0.0447 / top1 0.903）更差**，§0.6 的预注册
+预判（幂 2 组尺度更粗）方向与量级双双命中。负结果记录在
+[`experiments/EXP-p3-02-mxfp4-block-scale.md`](../../experiments/EXP-p3-02-mxfp4-block-scale.md)；
+kernel/量化器/接线/K1 四件工程资产全部 PASS 保留。**NVFP4 式两级尺度是 4-bit 的最后一条路**
+（新格式新实验，需登记/预算）。下文 §0 的"先做 p3-02"决策已按此执行并关闭。
+
 ## 0. 决策摘要
 
 1. **EXP-p3-01（fp8 存储）不值得做**：fp8 也是 1 B/权重 + 尺度——**与现有 int8 字节数完全相同**，

@@ -78,6 +78,13 @@ settled — do not re-derive them and do not re-run their cells:
   no ctx=4096, no test split, no 4-bit latency. Do **not** re-run it; the record is
   `experiments/EXP-p1-05-w4-expert-calibration.md` and the artifacts are on the GPU box +
   `lemoq-artifacts/EXP-p1-05-2026-10-23/` (outside git). 4-bit stays gated by rule 2.
+- **★ MXFP4 joins it as a negative result (2026-10-25, `EXP-p3-02`)**: RTN-MXFP4 FAILs the
+  gate worse than int4-RTN did (KL 0.0739 vs 0.0447, top1 0.879 vs 0.903; 5 wikitext windows,
+  0/5 pass) — the pre-registered "E8M0 power-of-2 scales are coarser" prediction hit. The
+  "tl.dot first" prerequisite is retired (vector path implemented; K1 PASS). The last 4-bit
+  route is NVFP4-style two-level scales — a NEW experiment needing approval. Do not re-run.
+  Record: `experiments/EXP-p3-02-mxfp4-block-scale.md`; recon:
+  `docs/reference/QUANT_FORMAT_RECON_2026-10-25.md`.
 
 Read, in this order: **`RESULTS.md`** (the one-page result with a citation per number),
 **`configs/experiments.yaml`** (the only source of hypotheses and cells), the **record** of the
