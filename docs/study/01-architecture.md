@@ -2,7 +2,7 @@
 
 ## 1. 问题与原理
 
-本项目测的是 **OLMoE-1B-7B-0924、batch=1、单流 decode**，不是在线服务吞吐。模型有 16 层、每层 64 专家、每 token 选 8 个；`hidden=2048`。prefill 消化整个 prompt，之后每步只输入一个 token，但要读大量被选中的权重与不断增长的 KV cache。模型和硬件事实见 [MODELS](../reference/MODELS.md)、[RESULTS](../../RESULTS.md)；RTX 5090 的**实测**可达带宽为 1561.9 GB/s，不能拿规格带宽算屋顶。
+本项目测的是 **OLMoE-1B-7B-0924、batch=1、单流 decode**，不是在线服务吞吐。模型有 16 层、每层 64 专家、每 token 选 8 个；`hidden=2048`。prefill 消化整个 prompt，之后每步只输入一个 token，但要读大量被选中的权重与不断增长的 KV cache。模型和硬件事实见 [MODELS](../reference/MODELS.md)、[RESULTS](../../RESULTS.md)；RTX 5090 的**实测**可达带宽为 **1560.3 GB/s（只读；copy 1529.5；旧实例 1561.9）**，不能拿规格带宽算屋顶。
 
 ```text
 input token, cache_position, StaticCache
