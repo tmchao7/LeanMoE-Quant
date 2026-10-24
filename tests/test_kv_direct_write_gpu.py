@@ -110,9 +110,12 @@ def test_applicable_guard_rejects_bad_shapes_and_layouts():
     assert kv_direct_write_applicable(layer, k, v) is False
 
 
-def test_switch_default_is_off_and_payload_fields_cover_it():
+def test_switch_matches_code_default_and_payload_fields_cover_it():
+    """★ 对着 FUSION_DEFAULTS 断言（N6 教训：写死 True/False 会让采纳那天测试变红）。"""
+    from lemoq.kernels.fusion_switches import FUSION_DEFAULTS
+
     states = fusion_states(env={})
-    assert states["kv_direct_write"] is False
+    assert states["kv_direct_write"] is FUSION_DEFAULTS["kv_direct_write"]
     assert set(states) == {
         "fused_rope",
         "fused_route",
