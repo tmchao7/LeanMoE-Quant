@@ -7,6 +7,8 @@
 #   F2=1 bash scripts/rounds/run_f1_refresh.sh        # F1 + packed q/k/v（F2 须先有合规 A/B）
 #   F2=1 KV=1 …                                       # 再叠加 F4 KV 直写（须先有合规 A/B；
 #                                                        作用域=attn=kernel 的格，与 rope/mask 同）
+#   F2=1 KV=1 LMHEAD=1 …                              # 再叠加 F5 lm_head w8（须先有合规 A/B；
+#                                                        作用域=量化格；EXP-p1-06 门行须已落表）
 #
 # 前提（缺一条就不要跑）：
 #   1) F1 三项：同轮 A/B 已测（8.39% / 3.0% / 1.33%）+ 自然文本检查 PASS（2026-10-23）；
@@ -28,6 +30,7 @@ DRY=${DRY:-0}
 export LEMOQ_FUSED_ROPE=1 LEMOQ_FUSED_ROUTE=1 LEMOQ_SKIP_MASK_FILL=1
 [ "${F2:-0}" = "1" ] && export LEMOQ_PACKED_QKV=1
 [ "${KV:-0}" = "1" ] && export LEMOQ_KV_DIRECT_WRITE=1
+[ "${LMHEAD:-0}" = "1" ] && export LEMOQ_LMHEAD_W8=1
 
 # ---- 1) 生成命令清单（从每个 payload 的 config 反推；跳过已刷新的格）----
 # ★ 2026-10-25：清单先进临时文件 —— DRY 模式**零副作用**。旧写法先建 archive/、清空
@@ -88,12 +91,22 @@ for p in sorted(glob.glob("results/EXP-*__*/result.json")):
         )
     else:
         kv_ok = True
+    # ★ F5 期望值：LMHEAD=1 时量化格必须带 lm_head_w8_effective=True、fp16 格必须 False
+    #   （作用域=量化格，与 run_one 的 args 判据一致）；LMHEAD=0 不检查——历史 payload 无该键属正常。
+    lh_on = os.environ.get("LEMOQ_LMHEAD_W8") == "1"
+    if lh_on:
+        lh_ok = (c.get("lm_head_w8_effective") is True) if quantized else (
+            c.get("lm_head_w8_effective") is False
+        )
+    else:
+        lh_ok = True
     refreshed = (
         c.get("fused_route") is True
         and (kernel != "1" or (c.get("fused_rope") is True and c.get("skip_mask_fill") is True))
         and ((c.get("packed_qkv_effective") is True) if packed == "1"
              else (c.get("packed_qkv_effective") in (False, None)))
         and kv_ok
+        and lh_ok
     )
     if refreshed:
         continue
@@ -128,7 +141,7 @@ cp -p "$LIST" "$CELLS"
 FAILS="$OUT/failed.txt"; : > "$FAILS"
 snap () { { echo "--- $1 $(date -Is)"; nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader;
             nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader; } >> "$CONT" 2>&1; }
-echo "env: rope=$LEMOQ_FUSED_ROPE route=$LEMOQ_FUSED_ROUTE mask=$LEMOQ_SKIP_MASK_FILL packed=${LEMOQ_PACKED_QKV:-0}" >> "$LOG"
+echo "env: rope=$LEMOQ_FUSED_ROPE route=$LEMOQ_FUSED_ROUTE mask=$LEMOQ_SKIP_MASK_FILL packed=${LEMOQ_PACKED_QKV:-0} kv=${LEMOQ_KV_DIRECT_WRITE:-0} lmhead=${LEMOQ_LMHEAD_W8:-0}" >> "$LOG"
 echo "清单 $N_CELLS 格" >> "$LOG"; cat "$LIST" >> "$LOG"
 
 # ---- 2) 归档 + 重跑 + 逐格自检 ----
@@ -151,6 +164,14 @@ run_one () {
   if [ "$packed" = "1" ]; then export LEMOQ_PACKED_QKV=1; else export LEMOQ_PACKED_QKV=0; fi
   # F4 KV 直写：接线在 _decode_forward_impl ⇒ 作用域=kernel 格；非 kernel 格显式写 0。
   if [ "$kernel" = "1" ] && [ "${KV:-0}" = "1" ]; then export LEMOQ_KV_DIRECT_WRITE=1; else export LEMOQ_KV_DIRECT_WRITE=0; fi
+  # F5 lm_head w8：作用域=**量化格**（fp16 没有量化语义）。从 args 判量化 —— 注意
+  #   fp16 格的 args 里同样有 `--bit-width`（值是 fp16），所以必须匹配**非 fp16 位宽**，
+  #   不能只查键名。fp16 格显式写 0："本轮组合由脚本决定"对每个开关都成立。
+  if [ "${LMHEAD:-0}" = "1" ] && printf '%s' "$args" | grep -Eq -- '--bit-width (w[0-9]+a[0-9]+|mxfp4)'; then
+    export LEMOQ_LMHEAD_W8=1
+  else
+    export LEMOQ_LMHEAD_W8=0
+  fi
   [ -f "$OUT/archive/$label.json" ] || cp -p "$cell/result.json" "$OUT/archive/$label.json" 2>/dev/null
   snap "$label-pre"
   echo "=== [$label] $exp $args start $(date -Is)" >> "$LOG"
@@ -182,6 +203,15 @@ if kernel and os.environ.get("LEMOQ_PACKED_QKV") == "1":
         warn.append("packed_qkv_effective=%r（应为 true）" % (eff,))
 elif eff:
     warn.append("packed_qkv_effective=%r（本格不该装上）" % (eff,))
+# ★ F5 生效检查：量化格（bit_width 非 fp16/None）且 LMHEAD=1 ⇒ lm_head_w8_effective
+#   必须 True；其余（fp16 格 / 本轮未开 LMHEAD）必须 False/None。
+eff_lh = cfg.get("lm_head_w8_effective")
+lm_quantized = cfg.get("bit_width") not in (None, "fp16")
+if os.environ.get("LEMOQ_LMHEAD_W8") == "1" and lm_quantized:
+    if eff_lh is not True:
+        warn.append("lm_head_w8_effective=%r（应为 true）" % (eff_lh,))
+elif eff_lh:
+    warn.append("lm_head_w8_effective=%r（本格不该装上）" % (eff_lh,))
 print("    [%s] bw=%-6s attn=%-6s ctx=%-5s exec=%-9s dq=%-8s norm=%-5s gate=%-4s p50=%-9s host=%-5s kernels=%-4s %s" % (
     lbl, cfg.get("bit_width"), cfg.get("attn"), cfg.get("ctx"), cfg.get("execution"), cfg.get("dequant"),
     cfg.get("rmsnorm"),
