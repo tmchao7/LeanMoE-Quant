@@ -204,6 +204,69 @@ def probe_driver() -> dict[str, Any]:
     }
 
 
+def parse_clocks_csv(stdout: str) -> dict[str, Any]:
+    """Parse the clocks/temperature query output of `probe_clocks` (fail-closed).
+
+    返回 {sm_mhz, mem_mhz, temp_gpu_c, throttle}；任一字段缺失/不可解析 ⇒ None + note，
+    绝不编造数值（R2 的用途是**归因** canary 漂移，坏值比缺值更有害）。
+    """
+    lines = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
+    if not lines:
+        return {
+            "sm_mhz": None,
+            "mem_mhz": None,
+            "temp_gpu_c": None,
+            "throttle": None,
+            "note": "nvidia-smi 无输出",
+        }
+    parts = [p.strip() for p in lines[0].split(",")]
+    if len(parts) < 4:
+        return {
+            "sm_mhz": None,
+            "mem_mhz": None,
+            "temp_gpu_c": None,
+            "throttle": None,
+            "note": "nvidia-smi 输出列数不足",
+        }
+
+    def _num(field: str) -> int | None:
+        digits = "".join(ch for ch in field if ch.isdigit())
+        return int(digits) if digits else None
+
+    out: dict[str, Any] = {
+        "sm_mhz": _num(parts[0]),
+        "mem_mhz": _num(parts[1]),
+        "temp_gpu_c": _num(parts[2]),
+        "throttle": (
+            parts[3] if parts[3].upper() not in ("", "N/A", "0X0000000000000000") else "None"
+        ),
+    }
+    return out
+
+
+def probe_clocks() -> dict[str, Any]:
+    """Current clocks / temperature / throttle reasons (R2: attribute canary drift).
+
+    记录优先于干预：轮次协议暂不锁频，但每轮的 `machine_probe.json` 里有这组快照后，
+    canary 漂移就能回答"是不是降频/过热"而不是只回答"漂了"。
+    """
+    proc = _safe(
+        [
+            "nvidia-smi",
+            "--query-gpu=clocks.current.sm,clocks.current.memory,temperature.gpu,"
+            "clocks_throttle_reasons.active",
+            "--format=csv,noheader",
+        ]
+    )
+    out: dict[str, Any] = {"query_ok": proc["ok"]}
+    if not proc["ok"]:
+        out["error"] = proc["stderr"] or "nvidia-smi failed"
+        out.update({"sm_mhz": None, "mem_mhz": None, "temp_gpu_c": None, "throttle": None})
+        return out
+    out.update(parse_clocks_csv(proc["stdout"]))
+    return out
+
+
 def probe_torch() -> dict[str, Any]:
     """Collect what PyTorch reports. Returns available=False without torch."""
     try:
@@ -724,6 +787,7 @@ def build_report(
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "host": probe_host(),
         "driver": probe_driver(),
+        "clocks": probe_clocks(),
         "torch": torch_info,
         "bandwidth": bandwidth,
         "arch_features": arch,
