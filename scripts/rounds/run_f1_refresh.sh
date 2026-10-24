@@ -34,7 +34,6 @@ echo "env: rope=$LEMOQ_FUSED_ROPE route=$LEMOQ_FUSED_ROUTE mask=$LEMOQ_SKIP_MASK
 # ---- 1) 生成命令清单（从每个 payload 的 config 反推；跳过已刷新的格）----
 $PY - > "$LIST" <<'PYEOF'
 import glob, json, os, sys
-want = ("fused_rope", "fused_route", "skip_mask_fill", "packed_qkv")
 for p in sorted(glob.glob("results/EXP-*__*/result.json")):
     d = json.load(open(p))
     if d.get("status") != "done":
@@ -42,8 +41,6 @@ for p in sorted(glob.glob("results/EXP-*__*/result.json")):
     c = d["config"]
     if c.get("execution") != "cudagraph":
         continue  # 只刷图格：三项融合都改图内执行
-    if all(c.get(k) is True for k in want):
-        continue  # 已刷新（断点续跑）
     cell = os.path.dirname(p)
     exp = os.path.basename(cell).split("__")[0]
     args = ["--ctx", str(c.get("ctx") or 1024)]
@@ -63,9 +60,19 @@ for p in sorted(glob.glob("results/EXP-*__*/result.json")):
         args += ["--batch", str(c["batch"])]
     joined = " ".join(args)
     kernel = "1" if "--attn kernel" in joined else "0"
-    # F2 还要求格是**量化**的：fp16 的 q/k/v 是 nn.Linear，install 会显式拒绝。
+    # F2 还要求格是**量化**的：fp16 的 q/k/v 是 nn.Linear，装不了。
     quantized = (c.get("bit_width") or "fp16") != "fp16"
     packed = "1" if (os.environ.get("LEMOQ_PACKED_QKV") == "1" and kernel == "1" and quantized) else "0"
+    # ★ 断点续跑要按**本格的期望值**判断（2026-10-24 修）：旧写法要求四个开关全 True，
+    #   但 F2 只作用于 2 格，其余 21 格永远满足不了 ⇒ 重跑会整轮重来。
+    refreshed = (
+        c.get("fused_route") is True
+        and (kernel != "1" or (c.get("fused_rope") is True and c.get("skip_mask_fill") is True))
+        and ((c.get("packed_qkv_effective") is True) if packed == "1"
+             else (c.get("packed_qkv_effective") in (False, None)))
+    )
+    if refreshed:
+        continue
     print("%s|%s|%s|%s|%s" % (exp, joined, cell, kernel, packed))
 PYEOF
 echo "清单 $(wc -l < "$LIST") 格" >> "$LOG"; cat "$LIST" >> "$LOG"
@@ -79,18 +86,20 @@ fi
 run_one () {
   local exp=$1 args=$2 cell=$3 kernel=${4:-0} packed=${5:-0} label
   label=$(basename "$cell")
-  # ★ 三个开关的生效范围不同（2026-10-23 实测）：
+  # ★ 四个开关的生效范围不同（2026-10-23 实测）：
   #   route        —— moe_static/moe_grouped 的路由，所有格都生效；
-  #   rope / mask  —— 只在 `_decode_forward_impl`（attn=kernel）里；
-  #                   在别的格上开 mask 会**显式拒绝**（不是 no-op）。
-  #   packed_qkv   —— 同样只在 attn=kernel 的 forward 上。
+  #   rope / mask  —— 只在 `_decode_forward_impl`（attn=kernel）里；在别的格上开 mask
+  #                   会**显式拒绝**（不是 no-op），所以非 kernel 格必须显式写 0；
+  #   packed_qkv   —— 两个前置：attn=kernel **且** 该格已量化（否则 no-op）。
+  # ★ 全部**显式写 0/1**（不只 unset）：采纳把默认翻成 True 之后，`unset` 会变成"开"，
+  #   本轮的开关组合就不再由脚本决定（2026-10-24）。
   export LEMOQ_FUSED_ROUTE=1
   if [ "$kernel" = "1" ]; then
     export LEMOQ_FUSED_ROPE=1 LEMOQ_SKIP_MASK_FILL=1
   else
-    unset LEMOQ_FUSED_ROPE LEMOQ_SKIP_MASK_FILL
+    export LEMOQ_FUSED_ROPE=0 LEMOQ_SKIP_MASK_FILL=0
   fi
-  if [ "$packed" = "1" ]; then export LEMOQ_PACKED_QKV=1; else unset LEMOQ_PACKED_QKV; fi
+  if [ "$packed" = "1" ]; then export LEMOQ_PACKED_QKV=1; else export LEMOQ_PACKED_QKV=0; fi
   [ -f "$OUT/archive/$label.json" ] || cp -p "$cell/result.json" "$OUT/archive/$label.json" 2>/dev/null
   snap "$label-pre"
   echo "=== [$label] $exp $args start $(date -Is)" >> "$LOG"
@@ -111,8 +120,14 @@ kernel = str(cfg.get("attn")) == "kernel"
 if kernel and cfg.get("fused_rope") is not True: warn.append("fused_rope=%r（应为 true）" % (cfg.get("fused_rope"),))
 if kernel and cfg.get("skip_mask_fill") is not True: warn.append("skip_mask_fill=%r（应为 true）" % (cfg.get("skip_mask_fill"),))
 import os
-if kernel and os.environ.get("LEMOQ_PACKED_QKV") == "1" and cfg.get("packed_qkv") is not True:
-    warn.append("packed_qkv=%r（应为 true）" % (cfg.get("packed_qkv"),))
+# ★ F2 有两个前置（attn=kernel 且量化）⇒ 自检读**生效**字段，不读"请求"。
+#   旧写法读 config.packed_qkv（现在是请求状态），采纳后 21 格会是 True 而实际没装。
+eff = cfg.get("packed_qkv_effective")
+if kernel and os.environ.get("LEMOQ_PACKED_QKV") == "1":
+    if eff is not True:
+        warn.append("packed_qkv_effective=%r（应为 true）" % (eff,))
+elif eff:
+    warn.append("packed_qkv_effective=%r（本格不该装上）" % (eff,))
 print("    [%s] bw=%-6s attn=%-6s ctx=%-5s exec=%-9s dq=%-8s gate=%-4s p50=%-9s host=%-5s kernels=%-4s %s" % (
     lbl, cfg.get("bit_width"), cfg.get("attn"), cfg.get("ctx"), cfg.get("execution"), cfg.get("dequant"),
     d["correctness"]["gate"], p50, att["host_share_pct"], (d.get("bottleneck") or {}).get("kernels_per_step"),

@@ -15,6 +15,10 @@
 #
 #   DRY=1 ...  只打印计划（可在 Mac 上跑，不加载模型）
 #
+# ★ 采纳之后（开关默认变 on）必须给 off 臂一个显式关：
+#   ENV_OFF="LEMOQ_PACKED_QKV=0" PAIRS=3 ...
+#   不给 ⇒ 脚本 fail-closed 拒绝（否则两臂跑同一实现，会量出一个假的 0% 收益）。
+#
 # 纪律：只写 OUT（新目录）；canonical payload 先归档、结束（含出错）恢复；不写 result.json。
 set -u
 cd "${REPO_ROOT:-/root/LeanMoE-Quant}" || exit 1
@@ -23,6 +27,7 @@ M=${MODEL:-/root/autodl-tmp/ms/models/allenai--OLMoE-1B-7B-0924/snapshots/master
 CELL=${CELL:?需要 CELL=results/EXP-...__...}
 ARGS=${ARGS:?需要 ARGS="--ctx ... --bit-width ... --execution cudagraph ..."}
 ENV_ON=${ENV_ON:?需要 ENV_ON，例如 "LEMOQ_PACKED_QKV=1"}
+ENV_OFF=${ENV_OFF:-}
 PAIRS=${PAIRS:-3}
 OUT=${OUT:?需要 OUT=新目录}
 EXP=$(basename "$CELL" | sed 's/__.*//')
@@ -32,6 +37,29 @@ case "$PAIRS" in ''|*[!0-9]*) echo "PAIRS 必须是正整数"; exit 2;; esac
 [ -d "$CELL" ] || { echo "CELL 不存在：$CELL"; exit 2; }
 [ -e "$OUT" ] && { echo "OUT 已存在（保留旧轮次证据）：$OUT"; exit 2; }
 
+# ★ fail-closed（2026-10-24）：采纳会把候选翻成**默认开**。那时 off 臂若不显式写 0，
+#   两臂跑的是同一实现 ⇒ 静默量出"0% 收益"。这比 VOID 更坏，所以直接拒绝。
+SWITCH_VAR=${ENV_ON%%=*}
+# `PYTHONPATH=src`：Mac 上 lemoq 只以源码目录形式可用（没 pip install -e），
+# 而 GPU 机上它是可导入的 —— 两条路都覆盖，别让守卫因为导入失败而放行。
+DEFAULT_STATE=$(PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" "$PY" - "$SWITCH_VAR" <<'PYEOF'
+import sys
+from lemoq.kernels.fusion_switches import ENV_VARS, FUSION_DEFAULTS
+
+var = sys.argv[1]
+key = next((k for k, v in ENV_VARS.items() if v == var), None)
+print("unknown" if key is None else ("on" if FUSION_DEFAULTS[key] else "off"))
+PYEOF
+)
+if [ "$DEFAULT_STATE" = "unknown" ]; then
+  echo "拒绝：$SWITCH_VAR 不是已声明的融合开关（见 fusion_switches.ENV_VARS）"; exit 2
+fi
+if [ "$DEFAULT_STATE" = "on" ] && [ -z "$ENV_OFF" ]; then
+  echo "拒绝：$SWITCH_VAR 的**代码默认已经是 on**，off 臂会与 on 臂跑同一实现。"
+  echo "      显式给 off 臂：ENV_OFF=\"$SWITCH_VAR=0\""
+  exit 2
+fi
+
 # 计划：head(off) + PAIRS 对（奇偶交替顺序）+ tail(off)  ⇒ 2 + 2*PAIRS 次
 SEQ=("off")
 for i in $(seq 1 "$PAIRS"); do
@@ -40,7 +68,7 @@ done
 SEQ+=("off")
 
 echo "exp=$EXP  cell=$CELL"
-echo "env_on=$ENV_ON  pairs=$PAIRS  runs=${#SEQ[@]}  out=$OUT"
+echo "env_on=$ENV_ON  env_off=${ENV_OFF:-<空>}  pairs=$PAIRS  runs=${#SEQ[@]}  out=$OUT"
 for idx in "${!SEQ[@]}"; do printf '  run %d: %s\n' "$idx" "${SEQ[$idx]}"; done
 if [ "${DRY:-0}" = "1" ]; then echo "--- DRY：未执行 ---"; exit 0; fi
 
@@ -61,7 +89,7 @@ for arm in "${SEQ[@]}"; do
     env $ENV_ON "$PY" -m benchmarks.runner --exp "$EXP" $ARGS --model "$M" --force \
       > "$OUT/$label.log" 2>&1
   else
-    env "$PY" -m benchmarks.runner --exp "$EXP" $ARGS --model "$M" --force \
+    env $ENV_OFF "$PY" -m benchmarks.runner --exp "$EXP" $ARGS --model "$M" --force \
       > "$OUT/$label.log" 2>&1
   fi
   echo "=== $label exit=$? end $(date -Is)" >> "$OUT/ab.log"
