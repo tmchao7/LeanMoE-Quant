@@ -9,7 +9,7 @@ payload — exactly like `config.rmsnorm` after P2i.
     fused_route     LEMOQ_FUSED_ROUTE        True      fused routing (adopted 2026-10-24)
     skip_mask_fill  LEMOQ_SKIP_MASK_FILL     True      mask-fill skip (adopted 2026-10-24)
     packed_qkv      LEMOQ_PACKED_QKV         True      F2 packed q/k/v (adopted 2026-10-24)
-    kv_direct_write LEMOQ_KV_DIRECT_WRITE    False     F4 KV direct write (S2 candidate)
+    kv_direct_write LEMOQ_KV_DIRECT_WRITE    True      F4 KV direct write (adopted 2026-10-25)
 
 2026-10-24: F1+F2 adopted — all four True after the valid refresh round
 (canary 0.30%, 23/23 cells, per-cell host_share ≤ 3.4%). Historical note: adoption
@@ -38,7 +38,7 @@ FUSION_DEFAULTS: dict[str, bool] = {
     "fused_route": True,
     "skip_mask_fill": True,
     "packed_qkv": True,
-    "kv_direct_write": False,
+    "kv_direct_write": True,
 }
 
 
