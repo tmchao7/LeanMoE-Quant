@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from benchmarks.ab_stats import paired_significance
 from benchmarks.runner import run_cudagraph
 from tools.round_canary import drift_pct, finite_number, json_safe
 
@@ -249,6 +250,9 @@ def _run_env_ab(
                 "median_delta_ms": delta_median,
                 "mad_delta_ms": (
                     statistics.median(abs(d - delta_median) for d in deltas) if deltas else None
+                ),
+                "significance": (
+                    paired_significance(deltas, label_a=arm_a, label_b=arm_b) if deltas else None
                 ),
             },
             "busy_drift_pct": round(busy_drift, 3) if busy_drift is not None else None,

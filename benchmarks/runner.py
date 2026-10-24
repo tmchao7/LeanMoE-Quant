@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from benchmarks.ab_stats import paired_significance
 from benchmarks.bytes import ModelSpec, QuantSpec, byte_budget, weight_budget
 from benchmarks.cudagraph import (
     CudaGraphCaptureError,
@@ -433,6 +434,8 @@ def _interleaved_ab_stats(
                 "%s_faster" % second: sum(1 for d in diffs if d > 0),
                 "%s_faster" % first: sum(1 for d in diffs if d < 0),
             },
+            "delta_ms": [round(d, 4) for d in diffs],
+            "significance": paired_significance(diffs, label_a=first, label_b=second),
             "note": "delta = p50(%s) - p50(%s)，逐对相减" % (first, second),
         }
         out["ratio_fused_over_separate"] = (
