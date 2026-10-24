@@ -169,8 +169,9 @@ for name in names:
         "gate": d["correctness"]["gate"],
         "kernels": (d.get("bottleneck") or {}).get("kernels_per_step"),
         "tokens": (d["correctness"] or {}).get("graph_output_tokens"),
-        "switches": {k: d["config"].get(k) for k in
-                     ("fused_rope", "fused_route", "skip_mask_fill", "packed_qkv")},
+        # ★ 从 ENV_VARS 动态派生，不得硬编码开关名——硬编码会让新注册的开关
+        #   在这里读到 None，把 VALID 轮误判成 INVALID（2026-10-25 F4 实测踩中）。
+        "switches": {k: d["config"].get(k) for k in ENV_VARS},
     })
 
 head, tail = runs[0], runs[-1]
@@ -221,7 +222,7 @@ for r in runs:
 if arm_mismatch:
     reasons.append("开关状态与臂不一致（" + "; ".join(arm_mismatch[:4]) + "）")
 other_drift = []
-for k in ("fused_rope", "fused_route", "skip_mask_fill", "packed_qkv"):
+for k in ENV_VARS:
     if k == switch_key:
         continue
     vals = {r["switches"].get(k) for r in runs}
