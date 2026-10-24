@@ -184,6 +184,16 @@ def test_triton_fused_gemm_matches_reference():
             "report": rep,
             "gate": PARITY_GATE,
         }
+        # ★ A6 合取另一半（PARITY_GATE note：err_kernel ≤ err_baseline × 1.5，双方对 fp64 oracle）：
+        #   baseline = separate 参考实现自己的误差；fused 不得'比基线显著更准'（防作弊半边）。
+        oracle = x.double() @ qrtn.dequantize_rtn(q, dtype=torch.float64).T
+        err_ref = float((ref.double() - oracle).abs().max())
+        err_got = float((got.double() - oracle).abs().max())
+        assert err_got <= 1.5 * err_ref + 1e-9, {
+            "case": (m, k, n, bits, group_size, str(scale_dtype)),
+            "err_ref": err_ref,
+            "err_got": err_got,
+        }
         # 打包必须无损（否则上面比较的是两组不同的数）：解包回来后逐位等于 padded codes。
         # 对称量化的 nibble 是有符号的（-8..7）：pack 取低 4 位、unpack 做符号扩展，
         # 与 `dequantize_rtn` 用的是同一组 code 值。
@@ -243,12 +253,30 @@ def test_triton_quantized_grouped_matches_oracle():
 
     # ★ 8-bit 与 4-bit 都要过：4-bit 走的是**另一条代码路径**（`_expand_int4` 的
     #   nibble 展开），K1 门对它同样不放宽。
+    # fp64 oracle：路由由显式 (ids, weights) 固定，可手排 —— silu(x·Wg+bg)⊙(x·Wu)·Wd 再加权和。
+    #   （PARITY_GATE note 的双方都对其取误差：oracle backend 是 baseline，triton 是 kernel。）
+    fd = {"gate_up": fused.gate_up.double(), "down": fused.down.double()}
+    xd = x.double()
+    oracle = torch.zeros_like(xd)
+    for eid, wgt in zip(ids.tolist(), weights.double().tolist()):
+        gu = fd["gate_up"][eid] @ xd  # (2*ffn,)
+        gate, up = gu[: gu.shape[0] // 2], gu[gu.shape[0] // 2 :]
+        h = (gate * torch.sigmoid(gate)) * up
+        oracle = oracle + wgt * (fd["down"][eid] @ h)
     for bits in (8, 4):
         quantized = quantize_fused_experts(fused, bits=bits, group_size=128).to("cuda")
         got = grouped_moe_forward_quant(x, quantized, ids, weights, config=config, backend="triton")
         ref = grouped_moe_forward_quant(x, quantized, ids, weights, config=config, backend="oracle")
         report = tolerance_report(ref.float(), got.float())
         assert report["allclose_atol_1e-3"], {"bits": bits, "report": report}
+        # ★ A6 合取另一半：kernel 误差 ≤ oracle-backend（baseline）误差 × 1.5（对 fp64 oracle）。
+        err_ref = float((ref.double() - oracle).abs().max())
+        err_got = float((got.double() - oracle).abs().max())
+        assert err_got <= 1.5 * err_ref + 1e-9, {
+            "bits": bits,
+            "err_ref": err_ref,
+            "err_got": err_got,
+        }
 
 
 @pytest.mark.gpu

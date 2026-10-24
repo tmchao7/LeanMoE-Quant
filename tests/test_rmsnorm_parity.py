@@ -53,6 +53,9 @@ def test_triton_rms_norm_matches_hf_formula():
         fp64_gap = float((got.double() - ideal).abs().max().item())
         hf_gap = float((ref.double() - ideal).abs().max().item())
         assert abs(fp64_gap - hf_gap) < 1e-3, (shape, fp64_gap, hf_gap)
+        # ★ A6 合取另一半（PARITY_GATE note：err_kernel ≤ err_baseline × 1.5，双方对 fp64 oracle）：
+        #   融合核不得比 HF 基线'显著更准'——比基线还准意味着它没走真计算（防作弊半边）。
+        assert fp64_gap <= 1.5 * hf_gap + 1e-6, (shape, fp64_gap, hf_gap)
 
 
 @pytest.mark.gpu
