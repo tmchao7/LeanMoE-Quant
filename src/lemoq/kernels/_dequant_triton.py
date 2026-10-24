@@ -207,6 +207,22 @@ def dequant_gemm_fused(
     bits = int(bits)
     if bits not in (4, 8):
         raise NotImplementedError("fused dequant-GEMM 只实现 4/8-bit，得到 %d" % bits)
+    # MXFP4（EXP-p3-02）：E2M1 码（无符号 0..15，自带符号位）+ E8M0 尺度字节（uint8）。
+    # 语义契约 = lemoq/quant/mxfp4.py（主机侧量化器）；侦察依据见
+    # docs/reference/QUANT_FORMAT_RECON_2026-10-25（向量路径，无 tl.dot）。
+    if mxfp4:
+        if bits != 4:
+            raise ValueError("mxfp4 只支持 4-bit E2M1，得到 bits=%r" % bits)
+        if int(group_size) != 32:
+            raise ValueError(
+                "mxfp4 的块大小固定 32（OCP MX），得到 group_size=%d" % int(group_size)
+            )
+        if scale.dtype != torch.uint8:
+            raise ValueError("mxfp4 的 scale 必须是 uint8 E8M0 字节，得到 %s" % scale.dtype)
+        if not symmetric or zero is not None:
+            raise ValueError(
+                "mxfp4 无 zero-point（E2M1 自带符号位）：symmetric 必须为 True 且 zero=None"
+            )
     padded_in = int(n_groups) * int(group_size)
     expect_packed = padded_in if bits == 8 else padded_in // 2
     if packed_in != expect_packed:
@@ -226,22 +242,6 @@ def dequant_gemm_fused(
             "%d-bit 的 qweight 应是 %s，得到 %s（打包格式见 lemoq.quant.pack）"
             % (bits, expected_q_dtype, qweight.dtype)
         )
-    # MXFP4（EXP-p3-02）：E2M1 码（无符号 0..15，自带符号位）+ E8M0 尺度字节（uint8）。
-    # 语义契约 = lemoq/quant/mxfp4.py（主机侧量化器）；侦察依据见
-    # docs/reference/QUANT_FORMAT_RECON_2026-10-25（向量路径，无 tl.dot）。
-    if mxfp4:
-        if bits != 4:
-            raise ValueError("mxfp4 只支持 4-bit E2M1，得到 bits=%r" % bits)
-        if int(group_size) != 32:
-            raise ValueError(
-                "mxfp4 的块大小固定 32（OCP MX），得到 group_size=%d" % int(group_size)
-            )
-        if scale.dtype != torch.uint8:
-            raise ValueError("mxfp4 的 scale 必须是 uint8 E8M0 字节，得到 %s" % scale.dtype)
-        if not symmetric or zero is not None:
-            raise ValueError(
-                "mxfp4 无 zero-point（E2M1 自带符号位）：symmetric 必须为 True 且 zero=None"
-            )
     if x.dtype not in (torch.float16, torch.float32):
         raise NotImplementedError("x 只支持 fp16/fp32，得到 %s" % x.dtype)
     if out_dtype is None:
