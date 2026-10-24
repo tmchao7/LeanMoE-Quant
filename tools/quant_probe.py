@@ -129,6 +129,20 @@ def build_arms(
                 "layers": None,
             },
         )
+    # ★ MXFP4 门臂（EXP-p3-02 的精度裁决；格式见 lemoq/quant/mxfp4.py 与
+    #   docs/reference/QUANT_FORMAT_RECON_2026-10-25）。组大小固定 32（OCP MX）。
+    #   阈值走 W4 档（--kl-gate-w4 0.05 / --top1-gate 0.95）——4-bit 类。
+    add(
+        "gate_mxfp4",
+        {
+            "id": "mxfp4_attn_experts_g32",
+            "kind": "rtn",
+            "scheme": "mxfp4",
+            "group_size": 32,
+            "targets": ["attention", "experts"],
+            "layers": None,
+        },
+    )
     for g in (32, 64, 128):
         add(
             "layer0",

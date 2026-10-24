@@ -102,21 +102,27 @@ def quantize_mxfp4(weight: Any, *, block: int = BLOCK) -> dict[str, Any]:
     }
 
 
-def dequantize_mxfp4(q: dict[str, Any], *, dtype: Any = None) -> Any:
-    """MXFP4 → 浮点权重（CPU 参照；kernel 侧将用 LUT + exp2 复刻同一语义）。"""
+def dequantize_packed(
+    packed: Any, scales: Any, orig_in: int, *, block: int = BLOCK, dtype: Any = None
+) -> Any:
+    """从打包缓冲反量化（`QuantLinear` 的 separate 臂与 CPU 参照共用同一语义）。"""
     torch = _torch()
     from lemoq.quant.pack import unpack_4bit  # noqa: PLC0415
 
-    out_features, padded_in = q["scales"].shape[0], q["scales"].shape[1] * q["block"]
-    codes = (
-        unpack_4bit(q["codes_packed"], signed=False)
-        .to(torch.uint8)
-        .reshape(out_features, padded_in)
-    )
+    out_features, n_blocks = scales.shape[0], scales.shape[1]
+    padded_in = n_blocks * block
+    codes = unpack_4bit(packed, signed=False).to(torch.uint8).reshape(out_features, padded_in)
     mag = torch.tensor(_E2M1_MAG, dtype=torch.float32)[(codes & 0x7).long()]
     signed = torch.where((codes & 0x8) > 0, -1.0, 1.0)
-    scale = q["scales"].float().apply_(e8m0_to_scale)
-    w = (mag * signed).reshape(out_features, padded_in // q["block"], q["block"])
+    scale = scales.float().apply_(e8m0_to_scale)
+    w = (mag * signed).reshape(out_features, n_blocks, block)
     w = w * scale.unsqueeze(-1)
-    w = w.reshape(out_features, padded_in)[:, : q["orig_in"]]
+    w = w.reshape(out_features, padded_in)[:, :orig_in]
     return w.to(dtype) if dtype is not None else w
+
+
+def dequantize_mxfp4(q: dict[str, Any], *, dtype: Any = None) -> Any:
+    """MXFP4 → 浮点权重（CPU 参照；kernel 侧用 exp2 算术解码复刻同一语义，见 K1）。"""
+    return dequantize_packed(
+        q["codes_packed"], q["scales"], q["orig_in"], block=q["block"], dtype=dtype
+    )

@@ -81,6 +81,9 @@ _SCHEMES = {
     "w8a8": (8, 8),
     "w8a16": (8, None),
     "w4a16": (4, None),
+    # MXFP4（EXP-p3-02）：E2M1 码 + E8M0 每 32 元素尺度——**存储格式**，非 int4-RTN。
+    # 语义契约在 lemoq/quant/mxfp4.py；组大小固定 32（OCP MX），from_flags 强制。
+    "mxfp4": (4, None),
     "fp16": (None, None),
 }
 
@@ -170,6 +173,9 @@ class SchemeSpec:
         dequant: str = "separate",
     ) -> "SchemeSpec":
         bits, act = parse_scheme(name)
+        if name == "mxfp4":
+            # OCP MX 的块大小固定 32——忽略调用方给的 group_size（EXP-p3-02 格无此轴）。
+            group_size = 32
         return cls(
             name=name,
             weight_bits=bits,
@@ -263,13 +269,47 @@ class QuantLinear(nn.Module):
         self.out_features = int(linear.out_features)
         weight = linear.weight.detach()
 
-        q = qapi.quantize_linear(
-            weight,
-            bits=int(spec.weight_bits),
-            group_size=int(spec.group_size or 0),
-            scheme=spec.scheme,
-            symmetric=spec.symmetric,
-        )
+        if spec.name == "mxfp4":
+            # MXFP4 分支：E2M1 码（无符号）+ E8M0 uint8 尺度字节。scale **不转 fp16**
+            # （E8M0 本来就是 1 字节指数）。
+            from lemoq.quant.mxfp4 import quantize_mxfp4  # noqa: PLC0415
+
+            qm = quantize_mxfp4(weight.float(), block=32)
+            meta = {"padded_in": int(qm["padded_in"]), "n_groups": int(qm["scales"].shape[1])}
+        else:
+            q = qapi.quantize_linear(
+                weight,
+                bits=int(spec.weight_bits),
+                group_size=int(spec.group_size or 0),
+                scheme=spec.scheme,
+                symmetric=spec.symmetric,
+            )
+            meta = None
+        if spec.name == "mxfp4":
+            # MXFP4 的组装在此独立完成并提前返回——不经过下方 int 路径的
+            # `_repad`/fp16-scale 逻辑（E8M0 尺度保持 uint8，1 B/32 权重）。
+            self.register_buffer("packed", qm["codes_packed"].contiguous(), persistent=True)
+            self.register_buffer("scale", qm["scales"].contiguous(), persistent=True)
+            self.register_buffer("zero", None)
+            self.register_buffer(
+                "bias",
+                (linear.bias.detach().clone() if linear.bias is not None else None),
+                persistent=True,
+            )
+            self.weight_bits = int(spec.weight_bits)
+            self.group_size = 32
+            self.padded_in = int(meta["padded_in"])
+            self.n_groups = int(meta["n_groups"])
+            self.dequant_mode = str(spec.dequant)
+            self._kernel_cache: Any = None
+            self._kernel_checked = False
+            self._kernel_reason: str | None = None
+            self._counters: dict[str, Any] = {
+                "separate_calls": 0,
+                "fused_calls": 0,
+                "fallbacks": {},
+            }
+            return
         # ★ 真的打包，而不是留着 int32 codes。这样 realized_bytes() 才是**测量**。
         #
         # `api.QuantizedLinear.codes` 是**未补齐**的 `[:, :in]` 切片，而打包必须按
@@ -330,6 +370,11 @@ class QuantLinear(nn.Module):
         """
         from lemoq.quant import pack as qpack  # noqa: PLC0415
 
+        if self.spec.name == "mxfp4":
+            from lemoq.quant.mxfp4 import dequantize_packed  # noqa: PLC0415
+
+            w = dequantize_packed(self.packed, self.scale, self.in_features, block=32)
+            return w.to(dtype) if dtype is not None else w
         if self.weight_bits == 4:
             codes = qpack.unpack_4bit(self.packed, signed=True).to(torch.float32)
         else:
@@ -411,6 +456,7 @@ class QuantLinear(nn.Module):
             bits=int(self.weight_bits),
             symmetric=bool(self.spec.symmetric),
             out_dtype=x.dtype,
+            mxfp4=(self.spec.name == "mxfp4"),
         )
         y = y.reshape(*x.shape[:-1], self.out_features)
         if self.bias is not None:

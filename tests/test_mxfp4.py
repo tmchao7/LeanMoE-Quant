@@ -139,3 +139,27 @@ def test_pack_round_trip_preserves_unsigned_codes():
     dq = dequantize_mxfp4(q)
     for i in range(BLOCK * 4):
         assert dq[0, i].item() == pytest.approx(e2m1_decode(int(codes[0, i])), abs=1e-6)
+
+
+def test_quant_linear_mxfp4_end_to_end_tiny():
+    """QuantLinear 的 mxfp4 分支端到端（CPU）：构造/forward/参照一致/组大小强制 32。"""
+    from lemoq.quant.linear import QuantLinear, SchemeSpec
+
+    torch.manual_seed(11)
+    lin = torch.nn.Linear(64, 32, dtype=torch.float32)
+    spec = SchemeSpec.from_flags("mxfp4", 128, targets=("attention",))  # 传 128 也必须强制 32
+    assert spec.group_size == 32
+    ql = QuantLinear(lin, spec, name="tiny")
+    assert ql.group_size == 32 and ql.n_groups == 2 and ql.scale.dtype == torch.uint8
+    x = torch.randn(1, 64, dtype=torch.float16)
+    y = ql(x)
+    w = ql.dequantized_weight(dtype=torch.float16)
+    y_ref = torch.nn.functional.linear(x, w, ql.bias.to(x.dtype))
+    assert torch.allclose(y, y_ref, atol=1e-2, rtol=1e-2), "separate 臂与参照权重不一致"
+    # 误差界：|w - lin.weight| ≤ 2·scale（逐元素，所在块）
+    s = (
+        ql.scale.float()
+        .apply_(__import__("lemoq.quant.mxfp4", fromlist=["e8m0_to_scale"]).e8m0_to_scale)
+        .repeat_interleave(32, dim=1)[:, :64]
+    )
+    assert torch.all((w.float() - lin.weight).abs() <= 2.0 * s + 1e-12)
