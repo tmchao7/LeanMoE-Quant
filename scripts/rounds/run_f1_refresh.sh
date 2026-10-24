@@ -5,6 +5,8 @@
 # 用法（GPU 机仓库根目录）：
 #   bash scripts/rounds/run_f1_refresh.sh             # F1 三项（rope/route/mask）
 #   F2=1 bash scripts/rounds/run_f1_refresh.sh        # F1 + packed q/k/v（F2 须先有合规 A/B）
+#   F2=1 KV=1 …                                       # 再叠加 F4 KV 直写（须先有合规 A/B；
+#                                                        作用域=attn=kernel 的格，与 rope/mask 同）
 #
 # 前提（缺一条就不要跑）：
 #   1) F1 三项：同轮 A/B 已测（8.39% / 3.0% / 1.33%）+ 自然文本检查 PASS（2026-10-23）；
@@ -25,6 +27,7 @@ DRY=${DRY:-0}
 # 本轮的标签必须是 combined）。
 export LEMOQ_FUSED_ROPE=1 LEMOQ_FUSED_ROUTE=1 LEMOQ_SKIP_MASK_FILL=1
 [ "${F2:-0}" = "1" ] && export LEMOQ_PACKED_QKV=1
+[ "${KV:-0}" = "1" ] && export LEMOQ_KV_DIRECT_WRITE=1
 
 # ---- 1) 生成命令清单（从每个 payload 的 config 反推；跳过已刷新的格）----
 # ★ 2026-10-25：清单先进临时文件 —— DRY 模式**零副作用**。旧写法先建 archive/、清空
@@ -135,6 +138,8 @@ run_one () {
     export LEMOQ_FUSED_ROPE=0 LEMOQ_SKIP_MASK_FILL=0
   fi
   if [ "$packed" = "1" ]; then export LEMOQ_PACKED_QKV=1; else export LEMOQ_PACKED_QKV=0; fi
+  # F4 KV 直写：接线在 _decode_forward_impl ⇒ 作用域=kernel 格；非 kernel 格显式写 0。
+  if [ "$kernel" = "1" ] && [ "${KV:-0}" = "1" ]; then export LEMOQ_KV_DIRECT_WRITE=1; else export LEMOQ_KV_DIRECT_WRITE=0; fi
   [ -f "$OUT/archive/$label.json" ] || cp -p "$cell/result.json" "$OUT/archive/$label.json" 2>/dev/null
   snap "$label-pre"
   echo "=== [$label] $exp $args start $(date -Is)" >> "$LOG"
