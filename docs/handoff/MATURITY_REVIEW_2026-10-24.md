@@ -28,9 +28,10 @@
 - **领先的五条**：① KL+top-1 门早于并合于工业 divergence-based 转向；② canary/污染控制无公开先例；
   ③ 实测带宽 roofline + 达成率口径；④ 负结果一等公民（E2 否证、W4 三连 FAIL 全档）；
   ⑤ 门 FAIL ⇒ 性能字段自动进 evidence 的 schema 强制。
-- **落后的五条**：① 零样本任务套件缺位（仅 MMLU n=200，SE≈3.5）；② PPL 评估集薄
-  （wikitext2 8k token/5 窗 vs 标准全集）；③ 无显著性检验（per-pair wins 在手却没做符号检验）；
-  ④ graph 臂 p99 口径不可比；⑤ 无任何第三方基线（vLLM/cuBLASLt/llama-bench）锚定。
+- **落后的五条**：① 零样本任务套件缺位（仅 MMLU n=200，SE≈3.5）——R5；
+  ② PPL 评估集薄（wikitext2 8k token/5 窗 vs 标准全集）——R4；
+  ③ ~~无显著性检验~~ **✅ 已关 2026-10-24（R1 落地，§5）**；
+  ④ graph 臂 p99 口径不可比——R6；⑤ 无任何第三方基线锚定——R7。
 
 ## 1. 评估方法与声明
 
@@ -121,7 +122,7 @@ F1（三项已测未采纳，+8.39%/+3.0%/+1.33%）与 F2（packed-QKV，−4.81
 | 项 | 外部 | 本仓 | 判定 |
 | --- | --- | --- | --- |
 | 交错 A/B | [google/benchmark #1051](https://github.com/google/benchmark/issues/1051)：随机交错使方差降约 40%，已成默认 | ✅ 独立进程、同轮相邻、交替顺序 + 首尾**同臂** canary（比随机交错更强） | **超出** |
-| 显著性 | [torch.utils.benchmark](https://docs.pytorch.org/docs/stable/benchmark_utils.html)：显式 significant 标记 + 中位数+IQR | ❌ 只有 per-pair wins 计数与 MAD 警示（"最小可分辨差≈MAD"）；**配对符号检验/Wilcoxon 几乎免费** | **落后（R1，性价比最高）** |
+| 显著性 | [torch.utils.benchmark](https://docs.pytorch.org/docs/stable/benchmark_utils.html)：显式 significant 标记 + 中位数+IQR | ✅ **2026-10-24 落地（R1）**：`benchmarks/ab_stats.py`（精确符号检验 / Wilcoxon / 确定性 bootstrap CI）接入 runner 与 profile_graph，旧工件可只读重算（METRICS §2.2） | ~~落后~~ 已补 |
 | canary/污染控制 | 调研范围内无公开 kernel 协议含此项 | ✅ >5% 判 VOID（fail-closed，指标缺失也判 VOID）+ graph 格 host_share>5 判污染——实测抓到过 18 格共租污染并判废（P2j） | **超出已发表实践** |
 | 时钟/环境 | [NVIDIA 测量指南](https://docs.nvidia.com/multi-node-nvlink-systems/multi-node-tuning-guide/measuring-performance.html) 与 SOL-ExecBench：锁频或至少记录温度/降频 | ❌ 无时钟锁定、无温度/降频日志；canary 能**发现**漂移但不能**归因**漂移 | 落后（R2） |
 | 参数披露 | 暖机/迭代/重复数必须公开 | ✅ defaults（warmup 5 / timed 20 / repeats 3）入 schema，payload 全记录 | 达标 |
@@ -131,7 +132,7 @@ F1（三项已测未采纳，+8.39%/+3.0%/+1.33%）与 F2（packed-QKV，−4.81
 
 | ID | 差距与建议动作 | 外部依据 | 成本/窗口 | 映射 |
 | --- | --- | --- | --- | --- |
-| R1 | A/B 统计收尾：`_interleaved_ab_stats` 输出配对符号检验/Wilcoxon + 中位差 CI——per-pair wins 数据已在手，纯本地 | torch.utils.benchmark significant；google/benchmark #1051 | Mac，低 | 新增（本地） |
+| R1 | ✅ **2026-10-24 已落地**（`2ccce61`）：`benchmarks/ab_stats.py` + runner/profile_graph 接入 + `tools/ab_significance.py` 只读重算；既有 F1 三项 A/B 重算结论 = n=2 对、方向一致但 sign p=0.5 不显著（`results/ab_significance.json`），口径入 METRICS §2.2，+20 测试 | torch.utils.benchmark significant；google/benchmark #1051 | 已完成 | 新增（本地） |
 | R2 | 轮次协议加时钟/温度/降频日志（`tools/probe_machine.py` 扩展）；锁频（`nvidia-smi -lgc`）可选、先记录后干预 | NVIDIA 测量指南；SOL-ExecBench | GPU，低（开机顺跑） | probe_machine 扩展 |
 | R3 | KL/top-1 门样本量 5→≥10 窗（内部早已提出；w8a8@4096 的边界翻转正卡在这里） | 发散度评估的样本量惯例（HF 研究公开报告 ~10K prompts；链接本网络不可达，论点由 KL-RFC 覆盖） | GPU，低 | EXP-p1-04 follow-up #2 |
 | R4 | PPL 扩到 WikiText2 全集切段（标准 ≈140×2048；现 8k token/5 窗）——`tools/quant_ppl` 加全集模式 | GPTQ/AWQ 全集口径；r≈0.79 代理有效性 | GPU，低 | quant_ppl 扩展 |
@@ -139,7 +140,7 @@ F1（三项已测未采纳，+8.39%/+3.0%/+1.33%）与 F2（packed-QKV，−4.81
 | R6 | graph 臂逐步 p99：单步 replay 计时或块内逐事件切分，让 p99 跨臂可比（改动涉 METRICS 口径） | vLLM P50+P99 惯例；MLPerf | GPU，中 | METRICS §2 残留 |
 | R7 | 一次性外部锚定：同机跑 vLLM（bench latency 或其 fused_moe kernel 对照）；**先查 OLMoE 支持与安装成本**；产出进记录、不进 `GATE_CITATIONS` | KernelBench-Verified 自参照警示 | GPU，中 | 新增 |
 | R8 | 逐层敏感度归因：权重域 MSE（已有）→ 校准集 Hessian trace（HAWQ 式），解释 W4 为何败、指导 >25% 混合位宽退路 | HAWQ | CPU 部分 + GPU | C2/P3-3 |
-| R9 | CI 绿徽章（A5）+ parity 合取补齐（A6） | — | Mac 低 + GPU 半边 | 已列（ROADMAP Tier A） |
+| R9 | CI 绿徽章（A5）+ parity 合取补齐（A6）。**A5 ✅ 2026-10-24 已落地**（`804326a`：`.github/workflows/ci.yml` 跑同一套四门，CI 即干净 venv 的持续验证）；A6 待上机 | — | A5 Mac 低（已完成）；A6 GPU 半边 | 已列（ROADMAP Tier A） |
 | R10 | torch.compile vs 手工融合最小对照（norm/反量化场景） | TRT-LLM piecewise CUDA graphs | GPU，中 | C1 |
 
 验收口径建议（实现各 R 项时逐条对照）：R1 用既有 A/B 工件重算并给出 p 值/CI；R2 以
@@ -153,8 +154,10 @@ F1（三项已测未采纳，+8.39%/+3.0%/+1.33%）与 F2（packed-QKV，−4.81
 图捕获+融合在业界已是默认路径，本仓"数字在手、默认未翻"是最反常的缺口。R 项是
 "把证据口径抬到外部标准"的补强，不与 S1/S2/S3 竞争 GPU 窗口。
 
-- **Mac 离线（不等 GPU）**：R1（显著性检验，含对既有 `results/*_ab.json` 的重算演示）、
-  R9 的 A5 半边（CI 先在干净 venv 跑绿再上徽章）、本报告的滚动维护（R 项关闭时更新 §5）。
+- **Mac 离线（不等 GPU）**：~~R1~~ ✅ 2026-10-24 已落地（含对既有 `results/*_ab.json` 的重算，
+  结论如实：n=2 对不显著）；~~R9 的 A5 半边~~ ✅ 2026-10-24 workflow 已推（红了先修）；
+  剩余：R9-A6 的测试代码半边（断言可离线写好，GPU 上顺跑）、R8 的权重域 CPU 段、
+  本报告的滚动维护（R 项关闭时更新 §5）。
 - **开机顺跑（挂在既有轮次，不新开实验）**：R2（probe_machine 记时钟/温度）、
   R3（门样本 5→≥10 窗，EXP-p1-04 协议内）、R4（quant_ppl 全集模式）。
 - **需用户批准或独立窗口**：R5（lm-eval 套件是新测量；并入 `GATE_CITATIONS` 须用户决定）、

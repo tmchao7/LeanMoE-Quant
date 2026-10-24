@@ -87,8 +87,9 @@
 
 `RESULTS.md` §5 的测试计数、`ROADMAP` §1、`PORTFOLIO` L105 已按 2026-10-24 实测订正为
 **672 passed / 33 deselected / 40 个测试文件**（2026-10-25 起 **674 passed**：翻默认安全性修复
-新增 replay 门控与 route CPU 回退两条用例，`d02442e`）；刷新后再按新的 `results/` 复核
-`payload` 计数。★ 2026-10-25 对账：Mac 侧 `EXP-*__*/result.json` 实为 **59 份**
+新增 replay 门控与 route CPU 回退两条用例，`d02442e`）；MATURITY_REVIEW 轮起
+**694 passed / 42 个测试文件**（+20 = R1 显著性口径的两组测试，`2ccce61`）；刷新后再按新的
+`results/` 复核 `payload` 计数。★ 2026-10-25 对账：Mac 侧 `EXP-*__*/result.json` 实为 **59 份**
 （48 done / 10 planned / 1 blocked——p0-03 by-design），此前的"101 份（84/13/4）"口径
 无法在 Mac 树上复现（59 格 + 31 份 p2j 归档 + 顶层历史工件另计）；**操作性验收以
 `DRY=1 F2=1` 清单 = 23 格为准**（23 格所需 payload 已核实全部在盘，见 ISSUES N5）。

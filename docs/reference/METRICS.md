@@ -79,6 +79,25 @@ speedup_E2E = (T_bytes_fp16 + T_host) / (T_bytes_quant + T_host)
 3. 卡越快，`T_bytes` 越小、`T_host` 不变 → **host 占比越大、截断越严重**。
    所以 V100(900 GB/s) 与 5090(1792 GB/s) 的对照本身就是这个效应的实验。
 
+### 2.2 配对 A/B 的显著性（2026-10-24 起，`benchmarks/ab_stats.py`）
+
+同轮交错 A/B 除了 wins/MAD，还必须落盘显著性块（动机与外部依据见
+`docs/handoff/MATURITY_REVIEW_2026-10-24.md` R1）：
+
+- **符号检验**：精确二项双侧 p（丢并列，`n_eff = wins+losses`）；
+- **Wilcoxon 符号秩**：`n_eff ≤ 20` 用精确零分布（2^n 符号翻转的子集和 DP），
+  否则正态近似（含并列秩与连续性校正）；
+- **中位差 95% CI**：成对 bootstrap 百分位区间，**固定种子 ⇒ 同数据同区间**；
+- 落盘点：runner 的 `interleaved_ab.paired.{delta_ms,significance}`、
+  profile_graph v2 的 `paired_wall.significance`；旧工件用
+  `python -m tools.ab_significance <payload...> [--out ...]` 只读重算（不新测）。
+
+**两条不妥协**：
+1. **p 值不替代 MAD 口径**——`|median_delta| < MAD` 时仍按"不可分辨"处理（§2 既有规则）；
+2. **小样本不装显著**——`n_eff < 5` 时显著性块带 note 如实声明（任何 p 都几乎不可能显著），
+   2026-10-24 的既有 F1 三项 A/B 重算即属此类：n=2 对、方向一致但 sign p=0.5，
+   采纳依据写的是**效应量与方向一致性**，不是 p 值（`results/ab_significance.json`）。
+
 
 ---
 
