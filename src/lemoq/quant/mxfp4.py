@@ -84,7 +84,7 @@ def quantize_mxfp4(weight: Any, *, block: int = BLOCK) -> dict[str, Any]:
 
     # RTN 就近（并列远离零：规范 round-to-nearest-even 的幅值实现里，
     # 从格点中点选偶码——这里用"距离 + 平局选较小幅值码"等价实现）。
-    mags = torch.tensor(_E2M1_MAG, dtype=torch.float32)  # (8,)
+    mags = torch.tensor(_E2M1_MAG, dtype=torch.float32, device=blocks.device)  # (8,)
     norm = blocks / scale.unsqueeze(-1)  # 幅值域（带符号）
     mag = norm.abs().clamp(max=_E2M1_MAG[-1])  # 饱和到 ±6（格式 wart，如实保留）
     # 就近：|mag − mags| 最小的码；平局（如 2.5 介于 2 与 3）取较小码（= 较小幅值）。
@@ -112,7 +112,7 @@ def dequantize_packed(
     out_features, n_blocks = scales.shape[0], scales.shape[1]
     padded_in = n_blocks * block
     codes = unpack_4bit(packed, signed=False).to(torch.uint8).reshape(out_features, padded_in)
-    mag = torch.tensor(_E2M1_MAG, dtype=torch.float32)[(codes & 0x7).long()]
+    mag = torch.tensor(_E2M1_MAG, dtype=torch.float32, device=codes.device)[(codes & 0x7).long()]
     signed = torch.where((codes & 0x8) > 0, -1.0, 1.0)
     scale = scales.float().apply_(e8m0_to_scale)
     w = (mag * signed).reshape(out_features, n_blocks, block)
