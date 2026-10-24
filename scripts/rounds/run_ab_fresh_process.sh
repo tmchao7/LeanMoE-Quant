@@ -139,6 +139,9 @@ done
 "$PY" - "$OUT" "$PAIRS" "$SWITCH_KEY" <<'PYEOF'
 import glob, json, os, statistics, sys
 
+sys.path.insert(0, "src")
+from lemoq.kernels.fusion_switches import ENV_VARS
+
 out, pairs, switch_key = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 runs = []
 # 标签是 `<arm><%02d>`（off00 / on01 / ...）：按**运行序号**排序，不能按字典序，
