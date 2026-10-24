@@ -358,15 +358,17 @@ def test_quant_spec_includes_lm_head_only_when_switch_on(monkeypatch):
 
 
 def test_lm_head_w8_without_gate_measurement_is_refused(capsys, monkeypatch):
-    """F5 fail-closed：开关开但 EXP-p1-06 的门没测（表空）⇒ 加载模型前拒绝 rc=2。
+    """F5 fail-closed：开关开但 EXP-p1-06 的门没测 ⇒ 加载模型前拒绝 rc=2。
 
+    ★ 2026-10-25 门实测落表后，"没测"是**模拟状态**（清空表）——这条测试钉的是
+    fail-closed 机制本身，不是表的内容（表的内容由下面那条钉死测试对工件负责）。
     基础门（EXP-p1-04 的 w8a16 g128）PASS 与它无关 —— lm_head 是**第二个量化表面**，
     硬规则 2 分别对每个表面成立。
     """
     import benchmarks.runner as R
 
     monkeypatch.setenv("LEMOQ_LMHEAD_W8", "1")
-    assert R.LMHEAD_GATE_CITATIONS == {}
+    monkeypatch.setattr(R, "LMHEAD_GATE_CITATIONS", {})
     rc = runner_main(
         [
             "--exp",
@@ -386,6 +388,30 @@ def test_lm_head_w8_without_gate_measurement_is_refused(capsys, monkeypatch):
     assert "EXP-p1-06" in out.err
 
 
+def test_lmhead_gate_citations_match_the_artifacts():
+    """`LMHEAD_GATE_CITATIONS` 与 EXP-p1-06 的落盘工件逐字对齐（照 GATE_CITATIONS 钉法）。
+
+    工件不在（fresh clone）时跳过：results/ 不进 git。
+    """
+    import benchmarks.runner as R
+
+    artifacts = {
+        1024: RESULTS / "EXP-p1-06-lm-head-w8" / "probe_f5_lmhead.json",
+        4096: RESULTS / "EXP-p1-06-lm-head-w8" / "probe_f5_lmhead_ctx4096.json",
+    }
+    missing = [ctx for ctx, p in artifacts.items() if not p.exists()]
+    if missing:
+        pytest.skip("EXP-p1-06 工件不在本机（results/ 是 gitignored）：缺 ctx=%s" % missing)
+    for ctx, cited in R.LMHEAD_GATE_CITATIONS.items():
+        arm = json.loads(artifacts[ctx].read_text(encoding="utf-8"))["arms"][cited["arm"]]
+        agg = arm["aggregate"]
+        assert abs(agg["kl_mean"] - cited["kl"]) < 5e-7, "ctx=%d 引用 kl != 实测" % ctx
+        assert abs(agg["top1_mean"] - cited["top1"]) < 5e-7, "ctx=%d 引用 top-1 != 实测" % ctx
+        # 门必须能由实测值 + METRICS 门槛推出来，不许手写；source 必须指向真实工件
+        assert gate_from_metrics("w8a16", agg["kl_mean"], agg["top1_mean"]) == "PASS"
+        assert (RESULTS / cited["source"]).exists(), "引用的工件路径不存在"
+
+
 def test_correctness_conjoins_lm_head_gate_when_effective(monkeypatch):
     """F5 生效时 correctness 的门 = 基础门 ∧ lm_head 门；缺 lm_head 门 = FAIL（最后一道闸）。"""
     import benchmarks.runner as R
@@ -395,7 +421,8 @@ def test_correctness_conjoins_lm_head_gate_when_effective(monkeypatch):
     assert R.correctness_for_cell(cfg, consistency_passed=True)["gate"] == "PASS"
 
     monkeypatch.setenv("LEMOQ_LMHEAD_W8", "1")
-    # 表空 ⇒ FAIL（不得静默当 lm_head 过门）
+    # 未测（清空表模拟）⇒ FAIL（不得静默当 lm_head 过门）
+    monkeypatch.setattr(R, "LMHEAD_GATE_CITATIONS", {})
     assert R.correctness_for_cell(cfg, consistency_passed=True)["gate"] == "FAIL"
     # lm_head 门 PASS ⇒ 合取 PASS，且 payload 带第二个引用面
     monkeypatch.setitem(

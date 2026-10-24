@@ -340,7 +340,26 @@ def citation_source_for(bit_width: str, group_size: int, ctx: int) -> dict[str, 
 #   `w8a16_lmhead_only_g128` 臂 aggregate（新测量抄入 + 钉死测试，禁止手写）——
 #   门臂是"只量化 lm_head"的隔离测量（一次一变量；组合臂 `w8a16_full_lmhead_g128`
 #   作为采纳证据进记录，不进门表）。
-LMHEAD_GATE_CITATIONS: dict[int, dict[str, Any]] = {}
+#   ★ 2026-10-25 门实测落表（EXP-p1-06，5 窗 + ones 对照、wikitext、fused norm）：
+#     近无损（KL 6.1e-5 / 6.6e-5，门 0.01；top-1 165/165 全对）。★ 本表只解锁 A/B 的
+#     ON 臂——**采纳（翻默认）仍以三链（KL/top-1、PPL<1%、MMLU<2 点）+ A/B + 刷新为准**
+#     （F5 规格红线）；PPL 首轮因 quant_ppl 的 keep 透传缺陷作废（d055994 修复）。
+LMHEAD_GATE_CITATIONS: dict[int, dict[str, Any]] = {
+    1024: {
+        "kl": 0.0000605,
+        "top1": 1.0,
+        "rmsnorm": "fused",
+        "source": "EXP-p1-06-lm-head-w8/probe_f5_lmhead.json",
+        "arm": "w8a16_lmhead_only_g128",
+    },
+    4096: {
+        "kl": 0.0000661,
+        "top1": 1.0,
+        "rmsnorm": "fused",
+        "source": "EXP-p1-06-lm-head-w8/probe_f5_lmhead_ctx4096.json",
+        "arm": "w8a16_lmhead_only_g128",
+    },
+}
 
 
 def lm_head_w8_effective(bit_width: str, qreport: Any = None) -> bool:
