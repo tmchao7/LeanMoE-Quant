@@ -255,7 +255,10 @@ def test_triton_quantized_grouped_matches_oracle():
     #   nibble 展开），K1 门对它同样不放宽。
     # fp64 oracle：路由由显式 (ids, weights) 固定，可手排 —— silu(x·Wg+bg)⊙(x·Wu)·Wd 再加权和。
     #   （PARITY_GATE note 的双方都对其取误差：oracle backend 是 baseline，triton 是 kernel。）
-    fd = {"gate_up": fused.gate_up.double(), "down": fused.down.double()}
+    fd = {
+        "gate_up": fused.gate_up.double().cuda(),
+        "down": fused.down.double().cuda(),
+    }
     xd = x.double()
     oracle = torch.zeros_like(xd)
     for eid, wgt in zip(ids.tolist(), weights.double().tolist()):
