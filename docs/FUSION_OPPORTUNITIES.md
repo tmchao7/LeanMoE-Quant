@@ -42,7 +42,7 @@
 | **ATen 家族** | **0.6029** | 31.3% | elementwise 0.2029 / gemvx(lm_head) 0.1641 / routing 0.0955 / index 0.0566 / cat 0.0544 / reduce 0.0151 / softmax 0.0143 |
 | 覆盖 | 96.5% | — | `bottleneck.top_kernels` 覆盖 |
 
-### 1.2 自研 kernel 离墙多远（必要字节 ÷ 1561.9 GB/s）
+### 1.2 自研 kernel 离墙多远（必要字节 ÷ 1561.9 GB/s；该轮旧实例值，当前只读 1560.3，差 0.1%，本表不重算）
 
 | kernel | 调用/步 | 实测 ms | 字节 MB | 地板 ms | 达成率 |
 | --- | --- | --- | --- | --- | --- |
@@ -134,7 +134,12 @@ w8a16 量化门在单个窗口上的边界，不是候选的问题；工具按 1
 1. 打开开关**作为默认**（不是只改 env 默认值 —— 要把默认写进代码/配置，并在
    `config` 里记录实现，像 `rmsnorm: fused` 那样可查）；
 2. 重测 **23 个 `execution=cudagraph` 且 `status=done` 的格**（去重后计数，
-   清单见 §5 的复算命令）—— 因为三项都改图内执行，所有 graph 格 p50 都会变；
+   清单见 §5 的复算命令）。★ **2026-10-23 实测：三项的作用域不同**——
+   `route` 走 `moe_static`/`moe_grouped`，**所有格**都会变；`rope`/`skip_mask_fill`
+   只在 `attn=kernel` 的 forward 上（**6 格**），其中 `packed_qkv` 还要求格是**量化**的
+   ⇒ 只有 **2 格**（p4c-01 的 w8a16×kernel 1024/4096）会同时受三项影响，其余格只受
+   `route` 影响。刷新脚本 `scripts/rounds/run_f1_refresh.sh` 已按 `kernel` + `quantized`
+   逐格设开关（先 `DRY=1` 看清单）；不要在非 kernel 格上开 `mask-fill`——它会显式拒绝；
 3. 每轮必须：**首尾同格金丝雀**（`python -m tools.round_canary head.json tail.json --graph`，
    退出码非零 = VOID）+ 逐格占用快照；
 4. 覆盖前归档到 `results/<EXP>-run/vN_archive/`（硬规则 9）；
