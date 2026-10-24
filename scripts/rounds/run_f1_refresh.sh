@@ -19,26 +19,36 @@ cd "${REPO_ROOT:-/root/LeanMoE-Quant}" || exit 1
 PY=${PY:-/root/miniconda3/bin/python}
 M=/root/autodl-tmp/ms/models/allenai--OLMoE-1B-7B-0924/snapshots/master
 OUT=results/EXP-f1-refresh
-mkdir -p "$OUT/archive"
-LOG="$OUT/f1.log"; CONT="$OUT/contention.log"; LIST="$OUT/cells.txt"
-: > "$LOG"; : > "$CONT"
-snap () { { echo "--- $1 $(date -Is)"; nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader;
-            nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader; } >> "$CONT" 2>&1; }
+DRY=${DRY:-0}
 
 # 候选开关：整轮固定，一次一个变量（F1 三项是同轮的三个变量 —— 各自 A/B 已独立测过，
 # 本轮的标签必须是 combined）。
 export LEMOQ_FUSED_ROPE=1 LEMOQ_FUSED_ROUTE=1 LEMOQ_SKIP_MASK_FILL=1
 [ "${F2:-0}" = "1" ] && export LEMOQ_PACKED_QKV=1
-echo "env: rope=$LEMOQ_FUSED_ROPE route=$LEMOQ_FUSED_ROUTE mask=$LEMOQ_SKIP_MASK_FILL packed=${LEMOQ_PACKED_QKV:-0}" >> "$LOG"
 
 # ---- 1) 生成命令清单（从每个 payload 的 config 反推；跳过已刷新的格）----
+# ★ 2026-10-25：清单先进临时文件 —— DRY 模式**零副作用**。旧写法先建 archive/、清空
+#   f1.log/contention.log 再判断 DRY，Mac 自检和 GPU 上的预检都会把上一轮证据抹掉；
+#   坏 payload ⇒ 非零退出中止，不以残缺清单续跑。
+LIST=$(mktemp /tmp/f1_cells.XXXXXX) || exit 1
+trap 'rm -f "$LIST"' EXIT
 $PY - > "$LIST" <<'PYEOF'
 import glob, json, os, sys
+
+bad = []          # 读不出 / 缺 config ⇒ 清单中止（fail-closed）
+not_done_cg = []  # cudagraph 形状但 status != done ⇒ 跳过，但点名（失败残留 / p0-03 by-design）
 for p in sorted(glob.glob("results/EXP-*__*/result.json")):
-    d = json.load(open(p))
-    if d.get("status") != "done":
+    try:
+        with open(p) as f:
+            d = json.load(f)
+        c = d["config"]
+    except Exception as exc:
+        bad.append("%s: %s: %s" % (p, type(exc).__name__, exc))
         continue
-    c = d["config"]
+    if d.get("status") != "done":
+        if c.get("execution") == "cudagraph":
+            not_done_cg.append("%s status=%s" % (os.path.dirname(p), d.get("status")))
+        continue
     if c.get("execution") != "cudagraph":
         continue  # 只刷图格：三项融合都改图内执行
     cell = os.path.dirname(p)
@@ -74,13 +84,38 @@ for p in sorted(glob.glob("results/EXP-*__*/result.json")):
     if refreshed:
         continue
     print("%s|%s|%s|%s|%s" % (exp, joined, cell, kernel, packed))
+if bad:
+    print("清单中止：以下 payload 读不出 / 缺 config：", file=sys.stderr)
+    for b in bad:
+        print("  " + b, file=sys.stderr)
+    sys.exit(1)
+if not_done_cg:
+    print("跳过的非 done cudagraph 格（失败残留 / p0-03 by-design）：", file=sys.stderr)
+    for x in not_done_cg:
+        print("  " + x, file=sys.stderr)
 PYEOF
-echo "清单 $(wc -l < "$LIST") 格" >> "$LOG"; cat "$LIST" >> "$LOG"
-if [ "${DRY:-0}" = "1" ]; then
-  echo "--- DRY：只列清单（exp | args | cell | kernel | packed）---"
-  cat "$LIST"
-  exit 0
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "拒绝：清单生成失败（坏 payload / IO）——不以残缺清单续跑" >&2
+  exit 2
 fi
+echo "--- 清单（exp | args | cell | kernel | packed）---"
+cat "$LIST"
+N_CELLS=$(wc -l < "$LIST" | tr -d ' ')
+echo "清单 $N_CELLS 格"
+if [ "$DRY" = "1" ]; then echo "--- DRY：只列清单，未写 results/ ---"; exit 0; fi
+[ "$N_CELLS" -gt 0 ] || { echo "拒绝：清单为空（results/ 下没有待刷新的 cudagraph done 格）"; exit 2; }
+
+# ---- 非 DRY：从这里才开始写 results/（其上零副作用）----
+mkdir -p "$OUT/archive"
+LOG="$OUT/f1.log"; CONT="$OUT/contention.log"; CELLS="$OUT/cells.txt"
+: > "$LOG"; : > "$CONT"
+cp -p "$LIST" "$CELLS"
+FAILS="$OUT/failed.txt"; : > "$FAILS"
+snap () { { echo "--- $1 $(date -Is)"; nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader;
+            nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader; } >> "$CONT" 2>&1; }
+echo "env: rope=$LEMOQ_FUSED_ROPE route=$LEMOQ_FUSED_ROUTE mask=$LEMOQ_SKIP_MASK_FILL packed=${LEMOQ_PACKED_QKV:-0}" >> "$LOG"
+echo "清单 $N_CELLS 格" >> "$LOG"; cat "$LIST" >> "$LOG"
 
 # ---- 2) 归档 + 重跑 + 逐格自检 ----
 run_one () {
@@ -104,9 +139,12 @@ run_one () {
   snap "$label-pre"
   echo "=== [$label] $exp $args start $(date -Is)" >> "$LOG"
   $PY -m benchmarks.runner --exp "$exp" --model "$M" $args --force > "$OUT/$label.log" 2>&1
-  local rc; rc=$?
+  # ★ 2026-10-25：必须同行声明 —— 旧写法 `local rc; rc=$?` 里 `local rc` 会把 $?
+  #   重置为 0，runner 的真实退出码从未进过日志/判定（实测 bash 语义）。
+  local rc=$?
   echo "=== [$label] exit=$rc end $(date -Is)" >> "$LOG"
-  $PY - "$label" "$cell/result.json" <<'PYEOF' >> "$LOG" 2>&1
+  local check rc2=0
+  check=$($PY - "$label" "$cell/result.json" <<'PYEOF'
 import json, sys
 lbl, path = sys.argv[1], sys.argv[2]
 d = json.load(open(path)); lat, att, cfg = d["latency"], d["attribution"], d["config"]
@@ -128,11 +166,19 @@ if kernel and os.environ.get("LEMOQ_PACKED_QKV") == "1":
         warn.append("packed_qkv_effective=%r（应为 true）" % (eff,))
 elif eff:
     warn.append("packed_qkv_effective=%r（本格不该装上）" % (eff,))
-print("    [%s] bw=%-6s attn=%-6s ctx=%-5s exec=%-9s dq=%-8s gate=%-4s p50=%-9s host=%-5s kernels=%-4s %s" % (
+print("    [%s] bw=%-6s attn=%-6s ctx=%-5s exec=%-9s dq=%-8s norm=%-5s gate=%-4s p50=%-9s host=%-5s kernels=%-4s %s" % (
     lbl, cfg.get("bit_width"), cfg.get("attn"), cfg.get("ctx"), cfg.get("execution"), cfg.get("dequant"),
+    cfg.get("rmsnorm"),
     d["correctness"]["gate"], p50, att["host_share_pct"], (d.get("bottleneck") or {}).get("kernels_per_step"),
     ("!! " + "; ".join(warn)) if warn else "OK"))
 PYEOF
+) || rc2=$?
+  printf '%s\n' "$check" >> "$LOG"
+  # ★ 2026-10-25：失败格不再静默 —— runner 非零退出、自检崩溃或自检有警告 ⇒ 记入
+  #   failed.txt，轮末对账（清单数 = 干净刷新数 + 失败数），不干净就不许回填数字。
+  if [ "$rc" -ne 0 ] || [ "$rc2" -ne 0 ] || printf '%s' "$check" | grep -q '!! '; then
+    echo "$label" >> "$FAILS"
+  fi
   snap "$label-post"
 }
 
@@ -156,5 +202,14 @@ cp -p "$CANARY_CELL/result.json" "$OUT/canary_tail.json" 2>/dev/null || true
 $PY -m tools.round_canary "$OUT/canary_head.json" "$OUT/canary_tail.json" --graph \
   --out "$OUT/canary.json" >> "$LOG" 2>&1
 RC=$?
-echo "=== round_canary exit=$RC（非 0 ⇒ 整轮 VOID，不要回填任何数字）===" >> "$LOG"
-exit $RC
+echo "=== round_canary exit=${RC}（非 0 ⇒ 整轮 VOID，不要回填任何数字）===" >> "$LOG"
+# ---- 5) 对账（2026-10-25）：清单数 = 干净刷新数 + 失败数；失败格不静默 ----
+N_FAILED=$(wc -l < "$FAILS" | tr -d ' ')
+echo "=== 对账：清单 $N_CELLS 格，失败/自检警告 $N_FAILED 格 ===" >> "$LOG"
+if [ "$N_FAILED" -gt 0 ]; then
+  echo "对账：以下格未干净刷新（不要据此轮回填它们的数字；修因后可断点续跑）：" >&2
+  cat "$FAILS" >&2
+fi
+if [ "$RC" -ne 0 ]; then exit "$RC"; fi
+if [ "$N_FAILED" -gt 0 ]; then exit 3; fi
+exit 0

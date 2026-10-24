@@ -39,6 +39,8 @@ case "$PAIRS" in ''|*[!0-9]*) echo "PAIRS 必须是正整数"; exit 2;; esac
 
 # ★ fail-closed（2026-10-24）：采纳会把候选翻成**默认开**。那时 off 臂若不显式写 0，
 #   两臂跑的是同一实现 ⇒ 静默量出"0% 收益"。这比 VOID 更坏，所以直接拒绝。
+# ★ 2026-10-25：探针本身失败（PY 不存在 / import 错）也一律拒绝 —— 旧写法探针失败
+#   得到空串后**静默放行**（fail-open），与本守卫的存在理由相反。
 SWITCH_VAR=${ENV_ON%%=*}
 # `PYTHONPATH=src`：Mac 上 lemoq 只以源码目录形式可用（没 pip install -e），
 # 而 GPU 机上它是可导入的 —— 两条路都覆盖，别让守卫因为导入失败而放行。
@@ -48,16 +50,43 @@ from lemoq.kernels.fusion_switches import ENV_VARS, FUSION_DEFAULTS
 
 var = sys.argv[1]
 key = next((k for k, v in ENV_VARS.items() if v == var), None)
-print("unknown" if key is None else ("on" if FUSION_DEFAULTS[key] else "off"))
+if key is None:
+    print("unknown -")
+else:
+    print("on" if FUSION_DEFAULTS[key] else "off", key)
 PYEOF
-)
-if [ "$DEFAULT_STATE" = "unknown" ]; then
+) || { echo "拒绝：默认状态探针失败（PY / import 问题）—— fail-closed"; exit 2; }
+read -r DEFAULT_STATE SWITCH_KEY <<<"$DEFAULT_STATE"
+if [ "$DEFAULT_STATE" = "unknown" ] || [ -z "$DEFAULT_STATE" ]; then
   echo "拒绝：$SWITCH_VAR 不是已声明的融合开关（见 fusion_switches.ENV_VARS）"; exit 2
 fi
 if [ "$DEFAULT_STATE" = "on" ] && [ -z "$ENV_OFF" ]; then
   echo "拒绝：$SWITCH_VAR 的**代码默认已经是 on**，off 臂会与 on 臂跑同一实现。"
   echo "      显式给 off 臂：ENV_OFF=\"$SWITCH_VAR=0\""
   exit 2
+fi
+if [ -n "$ENV_OFF" ]; then
+  OFF_VAR=${ENV_OFF%%=*}
+  if [ "$OFF_VAR" != "$SWITCH_VAR" ]; then
+    echo "拒绝：ENV_OFF 关的是 ${OFF_VAR}，与 ENV_ON 的 ${SWITCH_VAR} 不是同一开关（两臂会同实现）"; exit 2
+  fi
+  case "${ENV_OFF#*=}" in 0) ;; *) echo "拒绝：ENV_OFF 必须把 $SWITCH_VAR 显式置 0"; exit 2 ;; esac
+fi
+
+# ★ F2 的两个前置（attn=kernel 且量化）与 profile_graph --ab-packed-qkv 同口径
+#   （profile_graph.py:103-111）：不适用的格上 on 臂是静默 no-op ⇒ 量出假 0%。
+#   显式请求的 A/B 必须拒绝，不能靠"测出来收益是 0"来发现。
+if [ "$SWITCH_KEY" = "packed_qkv" ]; then
+  "$PY" - "$CELL/result.json" <<'PYEOF' || exit 2
+import json, sys
+
+d = json.load(open(sys.argv[1]))
+c = d.get("config") or {}
+if c.get("attn") != "kernel" or (c.get("bit_width") or "fp16") == "fp16":
+    print("拒绝：packed_qkv 只对 量化 × attn=kernel 生效；本格 attn=%r bit_width=%r"
+          " —— on 臂会静默 no-op，量出假 0%%" % (c.get("attn"), c.get("bit_width")))
+    sys.exit(1)
+PYEOF
 fi
 
 # 计划：head(off) + PAIRS 对（奇偶交替顺序）+ tail(off)  ⇒ 2 + 2*PAIRS 次
@@ -85,23 +114,32 @@ for arm in "${SEQ[@]}"; do
   label=$(printf "%s%02d" "$arm" "$i")
   snap "$label-pre"
   echo "=== $label arm=$arm start $(date -Is)" >> "$OUT/ab.log"
+  rc=0
   if [ "$arm" = "on" ]; then
     env $ENV_ON "$PY" -m benchmarks.runner --exp "$EXP" $ARGS --model "$M" --force \
-      > "$OUT/$label.log" 2>&1
+      > "$OUT/$label.log" 2>&1 || rc=$?
   else
     env $ENV_OFF "$PY" -m benchmarks.runner --exp "$EXP" $ARGS --model "$M" --force \
-      > "$OUT/$label.log" 2>&1
+      > "$OUT/$label.log" 2>&1 || rc=$?
   fi
-  echo "=== $label exit=$? end $(date -Is)" >> "$OUT/ab.log"
-  cp -p "$CELL/result.json" "$OUT/$label.json"
+  echo "=== $label exit=$rc end $(date -Is)" >> "$OUT/ab.log"
+  # ★ 2026-10-25：runner 失败时不落新 payload —— 旧写法无条件 `cp` 会把**上一臂的
+  #   旧 payload**（status=done）存成当前臂的结果，status 门查不出这种错配。
+  #   失败就留 FAILED 标记、不采 payload，让"有效对不足"把轮判 INVALID。
+  if [ "$rc" -eq 0 ] && [ -f "$CELL/result.json" ]; then
+    cp -p "$CELL/result.json" "$OUT/$label.json"
+  else
+    echo "=== ${label} runner 失败（exit=${rc}）——不采 payload，留 FAILED 标记" >> "$OUT/ab.log"
+    : > "$OUT/$label.FAILED"
+  fi
   snap "$label-post"
   i=$((i + 1))
 done
 
-"$PY" - "$OUT" "$PAIRS" <<'PYEOF'
+"$PY" - "$OUT" "$PAIRS" "$SWITCH_KEY" <<'PYEOF'
 import glob, json, os, statistics, sys
 
-out, pairs = sys.argv[1], int(sys.argv[2])
+out, pairs, switch_key = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 runs = []
 # 标签是 `<arm><%02d>`（off00 / on01 / ...）：按**运行序号**排序，不能按字典序，
 # 否则首尾金丝雀与配对都会错位。
@@ -171,12 +209,33 @@ if drift is None or abs(drift) > 5: reasons.append("canary 漂移 >5% 或缺失"
 if tokens_equal is False: reasons.append("跨臂 greedy token 不同")
 if len(off) != len(on) or len(off) < pairs: reasons.append("有效对不足 %d" % pairs)
 if mad is None or mad > 0.02: reasons.append("比值 MAD 过大（>2%）")
+# ★ 2026-10-25：逐 run 校验开关状态与臂一致 —— 堵两个静默假结果路径：
+#   (a) 环境残留（默认翻 on 后 off 臂忘了显式 0 ⇒ 两臂同实现量出假 0%）；
+#   (b) runner 失败后误采旧 payload（status=done 门查不出错配）。
+arm_mismatch = []
+for r in runs:
+    want = r["arm"] == "on"
+    got = r["switches"].get(switch_key)
+    if got is not want:
+        arm_mismatch.append("%s %s=%r（%s 臂应为 %r）" % (r["file"], switch_key, got, r["arm"], want))
+if arm_mismatch:
+    reasons.append("开关状态与臂不一致（" + "; ".join(arm_mismatch[:4]) + "）")
+other_drift = []
+for k in ("fused_rope", "fused_route", "skip_mask_fill", "packed_qkv"):
+    if k == switch_key:
+        continue
+    vals = {r["switches"].get(k) for r in runs}
+    if len(vals) > 1:
+        other_drift.append("%s 漂移 %r" % (k, sorted(vals, key=str)))
+if other_drift:
+    reasons.append("非 A/B 开关在 runs 间漂移（" + "; ".join(other_drift) + "）")
 verdict = "VALID" if not reasons else "INVALID"
 print("verdict:", verdict, ("; ".join(reasons) if reasons else "host<=5% / canary<=5% / tokens_equal / pairs ok"))
 json.dump({"runs": runs, "off_mean_ms": statistics.mean([r["p50"] for r in off]) if off else None,
            "on_mean_ms": statistics.mean([r["p50"] for r in on]) if on else None,
            "wins": wins, "pairs": len(off), "canary_drift_pct": drift, "ratio_mad": mad,
-           "tokens_equal": tokens_equal, "verdict": verdict, "reasons": reasons},
+           "tokens_equal": tokens_equal, "verdict": verdict, "reasons": reasons,
+           "switch_key": switch_key, "arm_mismatch": arm_mismatch, "other_switch_drift": other_drift},
           open(os.path.join(out, "ab_summary.json"), "w"), indent=2, ensure_ascii=False)
 print("wrote", os.path.join(out, "ab_summary.json"))
 PYEOF
