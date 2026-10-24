@@ -584,15 +584,13 @@ def main(argv: list[str] | None = None) -> int:
         #   2. down_sum SPLIT_K >= 4（第一轮前 6 名共有的性质）
         #   3. 再加 gate_up_act BLOCK_K=128（第二轮的赢家区）
         candidates_cfg = {
-            "default_BN64x64_SK1__down128x64_SK1": {
-                "gate_up_act": {"BLOCK_N": 64, "BLOCK_K": 64, "SPLIT_K": 1, "num_warps": 4},
-                "down_sum": {"BLOCK_N": 128, "BLOCK_K": 64, "SPLIT_K": 1, "num_warps": 4},
-            },
-            "down_only_SK4__BN64x128_w8": {
-                "gate_up_act": {"BLOCK_N": 64, "BLOCK_K": 64, "SPLIT_K": 1, "num_warps": 4},
+            # ★ 2026-10-25：本轮问题 = "pinned 默认 vs v2 sweep 平坦最优"（F4 采纳后的
+            #   L2/节点环境）。默认 = GROUPED_CONFIGS；候选 = sweep v2 36 平坦行最快。
+            "pinned_default__g32x128w4_down64x128SK4w8": {
+                "gate_up_act": {"BLOCK_N": 32, "BLOCK_K": 128, "SPLIT_K": 1, "num_warps": 4},
                 "down_sum": {"BLOCK_N": 64, "BLOCK_K": 128, "SPLIT_K": 4, "num_warps": 8},
             },
-            "sweep1_winner__BN64x128_w8_down_SK4": {
+            "sweepv2_best__g64x128w8_down64x128SK4w4": {
                 "gate_up_act": {"BLOCK_N": 64, "BLOCK_K": 128, "SPLIT_K": 1, "num_warps": 8},
                 "down_sum": {"BLOCK_N": 64, "BLOCK_K": 128, "SPLIT_K": 4, "num_warps": 4},
             },
