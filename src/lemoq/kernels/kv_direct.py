@@ -53,14 +53,20 @@ def kv_direct_write_applicable(cache_layer: Any, key_states: Any, value_states: 
         - cache 的 keys/values 是 (1, H, max_len, D) 的**连续**张量且同形状；
         - dtype 与 k/v 一致（kernel 是纯位拷贝，不做转换）；
         - k/v 形状 (1, H, 1, D)；
-        - head_dim D 是 2 的幂（`tl.arange` 需要精确 BLOCK，无 mask 路径）。
+        - head_dim D 是 2 的幂（`tl.arange` 需要精确 BLOCK，无 mask 路径）；
+        - 全部张量在 **CUDA** 上（CPU 张量即使形状匹配也回退——盒子上有 triton，
+          默认翻转后 CPU 测试必须走 update()，2026-10-25 实测踩中）。
     """
     torch = _torch()
     if torch is None:
         return False
+    if not (key_states.is_cuda and value_states.is_cuda):
+        return False
     keys = getattr(cache_layer, "keys", None)
     values = getattr(cache_layer, "values", None)
     if keys is None or values is None:
+        return False
+    if not (keys.is_cuda and values.is_cuda):
         return False
     if keys.shape != values.shape or keys.dim() != 4 or keys.shape[0] != 1:
         return False
