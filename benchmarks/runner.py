@@ -923,17 +923,17 @@ def run_cudagraph(
         raise ValueError("the CUDA Graph arm supports batch=1 and ctx >= 1 only")
     CudaGraphConfig(ctx=ctx, max_new_tokens=max_new_tokens, batch=batch).validate_timing(timed)
 
-    # ★ F2 候选（packed q/k/v）第一轮只挂在 attn=kernel 的图路径上；其他组合**显式拒绝**，
-    #   而不是静默退回三次投影 —— 否则会把"候选没生效"量成"候选没收益"。
-    from lemoq.kernels.packed_qkv import packed_qkv_enabled  # noqa: PLC0415
+    # ★ F2 候选（packed q/k/v）有两个前置：`attn=kernel` **且** 该格已量化。
+    #   不适用时**不装**（no-op），而不是拒绝 —— 采纳后默认就是 True，23 个图格里
+    #   只有 2 格同时满足两个前置；若仍按第一轮那样 raise，刷新轮会直接失败
+    #   （2026-10-24 复核）。"请求/生效"的区分见 payload 里的两个字段。
+    from lemoq.kernels.packed_qkv import packed_qkv_applicable, packed_qkv_enabled  # noqa: PLC0415
 
-    if packed_qkv_enabled() and attn != "kernel":
-        raise ValueError(
-            "LEMOQ_PACKED_QKV=1 目前只支持 attn=kernel 的 cudagraph 格；得到 attn=%r" % (attn,)
-        )
+    packed_qkv_requested = packed_qkv_enabled()
     packed_qkv_modules = 0
 
     qspec = quant_spec_for_cfg(quant_cfg) if quant_cfg else None
+    packed_qkv_eligible = packed_qkv_applicable(attn, qspec is not None)
 
     tr = VramTracker()
     tr.mark("after_torch_import")
@@ -996,7 +996,7 @@ def run_cudagraph(
         attn_replaced = replace_attention_cores(model, backend="triton")
         torch.cuda.synchronize()
         tr.mark("after_attn_replace")
-        if packed_qkv_enabled():
+        if packed_qkv_eligible:
             # F2 候选：q/k/v 打包成一份 buffer（在 capture 之前建好，见 packed_qkv.py）。
             from lemoq.kernels.packed_qkv import install_packed_qkv  # noqa: PLC0415
 
@@ -1114,8 +1114,9 @@ def run_cudagraph(
 
     res["rmsnorm"] = str(getattr(model, "_lemoq_rmsnorm_impl", rmsnorm))
     res["rms_norms_replaced"] = int(rms_norms_replaced(model))
-    res["packed_qkv"] = bool(packed_qkv_modules)
+    res["packed_qkv_effective"] = bool(packed_qkv_modules)
     res["packed_qkv_modules"] = int(packed_qkv_modules)
+    res["packed_qkv_requested"] = bool(packed_qkv_requested)
     res["kernel_warm"] = kernel_warm
     res["moe_blocks_replaced"] = int(moe_replaced)
     res["quantize_report"] = None if qreport is None else qreport.to_dict()
@@ -1173,10 +1174,10 @@ def run_baseline(
     from benchmarks.vram import VramTracker, split_report
     from lemoq.kernels.packed_qkv import packed_qkv_enabled  # noqa: PLC0415
 
-    if packed_qkv_enabled():
-        raise ValueError(
-            "LEMOQ_PACKED_QKV=1 只挂在 attn=kernel 的 cudagraph 路径；eager 臂显式拒绝"
-        )
+    # ★ eager 基线**没有** packed 路径（F2 只挂在 attn=kernel 的 decode 分支）。
+    #   采纳后该开关默认 True ⇒ 这里必须是"请求但不生效"，不能再 raise：否则默认一翻，
+    #   全部 eager 格（含 E7 的 8 格与所有基线）都跑不了（2026-10-24 复核）。
+    packed_qkv_requested = packed_qkv_enabled()
 
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[
         dtype_name
@@ -1388,8 +1389,10 @@ def run_baseline(
         "moe_blocks_replaced": int(moe_replaced),
         "rmsnorm": str(getattr(model, "_lemoq_rmsnorm_impl", rmsnorm)),
         "rms_norms_replaced": int(getattr(model, "_lemoq_rms_norms_replaced", 0)),
-        # F2 候选只挂在 attn=kernel 的 cudagraph 路径；eager 臂在这里恒为 False（env 已拒绝）。
-        "packed_qkv": False,
+        # F2 候选只挂在 attn=kernel 的量化 cudagraph 路径；eager 臂**生效**恒为 False
+        # （请求状态记在 payload 的 `packed_qkv`，见 `fusion_payload_fields()`）。
+        "packed_qkv_effective": False,
+        "packed_qkv_requested": bool(packed_qkv_requested),
         "breakdown": breakdown,
         "moe_block": moe_block_bench,
         "ttft": ttft,
@@ -1682,8 +1685,10 @@ def build_payload(
         **_rmsnorm_payload_fields(res, cfg),
         # ★ 融合候选的**有效**状态（env 覆盖 + 代码默认）：采纳 = 改默认，记录自动跟随
         **fusion_payload_fields(),
-        # F2 的实测状态（安装数量）比"开关想要"更强：两者不一致时以这里为准
-        "packed_qkv": res.get("packed_qkv"),
+        # ★ F2 有两个前置（attn=kernel **且** 量化）⇒ "请求"与"生效"分开记。上面那块是
+        #   **请求**（与另外三个开关对称）；这里补**生效**。采纳后 21/23 个图格是
+        #   "请求 True / 生效 False"——只记一个字段会把 no-op 读成"已经用上了"。
+        "packed_qkv_effective": bool(res.get("packed_qkv_effective")),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
         "batch": cfg.get("batch"),
@@ -1937,8 +1942,10 @@ def build_cudagraph_payload(
         **_rmsnorm_payload_fields(res, cfg),
         # ★ 融合候选的**有效**状态（env 覆盖 + 代码默认）：采纳 = 改默认，记录自动跟随
         **fusion_payload_fields(),
-        # F2 的实测状态（安装数量）比"开关想要"更强：两者不一致时以这里为准
-        "packed_qkv": res.get("packed_qkv"),
+        # ★ F2 有两个前置（attn=kernel **且** 量化）⇒ "请求"与"生效"分开记。上面那块是
+        #   **请求**（与另外三个开关对称）；这里补**生效**。采纳后 21/23 个图格是
+        #   "请求 True / 生效 False"——只记一个字段会把 no-op 读成"已经用上了"。
+        "packed_qkv_effective": bool(res.get("packed_qkv_effective")),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
         "batch": cfg.get("batch"),

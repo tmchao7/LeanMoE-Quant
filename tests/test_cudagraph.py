@@ -59,9 +59,14 @@ def test_blocked_and_failed_results_record_effective_fusion_switches(monkeypatch
 
     ★ 2026-10-23：刷新轮的自检在 blocked 格上读到 `fused_route=None`，把"格被阻塞"
     误报成"开关没生效"。blocked/failed payload 走的是另一条组装路径，必须也带
-    `fusion_payload_fields()` 的四个键（有效状态 = env 覆盖 + 代码默认）。
+    `fusion_payload_fields()` 的四个键（请求状态 = env 覆盖 + 代码默认）。
+
+    ★ 2026-10-24：断言改成对着 `FUSION_DEFAULTS` 比 —— 采纳那天只改默认，测试不用改
+    （旧写法把"默认全 False"写死，翻默认就会红）。另加 `packed_qkv_effective`：
+    它有两个前置（attn=kernel + 量化），blocked 的格**生效**恒为 False。
     """
     from benchmarks.cudagraph import blocked_result, failed_result
+    from lemoq.kernels import fusion_switches as fs
 
     switches = (
         "LEMOQ_FUSED_ROPE",
@@ -79,7 +84,8 @@ def test_blocked_and_failed_results_record_effective_fusion_switches(monkeypatch
         config=cfg,
         failure={"stage": "capture", "type": "RuntimeError", "message": "x"},
     )
-    assert {k: default["config"][k] for k in keys} == dict.fromkeys(keys, False)
+    assert {k: default["config"][k] for k in keys} == dict(fs.FUSION_DEFAULTS)
+    assert default["config"]["packed_qkv_effective"] is False
     assert validate_result(default) == []
 
     monkeypatch.setenv("LEMOQ_FUSED_ROPE", "1")
@@ -91,7 +97,8 @@ def test_blocked_and_failed_results_record_effective_fusion_switches(monkeypatch
     )
     assert armed["config"]["fused_rope"] is True
     assert armed["config"]["packed_qkv"] is True
-    assert armed["config"]["fused_route"] is False  # 未被覆盖的开关不受影响
+    assert armed["config"]["packed_qkv_effective"] is False
+    assert armed["config"]["fused_route"] is fs.FUSION_DEFAULTS["fused_route"]  # 未被覆盖
 
     failed = failed_result(
         exp_id="EXP-x__ctx=1024",
@@ -101,6 +108,7 @@ def test_blocked_and_failed_results_record_effective_fusion_switches(monkeypatch
     )
     assert failed["status"] == "failed"
     assert {k: failed["config"][k] for k in keys} == {k: armed["config"][k] for k in keys}
+    assert failed["config"]["packed_qkv_effective"] is False
     assert validate_result(failed) == []
 
 

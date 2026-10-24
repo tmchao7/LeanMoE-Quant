@@ -102,6 +102,13 @@ def _run_env_ab(
         raise ValueError("skip-mask-fill requires the mask-independent kernel backend")
     if env_var == PACKED_QKV_ENV and args.attn != "kernel":
         raise ValueError("packed q/k/v requires attn=kernel (the F2 first-round scope)")
+    if env_var == PACKED_QKV_ENV and args.bit_width == "fp16":
+        # ★ 这里是**显式请求**的 A/B（不是采纳后的默认），所以不适用就拒绝。
+        #   fp16 的 q/k/v 是 nn.Linear，没有 packed 状态 ⇒ "on" 臂会退化成 no-op，
+        #   量出来的是一个假的 0% 收益（比 VOID 更坏）。2026-10-24。
+        raise ValueError(
+            "packed q/k/v requires a quantized cell（fp16 的 q/k/v 是 nn.Linear，on 臂会静默 no-op）"
+        )
     seq = [arm_a, arm_b] * rounds + [arm_a]
     switches = (ABLATE_ARM_ENV, MASK_FILL_ARM_ENV, ROPE_ARM_ENV, PACKED_QKV_ENV)
     saved = {key: os.environ.get(key) for key in switches}

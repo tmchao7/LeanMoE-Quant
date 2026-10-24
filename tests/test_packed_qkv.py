@@ -68,9 +68,12 @@ def _fake_model(q, k, v):
     return model
 
 
-def test_switch_defaults_off(monkeypatch):
+def test_switch_state_follows_the_code_default(monkeypatch):
+    """默认值会随采纳翻转（2026-10-24），所以断言"等于默认"，不写死 False。"""
+    from lemoq.kernels import fusion_switches as fs
+
     monkeypatch.delenv("LEMOQ_PACKED_QKV", raising=False)
-    assert packed_qkv_enabled() is False
+    assert packed_qkv_enabled() is fs.FUSION_DEFAULTS["packed_qkv"]
     monkeypatch.setenv("LEMOQ_PACKED_QKV", "1")
     assert packed_qkv_enabled() is True
     monkeypatch.setenv("LEMOQ_PACKED_QKV", "0")

@@ -198,6 +198,9 @@ def blocked_result(
             # ★ 候选开关的**有效状态**：blocked 的格也必须能被自检读出用的是哪条臂，
             #   否则刷新轮会把"开关没生效"和"格被阻塞"混为一谈（2026-10-23 实测）。
             **fusion_payload_fields(),
+            # F2 有第二个前置（该格必须已量化）；blocked 的格什么都没装 ⇒ 生效恒为 False。
+            # "请求"仍由上面的 `packed_qkv` 记录（2026-10-24）。
+            "packed_qkv_effective": False,
         }
     )
     payload["correctness"] = {

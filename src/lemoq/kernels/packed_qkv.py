@@ -18,9 +18,18 @@ output row and input group), so every packed output row must equal the row the
 single-projection call produced — bitwise, not merely close. The GPU test
 asserts exactly that (`tests/test_packed_qkv.py`).
 
-Scope of this first round — everything else refuses loudly, never silently
-falls back: w8 only, `dequant=fused`, symmetric, bias-free, `attn=kernel`
-decode. `o_proj` is untouched.
+Scope of this first round — w8 only, `dequant=fused`, symmetric, bias-free,
+`attn=kernel` decode. `o_proj` is untouched.
+
+★ Two preconditions, hence "requested" ≠ "effective" (2026-10-24). Unlike the
+other three switches (whose only precondition is `attn=kernel`), this one also
+needs the cell to be **quantized**: fp16 q/k/v are `nn.Linear` and there is
+nothing to pack. When the candidate is adopted as a code default it is requested
+on every cell while only the quantized `attn=kernel` cells can apply it, so the
+runner installs it only where `packed_qkv_applicable()` holds, records the
+request (`config.packed_qkv`) and the outcome (`config.packed_qkv_effective`)
+separately, and never refuses a cell just because the default is on.
+Non-applicable ⇒ **no buffers, no error, the ordinary three-projection path**.
 """
 
 from __future__ import annotations
@@ -36,6 +45,17 @@ def packed_qkv_enabled() -> bool:
     from lemoq.kernels.fusion_switches import fusion_enabled  # noqa: PLC0415
 
     return fusion_enabled("packed_qkv")
+
+
+def packed_qkv_applicable(attn: Any, quantized: bool) -> bool:
+    """Both preconditions: `attn == "kernel"` **and** the cell is quantized.
+
+    ★ "not applicable" must mean *no-op*, not *refuse*: adoption turns this
+    switch into a default, and only 2 of the 23 recorded graph cells satisfy
+    both preconditions. Refusing the other 21 (and every eager baseline cell)
+    on a default would make the adoption refresh round unrunnable.
+    """
+    return str(attn) == "kernel" and bool(quantized)
 
 
 def _attention_modules(model: Any) -> list[Any]:
