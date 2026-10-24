@@ -202,3 +202,8 @@ speedup_E2E = (T_bytes_fp16 + T_host) / (T_bytes_quant + T_host)
 - 同租户进程**记录，绝不 kill**（`ncu_evidence` 已实现 `foreign_processes`）；
 - 未测的值一律写 `planned` / `null`，**不得**写成结果（硬规则 1）；
 - 不得跨轮比较（硬规则 3）—— batch 扫描与已有 batch=1 数字分表呈现。
+- **长轮次的 A/B 必须用独立进程**：同一个进程里连续跑多次完整 session 会让 `host_share`
+  随轮次累积（2026-10-23 实测同一格：进程内第一次 3.2–3.6%，第 5–7 次 5.5–7.1% ⇒ 三轮
+  全被判 VOID，与同租户无关）；同轮相邻、每臂独立进程的协议见
+  `scripts/rounds/run_ab_fresh_process.sh`（2026-10-23 用它拿到 F2 的合规轮：
+  off 1.9536 → on 1.8597 ms，−4.81%，3/3 对，host 3.5–4.2%）。

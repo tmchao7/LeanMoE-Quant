@@ -38,6 +38,7 @@ snap () { ... nvidia-smi --query-compute-apps=... }   # 每格前后记同租户
 | `run_p4c01_v3.sh` | 同 8 格（v3：融合 RMSNorm 成为默认实现后） | 同上 §5.7 |
 | `run_p2j_refresh.sh` | P2j 全面刷新（31 格；可中断可续，覆盖前幂等归档） | 各记录的「★ P2j 刷新」小节 |
 | `run_f1_refresh.sh` | F1（+可选 F2）采纳刷新（23 个 graph 格；首尾同格 graph 金丝雀；可中断可续） | `docs/FUSION_OPPORTUNITIES.md` §F1/§F2 |
+| `run_ab_fresh_process.sh` | **独立进程 · 同轮相邻 A/B**（长轮次用；每臂新进程，首尾同臂金丝雀，per-pair 胜负 + MAD） | `docs/FUSION_OPPORTUNITIES.md` §F2 的合规轮 |
 
 ## 注意
 
