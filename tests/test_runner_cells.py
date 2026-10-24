@@ -33,6 +33,7 @@ from benchmarks.runner import (  # noqa: E402
     _moe_for_exp,
     _weight_bytes_actual,
     build_exp_id,
+    citation_source_for,
     correctness_for_cell,
     gate_for_cell,
     gate_from_metrics,
@@ -418,10 +419,12 @@ def test_run_cudagraph_accepts_the_quant_cfg_hook():
 # ---------------------------------------------------------------------------
 
 
-def _artifact_for_ctx(ctx: int) -> Path:
-    """CTX -> 那张工件。P2（EXP-p4b-01 §3）把门补测到了 ctx=4096，两张工件同格式。"""
-    name = "probe_prompt_set.json" if int(ctx) == 1024 else "probe_prompt_set_ctx4096.json"
-    return RESULTS / "EXP-p1-04-prompt-set-gate" / name
+def _artifact_for_row(bit_width: str, group_size: int, ctx: int) -> Path:
+    """门行 -> 它引用的工件路径。真值来自 `runner.citation_source_for`（缺省按 ctx 推
+    EXP-p1-04 的 5 窗规范件；w8a8@4096 自 R3 裁决起引 10 窗复测件）。"""
+    src = citation_source_for(bit_width, group_size, ctx)
+    assert src is not None, "ctx=%d 没有已知的门引用工件" % ctx
+    return RESULTS / src["artifact"]
 
 
 def _top1_mean(arm: dict) -> float:
@@ -443,19 +446,21 @@ def _top1_mean(arm: dict) -> float:
 
 
 def test_gate_citations_match_the_artifacts():
-    """`GATE_CITATIONS` 的 kl / top-1 必须**逐字**来自 EXP-p1-04 的落盘工件。
+    """`GATE_CITATIONS` 的 kl / top-1 必须**逐字**来自其引用工件的落盘实测。
 
     代码里写死的门值若与实测漂移，规则 2 就会在错误的配置上开绿灯 —— 这条测试
-    把代码钉在 artifacts 上。工件不在（fresh clone）时跳过：results/ 不进 git。
+    把代码钉在 artifacts 上（"哪行引哪张工件"由 `citation_source_for` 唯一裁决）。
+    工件不在（fresh clone）时跳过：results/ 不进 git。
     """
+    rows = [(key, cited, citation_source_for(*key)) for key, cited in GATE_CITATIONS.items()]
     missing = [
-        c for c in {ctx for (_, _, ctx) in GATE_CITATIONS} if not _artifact_for_ctx(c).exists()
+        key for key, _, src in rows if src is None or not (RESULTS / src["artifact"]).exists()
     ]
     if missing:
-        pytest.skip("EXP-p1-04 的工件不在本机（results/ 是 gitignored）：缺 ctx=%s" % missing)
-    for (bit_width, group_size, ctx), cited in GATE_CITATIONS.items():
-        artifact = json.loads(_artifact_for_ctx(ctx).read_text(encoding="utf-8"))
-        arm = artifact["arms"]["%s_attn_experts_g%d" % (bit_width, group_size)]
+        pytest.skip("引用工件不在本机（results/ 是 gitignored）：缺 %s" % missing)
+    for (bit_width, group_size, ctx), cited, src in rows:
+        artifact = json.loads((RESULTS / src["artifact"]).read_text(encoding="utf-8"))
+        arm = artifact["arms"][src["arm"]]
         kl_mean = arm["aggregate"]["kl_mean"]
         assert abs(kl_mean - cited["kl"]) < 5e-7, "%s@%d 引用 kl %r != 实测 %r" % (
             bit_width,
@@ -492,11 +497,14 @@ def test_artifact_derives_the_same_verdict_as_the_runner():
 
     checked = 0
     for (bit_width, group_size, ctx), cited in GATE_CITATIONS.items():
-        artifact_path = _artifact_for_ctx(ctx)
+        src = citation_source_for(bit_width, group_size, ctx)
+        if src is None:
+            continue
+        artifact_path = RESULTS / src["artifact"]
         if not artifact_path.exists():
             continue
         artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-        arm_id = "%s_attn_experts_g%d" % (bit_width, group_size)
+        arm_id = src["arm"]
         if arm_id not in artifact.get("arms", {}):
             continue
         arm = copy.deepcopy(artifact["arms"][arm_id])
@@ -544,7 +552,7 @@ def test_w8a8_at_4096_straddles_the_top1_threshold_across_implementations():
     两个工件都在，才能看出这个翻转是"贴线"而不是"改判"。
     """
     v1 = RESULTS / "EXP-p1-04-prompt-set-gate" / "probe_prompt_set_ctx4096_v1_hf_norm.json"
-    v2 = _artifact_for_ctx(4096)
+    v2 = RESULTS / "EXP-p1-04-prompt-set-gate" / "probe_prompt_set_ctx4096.json"
     if not v1.exists() or not v2.exists():
         pytest.skip("两个版本的工件不齐（results/ 是 gitignored）")
     a1 = json.loads(v1.read_text(encoding="utf-8"))["arms"]["w8a8_attn_experts_g128"]
@@ -553,7 +561,8 @@ def test_w8a8_at_4096_straddles_the_top1_threshold_across_implementations():
     assert t1 < TOP1_MIN <= t2, (t1, t2)
     # 位置级别的差距极小（165 个位置里 3 个）：这正是"贴线"而不是"改判"的证据
     assert abs(t2 - t1) * 165 <= 4, (t1, t2)
-    # 引用表填的是**当前实现**的实测值，不是"更好看"的那个
+    # ★ R3 裁决（2026-10-25）后引用表填的是 10 窗复测的 top-1 —— 与 5 窗的 t2 同值
+    # （都是 0.963636），但判定由 KL 均值（0.0262 > 0.01）翻成 FAIL（de-publish）。
     assert abs(gate_for_cell("w8a8", 128, 4096)["top1"] - t2) < 5e-7
 
 

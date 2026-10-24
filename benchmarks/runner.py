@@ -260,6 +260,8 @@ def build_exp_id(exp_id: str, values: dict[str, Any]) -> str:
 #       ctx=4096: results/EXP-p1-04-prompt-set-gate/probe_prompt_set_ctx4096.json
 #   两张工件都由 `tools/quant_probe.py --prompt-windows 5 --include-ones-control` 产出，
 #   后者是 EXP-p4b-01 记录 §3 的 **P2**（ctx 不同 → prompt 不同 → KL 是**新测量**）。
+#   ★ 唯一例外是 `w8a8@4096`（R3 裁决改引 10 窗复测件，见该行注释与
+#     `GATE_CITATION_SOURCES`）—— "哪行引用哪张工件" 的真值在 sources 表，别处不许复制。
 #   key = (bit_width, group_size, ctx)；targets 恒为 ("attention", "experts")（与 p1-04 逐字一致）。
 #   换任何一项（g=64、ctx=2048、加 router…）就**没有**门实测 → runner 直接拒绝。
 #
@@ -289,13 +291,46 @@ GATE_CITATIONS: dict[tuple[str, int, int], dict[str, Any]] = {
     #   所以这一格的判定**不可分辨**，见 EXP-p1-04 记录 §v2 与 EXP-p4b-01 §3 的警示；
     #   表里填的是"当前实现"的实测值（规则：引用必须与跑的实现一致），不是"更好的那个"。
     ("w8a16", 128, 4096): {"kl": 0.000842, "top1": 0.975758, "rmsnorm": "fused"},
-    ("w8a8", 128, 4096): {"kl": 0.004259, "top1": 0.963636, "rmsnorm": "fused"},
-    # ★ R3 复测警示（2026-10-25，`results/EXP-p1-04-r3-10win-ctx4096.json`）：10 窗口下
-    #   本行配置的 KL 均值 **0.0262 > 0.01**（重尾 sd 0.066）⇒ 上面 5 窗的 PASS **不稳健**，
-    #   判定随窗口数翻转。canonical 口径（5 窗协议）不变 ⇒ 本行仍 PASS；是否按 10 窗
-    #   降级（撤销 8.8232 ms 的发布资格）是**用户级决定**，见 ISSUES 收尾轮记录。
+    ("w8a8", 128, 4096): {"kl": 0.026159, "top1": 0.963636, "rmsnorm": "fused"},
+    # ★★ R3 裁决（2026-10-25，用户批准 de-publish）：本行**不再引用 5 窗规范工件**，
+    #   改引 10 窗复测 `results/EXP-p1-04-r3-10win-ctx4096.json`（臂
+    #   `w8a8_attn_experts_g128_r3`）。10 窗 KL 均值 0.0262 > 0.01（重尾：w7 单窗 0.2247、
+    #   sd 0.066、spread 71.7×），top-1 均值 0.963636 与 5 窗同值 —— 推导判定 **FAIL**，
+    #   此前发布的 8.8232 ms（cudagraph）**撤销**：该格照跑照测，但 latency 只进
+    #   `_measurement.gate_failed_evidence`（硬规则 2/8；与 w4a16 行同一语义）。
+    #   5 窗的 0.004259 不是"错值" —— 它是"5 窗 PASS 不稳健"的证据本身，留档于
+    #   EXP-p1-04 记录 v3 小节与 `test_w8a8_at_4096_straddles_…`（v1/v2/v3 三版工件都在）。
     ("w4a16", 128, 4096): {"kl": 0.059331, "top1": 0.866667, "rmsnorm": "fused"},
 }
+
+# ★ 每个门行**引用哪张工件的哪个臂**——唯一真值，测试与 payload 的引用都从这里取。
+#   缺省行按 ctx 推 EXP-p1-04 的 5 窗规范工件；例外行在这里显式覆盖（目前只有
+#   w8a8@4096，R3 裁决改引 10 窗复测件）。返回 None = 该 ctx 没有已知的门工件
+#   （correctness_for_cell 的最后一道闸会 FAIL，不得静默套用别的 ctx 的工件）。
+GATE_CITATION_SOURCES: dict[tuple[str, int, int], dict[str, str]] = {
+    ("w8a8", 128, 4096): {
+        "artifact": "EXP-p1-04-r3-10win-ctx4096.json",
+        "arm": "w8a8_attn_experts_g128_r3",
+    },
+}
+
+
+def citation_source_for(bit_width: str, group_size: int, ctx: int) -> dict[str, str] | None:
+    """门行的引用来源：{"artifact": results/ 下的相对路径, "arm": 工件里的臂 id}。"""
+    override = GATE_CITATION_SOURCES.get((str(bit_width), int(group_size), int(ctx)))
+    if override is not None:
+        return dict(override)
+    if int(ctx) == 1024:
+        name = "probe_prompt_set.json"
+    elif int(ctx) == 4096:
+        name = "probe_prompt_set_ctx4096.json"
+    else:
+        return None
+    return {
+        "artifact": "EXP-p1-04-prompt-set-gate/" + name,
+        "arm": "%s_attn_experts_g%d" % (bit_width, group_size),
+    }
+
 
 # docs/reference/METRICS.md §1 的门槛（**门不动**；本表只引用实测，不改门槛）
 KL_MAX_W8 = 0.01
@@ -512,11 +547,9 @@ def correctness_for_cell(cfg: dict[str, Any], *, consistency_passed: bool) -> di
         )
     cited_pass = cite["gate"] == "PASS"
     ctx = int(cfg.get("ctx") or 0)
-    artifact = {
-        1024: "EXP-p1-04-prompt-set-gate/probe_prompt_set.json",
-        4096: "EXP-p1-04-prompt-set-gate/probe_prompt_set_ctx4096.json",
-    }.get(ctx)
-    if artifact is None:
+    # 引用哪张工件由 `citation_source_for` 唯一裁决（w8a8@4096 自 R3 裁决起引 10 窗复测件）。
+    src = citation_source_for(bit_width, int(cfg.get("group_size") or 0), ctx)
+    if src is None:
         # 与 cite is None 同款的最后一道闸：该 ctx 没有门实测引用文件，
         # 不得静默套用 1024 的工件（2026-10-10 评审发现的映射缺口）。
         return dict(
@@ -524,6 +557,7 @@ def correctness_for_cell(cfg: dict[str, Any], *, consistency_passed: bool) -> di
             gate="FAIL",
             thresholds={"note": "ctx=%d 没有 EXP-p1-04 的门实测引用文件 —— 不得报性能数字。" % ctx},
         )
+    artifact = src["artifact"]
     return dict(
         base,
         kl=cite["kl"],
@@ -534,11 +568,11 @@ def correctness_for_cell(cfg: dict[str, Any], *, consistency_passed: bool) -> di
             "kl_max_w4": KL_MAX_W4,
             "top1_min": TOP1_MIN,
             "note": (
-                "★ kl / top-1 都是**引用** EXP-p1-04（5 窗口真实 prompt 集、ctx=%d、同 scheme/"
-                "同 group_size/targets=attention+experts）的实测**均值**，不是本格实测；"
+                "★ kl / top-1 都是**引用**的实测**均值**（ctx=%d、同 scheme/同 group_size/"
+                "targets=attention+experts；工件 results/%s），不是本格实测；"
                 "引用值 kl=%.6f、top-1=%.6f。门是合取（METRICS §1）：KL < %.2f 且 top-1 ≥ %.2f"
                 " → %s。本格只测性能。"
-                % (ctx, cite["kl"], cite["top1"], KL_MAX_W8, TOP1_MIN, cite["gate"])
+                % (ctx, artifact, cite["kl"], cite["top1"], KL_MAX_W8, TOP1_MIN, cite["gate"])
             ),
             "source": artifact,
         },
