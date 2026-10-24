@@ -302,7 +302,7 @@ the V100 box, the Mac) diverge, so:
 | `experiments/<EXP-ID>.md` | the authoritative record of each experiment (status, results, applicability) |
 | `docs/reference/NCU_EVIDENCE.md` | kernel-level evidence; why ncu counters are blocked on this host and what replaced them |
 | `docs/reference/NCU_PLAN.md` | **换机才能做**的 ncu 补测清单：要测哪些 kernel、抓哪些 counter、验收判据（当前 blocked） |
-| `docs/handoff/HANDOFF_2026-10-24.md` | **当前交接**：下一次开机的执行手册（补 F2 证据 → 23 格刷新 → 翻默认 → 同步数字）、S2 算子的预注册选择规则、预算与中止条件 |
+| `docs/handoff/HANDOFF_2026-10-24.md` | **当前交接（自足版，可从零接管）**：§0 十分钟上下文 → §3 下一次开机执行手册（补 F2 证据 → 23 格刷新 → 翻默认 → 同步数字）→ §5 S2 的预注册选择规则 → §8 接手自检清单 |
 | `docs/handoff/HANDOFF_2026-10-23.md` | 此前一轮：W4 负结果、F2 定位与合规 A/B、刷新轮作用域（历史上下文） |
 | `docs/handoff/ISSUES_2026-10-23.md` | 遗留问题清单 + **2026-10-24 复盘**（N1–N4 四条新发现与处置、剩余项按 S1/S2/S3 归属） |
 | `docs/handoff/ADOPTION_SYNC_2026-10-24.md` | 采纳后的数字同步映射 + 翻默认的连锁（测试/refusal/`packed_qkv_effective`） |
