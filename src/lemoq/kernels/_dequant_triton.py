@@ -163,6 +163,7 @@ def dequant_gemm_fused(
     symmetric: bool = True,
     out_dtype: Any = None,
     config: dict[str, Any] | None = None,
+    mxfp4: bool = False,
 ) -> Any:
     """`y = x @ dequant(qweight, scale, zero).T`，反量化在 kernel 内完成。
 
@@ -225,6 +226,22 @@ def dequant_gemm_fused(
             "%d-bit 的 qweight 应是 %s，得到 %s（打包格式见 lemoq.quant.pack）"
             % (bits, expected_q_dtype, qweight.dtype)
         )
+    # MXFP4（EXP-p3-02）：E2M1 码（无符号 0..15，自带符号位）+ E8M0 尺度字节（uint8）。
+    # 语义契约 = lemoq/quant/mxfp4.py（主机侧量化器）；侦察依据见
+    # docs/reference/QUANT_FORMAT_RECON_2026-10-25（向量路径，无 tl.dot）。
+    if mxfp4:
+        if bits != 4:
+            raise ValueError("mxfp4 只支持 4-bit E2M1，得到 bits=%r" % bits)
+        if int(group_size) != 32:
+            raise ValueError(
+                "mxfp4 的块大小固定 32（OCP MX），得到 group_size=%d" % int(group_size)
+            )
+        if scale.dtype != torch.uint8:
+            raise ValueError("mxfp4 的 scale 必须是 uint8 E8M0 字节，得到 %s" % scale.dtype)
+        if not symmetric or zero is not None:
+            raise ValueError(
+                "mxfp4 无 zero-point（E2M1 自带符号位）：symmetric 必须为 True 且 zero=None"
+            )
     if x.dtype not in (torch.float16, torch.float32):
         raise NotImplementedError("x 只支持 fp16/fp32，得到 %s" % x.dtype)
     if out_dtype is None:
@@ -257,6 +274,7 @@ def dequant_gemm_fused(
         GROUP_SIZE=int(group_size),
         BITS=bits,
         SYMMETRIC=bool(symmetric),
+        MXFP4=bool(mxfp4),
         OUT_FP16=bool(out_dtype == torch.float16),
         BLOCK_N=int(cfg["BLOCK_N"]),
         BLOCK_K=int(cfg["BLOCK_K"]),
@@ -297,6 +315,7 @@ if _HAS_TRITON:
         GROUP_SIZE: tl.constexpr,
         BITS: tl.constexpr,
         SYMMETRIC: tl.constexpr,
+        MXFP4: tl.constexpr,
         OUT_FP16: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,
@@ -334,11 +353,28 @@ if _HAS_TRITON:
                         mask=mask_n[:, None] & mask_b[None, :],
                         other=0,
                     ).to(tl.int32)
-                    # int4 符号扩展：`((x & 0xF) ^ 8) - 8`（0..15 -> -8..7），纯算术
-                    lo = ((packed & 0xF) ^ 8) - 8
-                    hi = (((packed >> 4) & 0xF) ^ 8) - 8
-                    # join + reshape 按 (byte, which) 展平成 k 序：k = 2j + which
-                    codes = tl.reshape(tl.join(lo, hi), (BLOCK_N, BLOCK_K)).to(tl.float32)
+                    if MXFP4:
+                        # E2M1 码无符号（bit3=符号、bit2..0=幅值），不做符号扩展。
+                        # 幅值 = e==0 ? 0.5·m : 2^(e−1)·(1+0.5·m) —— 全部是二次幂精确值，
+                        # 与主机侧 LUT（mxfp4._E2M1_MAG）逐位一致（K1 的前提）。
+                        lo = packed & 0xF
+                        hi = (packed >> 4) & 0xF
+                        ci = tl.reshape(tl.join(lo, hi), (BLOCK_N, BLOCK_K))
+                        e = (ci >> 1) & 3
+                        m_bit = (ci & 1).to(tl.float32)
+                        mag = tl.where(
+                            e == 0,
+                            0.5 * m_bit,
+                            tl.exp2((e - 1).to(tl.float32)) * (1.0 + 0.5 * m_bit),
+                        )
+                        sg = ((ci >> 3) * (-2.0)) + 1.0  # 0→+1，1→−1
+                        codes = sg * mag
+                    else:
+                        # int4 符号扩展：`((x & 0xF) ^ 8) - 8`（0..15 -> -8..7），纯算术
+                        lo = ((packed & 0xF) ^ 8) - 8
+                        hi = (((packed >> 4) & 0xF) ^ 8) - 8
+                        # join + reshape 按 (byte, which) 展平成 k 序：k = 2j + which
+                        codes = tl.reshape(tl.join(lo, hi), (BLOCK_N, BLOCK_K)).to(tl.float32)
 
                 # ★ scale 一次只装**每组的那个数**（(BLOCK_N, n_in_block)），再广播到
                 #   (BLOCK_N, BLOCK_K)。老写法 `g = ks // GROUP_SIZE` 逐元素 gather：
@@ -357,6 +393,8 @@ if _HAS_TRITON:
                         mask=gmask,
                         other=0.0,
                     ).to(tl.float32)
+                    if MXFP4:
+                        sc_t = tl.exp2(sc_t - 127.0)  # E8M0 字节 → 2^(X−127)
                     sc = tl.reshape(
                         tl.broadcast_to(sc_t[:, :, None], (BLOCK_N, n_in_block, GROUP_SIZE)),
                         (BLOCK_N, BLOCK_K),
