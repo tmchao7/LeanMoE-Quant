@@ -138,7 +138,7 @@ F1（三项已测未采纳，+8.39%/+3.0%/+1.33%）与 F2（packed-QKV，−4.81
 | R4 | PPL 扩到 WikiText2 全集切段（标准 ≈140×2048；现 8k token/5 窗）——`tools/quant_ppl` 加全集模式 | GPTQ/AWQ 全集口径；r≈0.79 代理有效性 | GPU，低 | quant_ppl 扩展 |
 | R5 | lm-eval 零样本套件：ARC-e/c、HellaSwag、PIQA、WinoGrande（经 lm-evaluation-harness）+ MMLU 扩量 | GPTQ/AWQ/SmoothQuant 标配 3–7 任务 | GPU，中 | A4 扩展 |
 | R6 | graph 臂逐步 p99：单步 replay 计时或块内逐事件切分，让 p99 跨臂可比（改动涉 METRICS 口径） | vLLM P50+P99 惯例；MLPerf | GPU，中 | METRICS §2 残留 |
-| R7 | 一次性外部锚定：同机跑 vLLM（bench latency 或其 fused_moe kernel 对照）；**先查 OLMoE 支持与安装成本**；产出进记录、不进 `GATE_CITATIONS` | KernelBench-Verified 自参照警示 | GPU，中 | 新增 |
+| R7 | 一次性外部锚定：同机跑 vLLM（bench latency 或其 fused_moe kernel 对照）。**侦察已完成 2026-10-24**（[R7_RECON](R7_RECON_2026-10-24.md)：vLLM 0.17.x 路线可行、llama.cpp 需自转 0924 base gguf；装机需用户批准、排 S 系列之后） | KernelBench-Verified 自参照警示 | GPU，中（侦察已毕） | 新增 |
 | R8 | 逐层敏感度归因：权重域 MSE（已有）→ 校准集 Hessian trace（HAWQ 式），解释 W4 为何败、指导 >25% 混合位宽退路 | HAWQ | CPU 部分 + GPU | C2/P3-3 |
 | R9 | CI 绿徽章（A5）+ parity 合取补齐（A6）。**A5 ✅ 2026-10-24 已落地**（`804326a` workflow；首跑暴露两条平台差异，修复后**绿**：ubuntu 3.12 / CPU torch 全套四门，见 ISSUES）；A6 待上机 | — | A5 Mac 低（已完成）；A6 GPU 半边 | 已列（ROADMAP Tier A） |
 | R10 | torch.compile vs 手工融合最小对照（norm/反量化场景） | TRT-LLM piecewise CUDA graphs | GPU，中 | C1 |

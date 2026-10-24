@@ -301,6 +301,10 @@ kernel 尾多一条 load + add，**零额外字节**（省掉一次读 + 一次�
   必须用"逐 token 序列完全一致"作为硬门（`tokens_equal`），而不是只看 KL；
 - 建议先写一个**离线单元测试**：给定 `filled_len` 与 `pos`，断言 cache 的
   `[0:filled_len+1]` 内容与 HF `StaticCache.update()` 逐位相同；
+  ✅ **2026-10-24 已就绪**：`src/lemoq/kernels/kv_write.py`（设备无关参照
+  `write_kv_slot`，含 lazy-init/同 buffer 语义）+ `tests/test_kv_direct_write.py`
+  （逐步流逐位对照、越界哨兵、判别力自检 ×2；**F4 kernel 落地后在 GPU 上原样重跑
+  即为它的 K 门**）；
 - A/B + 金丝雀 + 归档 + 记录。
 
 #### 风险

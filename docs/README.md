@@ -12,6 +12,7 @@
 | [ADOPTION_SYNC_2026-10-24.md](handoff/ADOPTION_SYNC_2026-10-24.md) | **刷新后数字同步映射**：每个会变的数字 → 格 id + 取值表达式 + 现用值；含"不随刷新变化"清单与**翻默认的连锁**（测试 / refusal / `packed_qkv_effective`） | 做采纳轮的人 |
 | [ISSUES_2026-10-23.md](handoff/ISSUES_2026-10-23.md) | **关机后本地可解决的问题清单**（P0 采纳轮 / P1 协议 / P2 文档 / P3 需 GPU）+ **2026-10-24 复盘**（N1–N4 与处置、剩余项按 S1/S2/S3 归属） | Mac 上接手的人 |
 | [MATURITY_REVIEW_2026-10-24.md](handoff/MATURITY_REVIEW_2026-10-24.md) | **外部标准对照的完善度评估**：量化协议 / 融合方法学 / 测量纪律 vs GPTQ·AWQ·KernelBench·MLPerf·torch.utils.benchmark 等公开口径（领先/持平/落后逐项判定）+ 差距清单 R1–R10（映射到既有 S/A/B/C 编号） | 后续开发 agent；想知道"离外部标准还差什么"的人 |
+| [R7_RECON_2026-10-24.md](handoff/R7_RECON_2026-10-24.md) | **R7 外部锚定侦察**：vLLM（推荐，0.17.x / cu128 / bench latency 两臂跑法）与 llama.cpp（需自转 0924 base gguf）在 5090 上的可行性、成本、口径警告与决策请求 | 决定要不要做 R7 的人；获批后上机执行的人 |
 | [HANDOFF_2026-10-23.md](handoff/HANDOFF_2026-10-23.md) | 此前一轮：W4 负结果、F2 定位与合规 A/B、刷新轮作用域 | 查此前状态的人 |
 | [HANDOFF_2026-10-10.md](handoff/HANDOFF_2026-10-10.md) | 更早的实验结论与历史交接 | 查更早状态的人 |
 

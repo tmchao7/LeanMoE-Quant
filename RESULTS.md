@@ -113,7 +113,7 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | --- | --- |
 | 自研 kernel 族（全部过 K1 parity 门 1e-3） | **4**：grouped MoE GEMV（fp16 + 8/4-bit）、dense 融合反量化 GEMM、split-KV decode attention、融合 RMSNorm |
 | Python（不含虚拟环境） | **35,400 行 / 103 文件**（`src` + `tools` + `benchmarks` + `tests` + `scripts`，不含 `__pycache__`；2026-10-23 实测） |
-| 测试 | **42 个 `test_*.py`**；Mac CPU **694 passed / 0 failed / 33 deselected**（MATURITY_REVIEW 轮实测；deselected = `-m "not gpu"` 主动排除）；GPU 标记用例单独跑（交接轮 31 passed / 1 skipped）；同一套四门由 GitHub Actions 持续验证（A5） |
+| 测试 | **43 个 `test_*.py`**；Mac CPU **700 passed / 0 failed / 33 deselected**（F4 K 门轮实测；deselected = `-m "not gpu"` 主动排除）；GPU 标记用例单独跑（交接轮 31 passed / 1 skipped）；同一套四门由 GitHub Actions 持续验证（A5） |
 | 实验矩阵 | 21 条声明 / **64 格展开**（`benchmarks.harness.expand(arch=sm_120)` 实算）；**16 条已执行**；Mac 树 `EXP-*__*/result.json` **59 份（48 done / 10 planned / 1 blocked——p0-03 by-design）**，GPU 盘另有 p2j 归档与历史工件；操作性验收以 `DRY=1 F2=1` 清单 = 23 格为准（2026-10-25 对账，ISSUES N5） |
 | 度量纪律 | 实测带宽而非规格值；KL/top-1 门先于性能；schema 强制"门失败 ⇒ latency 为 null"；首尾同格金丝雀；同租户记录不 kill；覆盖前先归档 |
 
