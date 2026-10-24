@@ -145,4 +145,5 @@
 | [`RESULTS.md`](../RESULTS.md) | **测到了什么**（每个数字带出处） | 每次上机收尾 |
 | [`apply/PORTFOLIO.md`](apply/PORTFOLIO.md) | **怎么讲**（简历/面试） | 每次有新实测 |
 | 本文 ROADMAP | **做得怎么样、下一步做什么** | 每次冲刺收尾勾状态 |
+| [`handoff/MATURITY_REVIEW_2026-10-24.md`](handoff/MATURITY_REVIEW_2026-10-24.md) | **对照外部公开标准做得怎么样**（§1.4 是内部口径；含差距清单 R1–R10） | 有新外部基准可对照、或 R 项关闭时 |
 | `handoff/HANDOFF_*.md` | **现在手上有什么** | 每次冲刺 |
