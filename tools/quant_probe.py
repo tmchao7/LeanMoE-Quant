@@ -423,6 +423,35 @@ def build_arms(
                 "layers": None,
             },
         )
+    # ★ F5（EXP-p1-06）：lm_head 也量化（w8a16 g128）。`lmhead_only` 是**隔离新表面**
+    #   的门臂（只量 lm_head，其余 fp16 —— 一次一变量，LMHEAD_GATE_CITATIONS 的数值
+    #   来源）；`full` 是组合生产配置（targets=attention+experts+lm_head），作为采纳
+    #   证据进记录、不进门表。两者都必须 `keep_lm_head_fp16=False` 才会真的替换
+    #   lm_head（否则它只进 skipped —— 行为已有 tests/test_quant_linear.py 钉住）。
+    add(
+        "f5_lmhead",
+        {
+            "id": "w8a16_lmhead_only_g128",
+            "kind": "rtn",
+            "scheme": "w8a16",
+            "group_size": 128,
+            "targets": ["lm_head"],
+            "layers": None,
+            "keep_lm_head_fp16": False,
+        },
+    )
+    add(
+        "f5_lmhead",
+        {
+            "id": "w8a16_full_lmhead_g128",
+            "kind": "rtn",
+            "scheme": "w8a16",
+            "group_size": 128,
+            "targets": ["attention", "experts", "lm_head"],
+            "layers": None,
+            "keep_lm_head_fp16": False,
+        },
+    )
     add("noop", {"id": "noop_a", "kind": "noop", "targets": [], "layers": None})
     add("noop", {"id": "noop_b", "kind": "noop", "targets": [], "layers": None})
     add("noop", {"id": "noop_final", "kind": "noop", "targets": [], "layers": None})
@@ -1122,7 +1151,12 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 if arm["kind"] == "rtn":
                     spec = SchemeSpec.from_flags(
-                        arm["scheme"], arm["group_size"], targets=tuple(arm["targets"])
+                        arm["scheme"],
+                        arm["group_size"],
+                        targets=tuple(arm["targets"]),
+                        # ★ F5：臂要量 lm_head 就必须显式关掉这个保护（TARGET_RULES
+                        #   第 0 条已把 lm_head 归类；缺省 True 时它只会进 skipped）。
+                        keep_lm_head_fp16=bool(arm.get("keep_lm_head_fp16", True)),
                     )
                     _, qreport = (
                         quantize_model(

@@ -68,17 +68,12 @@ def test_blocked_and_failed_results_record_effective_fusion_switches(monkeypatch
     from benchmarks.cudagraph import blocked_result, failed_result
     from lemoq.kernels import fusion_switches as fs
 
-    switches = (
-        "LEMOQ_FUSED_ROPE",
-        "LEMOQ_FUSED_ROUTE",
-        "LEMOQ_SKIP_MASK_FILL",
-        "LEMOQ_PACKED_QKV",
-        "LEMOQ_KV_DIRECT_WRITE",
-    )
-    for key in switches:
-        monkeypatch.delenv(key, raising=False)
+    # ★ 键集从 `ENV_VARS` 派生（不是手抄开关名）：加第 N 个开关时这条测试不用改，
+    #   与"断言对着 FUSION_DEFAULTS 比"是同一个意图（2026-10-25 加 lm_head_w8 时验证）。
+    for env in fs.ENV_VARS.values():
+        monkeypatch.delenv(env, raising=False)
     cfg = {"ctx": 1024, "batch": 1, "max_new_tokens": 32, "warmup": 5, "timed": 20}
-    keys = ("fused_rope", "fused_route", "skip_mask_fill", "packed_qkv", "kv_direct_write")
+    keys = tuple(fs.ENV_VARS)
 
     default = blocked_result(
         exp_id="EXP-x__ctx=1024",

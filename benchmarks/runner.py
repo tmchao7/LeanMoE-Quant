@@ -332,6 +332,32 @@ def citation_source_for(bit_width: str, group_size: int, ctx: int) -> dict[str, 
     }
 
 
+# ★ F5（EXP-p1-06）：`lm_head` 也量化（w8a16 g128、keep_lm_head_fp16=False）时的**第二张门表**。
+#   `GATE_CITATIONS` 的 key 不含 targets 维度 —— targets 变了就是新配置 = 新实验 = 新工件
+#   （本文件顶部的注释），所以不能往原表里塞。这张表按 ctx 取行；**接线时为空**
+#   （fail-closed：开关开 + 无门实测 ⇒ 加载模型前拒绝）。数值只能来自
+#   `results/EXP-p1-06-lm-head-w8/probe_f5_lmhead{,_ctx4096}.json` 的
+#   `w8a16_lmhead_only_g128` 臂 aggregate（新测量抄入 + 钉死测试，禁止手写）——
+#   门臂是"只量化 lm_head"的隔离测量（一次一变量；组合臂 `w8a16_full_lmhead_g128`
+#   作为采纳证据进记录，不进门表）。
+LMHEAD_GATE_CITATIONS: dict[int, dict[str, Any]] = {}
+
+
+def lm_head_w8_effective(bit_width: str, qreport: Any = None) -> bool:
+    """F5 开关的**生效**判定：开关开 + 该格是量化格（fp16 没有量化语义）。
+
+    payload 侧传 `qreport` 时是三层确认（`qreport.replaced["lm_head"] > 0` =
+    替换真的发生了）；拒绝/门检查路径没有 qreport，退回两层（cfg 级）。
+    """
+    from lemoq.kernels.fusion_switches import fusion_enabled  # noqa: PLC0415
+
+    if not fusion_enabled("lm_head_w8") or str(bit_width) == "fp16":
+        return False
+    if qreport is None:
+        return True
+    return int(qreport.replaced.get("lm_head", 0) or 0) > 0
+
+
 # docs/reference/METRICS.md §1 的门槛（**门不动**；本表只引用实测，不改门槛）
 KL_MAX_W8 = 0.01
 KL_MAX_W4 = 0.05
@@ -361,6 +387,8 @@ def quant_spec_for_cfg(cfg: dict[str, Any]) -> Any:
     targets 必须显式写 `("attention", "experts")`：`SchemeSpec.from_flags` 的默认值
     多一个 `router`，而 EXP-p1-04 的门是**不含 router** 测的 —— 用默认值就等于
     换了一个没过门的配置（p1-01 实测：只量 router 就能让 W8 的 KL 动 14-74%）。
+    ★ 唯一例外是 F5 的 `LEMOQ_LMHEAD_W8` 开关（默认关）：加 `lm_head` 是**新量化
+    表面**，门走独立的 `LMHEAD_GATE_CITATIONS`（空 ⇒ 主流程拒绝），见其行注。
 
     `dequant` 是 `EXP-p2-01` 的轴。★ 历史兼容：老格子（p0/p4b 的量化格）没有传
     `--dequant`，落盘的是 `"none"`，而它们实际跑的**就是** separate 臂。`"none"`
@@ -374,10 +402,15 @@ def quant_spec_for_cfg(cfg: dict[str, Any]) -> Any:
     dequant = str(cfg.get("dequant") or "separate")
     if dequant == "none":
         dequant = "separate"
+    # ★ F5：`LEMOQ_LMHEAD_W8`（默认关）把 lm_head 加进量化 targets。这是**新量化表面**
+    #   —— 门在 `LMHEAD_GATE_CITATIONS`（空表 ⇒ 主流程加载前拒绝），不与上面的
+    #   attention+experts 门混用；生效状态记进 payload 的 `lm_head_w8_effective`。
+    lmhead = lm_head_w8_effective(str(bit_width))
     return SchemeSpec.from_flags(
         str(bit_width),
         int(cfg.get("group_size") or 128),
-        targets=("attention", "experts"),
+        targets=("attention", "experts", "lm_head") if lmhead else ("attention", "experts"),
+        keep_lm_head_fp16=not lmhead,
         dequant=dequant,
     )
 
@@ -558,11 +591,29 @@ def correctness_for_cell(cfg: dict[str, Any], *, consistency_passed: bool) -> di
             thresholds={"note": "ctx=%d 没有 EXP-p1-04 的门实测引用文件 —— 不得报性能数字。" % ctx},
         )
     artifact = src["artifact"]
+    # ★ F5：lm_head 是第二个量化表面，门**合取**（缺门实测 = FAIL，最后一道闸）。
+    lmhead_on = lm_head_w8_effective(bit_width)
+    lmhead_gate = LMHEAD_GATE_CITATIONS.get(ctx) if lmhead_on else None
+    if lmhead_on and lmhead_gate is None:
+        return dict(
+            base,
+            gate="FAIL",
+            thresholds={
+                "note": (
+                    "lm_head 量化（LEMOQ_LMHEAD_W8）在 ctx=%d 没有 EXP-p1-06 的门实测"
+                    " —— 不得报性能数字。" % ctx
+                ),
+                "source": artifact,
+            },
+        )
+    lmhead_pass = lmhead_gate is None or (
+        gate_from_metrics("w8a16", lmhead_gate["kl"], lmhead_gate["top1"]) == "PASS"
+    )
     return dict(
         base,
         kl=cite["kl"],
         top1_agreement=cite["top1"],
-        gate="PASS" if (cited_pass and consistency_passed) else "FAIL",
+        gate="PASS" if (cited_pass and lmhead_pass and consistency_passed) else "FAIL",
         thresholds={
             "kl_max_w8": KL_MAX_W8,
             "kl_max_w4": KL_MAX_W4,
@@ -575,6 +626,20 @@ def correctness_for_cell(cfg: dict[str, Any], *, consistency_passed: bool) -> di
                 % (ctx, artifact, cite["kl"], cite["top1"], KL_MAX_W8, TOP1_MIN, cite["gate"])
             ),
             "source": artifact,
+            # ★ F5 生效时第二个引用面（kl/top1 仍指 attention+experts 那张；lm_head 的
+            #   引用值在这里，判定已并入上面的合取）。
+            **(
+                {
+                    "lm_head_gate": {
+                        "kl": lmhead_gate["kl"],
+                        "top1": lmhead_gate["top1"],
+                        "gate": gate_from_metrics("w8a16", lmhead_gate["kl"], lmhead_gate["top1"]),
+                        "source": lmhead_gate.get("source"),
+                    }
+                }
+                if lmhead_on
+                else {}
+            ),
         },
     )
 
@@ -1434,6 +1499,11 @@ def run_baseline(
         # （请求状态记在 payload 的 `packed_qkv`，见 `fusion_payload_fields()`）。
         "packed_qkv_effective": False,
         "packed_qkv_requested": bool(packed_qkv_requested),
+        # ★ F5 生效 = 开关开 + 量化格 + qreport 里 lm_head 真被替换。lm_head 量化
+        #   不依赖图，eager 量化格同样适用（与 packed_qkv 的"eager 恒 False"不同）。
+        "lm_head_w8_effective": lm_head_w8_effective(
+            str(qreport.spec.get("scheme", "fp16")) if qreport is not None else "fp16", qreport
+        ),
         "breakdown": breakdown,
         "moe_block": moe_block_bench,
         "ttft": ttft,
@@ -1730,6 +1800,8 @@ def build_payload(
         #   **请求**（与另外三个开关对称）；这里补**生效**。采纳后 21/23 个图格是
         #   "请求 True / 生效 False"——只记一个字段会把 no-op 读成"已经用上了"。
         "packed_qkv_effective": bool(res.get("packed_qkv_effective")),
+        # ★ F5 的生效状态（请求记在 fusion_payload_fields 的 lm_head_w8；这里记实际替换）
+        "lm_head_w8_effective": bool(res.get("lm_head_w8_effective")),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
         "batch": cfg.get("batch"),
@@ -1987,6 +2059,8 @@ def build_cudagraph_payload(
         #   **请求**（与另外三个开关对称）；这里补**生效**。采纳后 21/23 个图格是
         #   "请求 True / 生效 False"——只记一个字段会把 no-op 读成"已经用上了"。
         "packed_qkv_effective": bool(res.get("packed_qkv_effective")),
+        # ★ F5 的生效状态（请求记在 fusion_payload_fields 的 lm_head_w8；这里记实际替换）
+        "lm_head_w8_effective": bool(res.get("lm_head_w8_effective")),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
         "batch": cfg.get("batch"),
@@ -2388,6 +2462,16 @@ def main(argv: list[str] | None = None) -> int:
                 "runner 拒绝: %s / group=%d / ctx=%d 没有 EXP-p1-04 的门实测，"
                 "不许在没有正确性门的配置上跑性能（硬规则 2）。先补测精度。"
                 % (args.bit_width, args.group_size, args.ctx),
+                file=sys.stderr,
+            )
+            return 2
+        # ★ F5：lm_head 是**第二个量化表面**，有自己的门表（EXP-p1-06）。表空 =
+        #   还没测过 ⇒ 拒绝；这与"w8a16 g128 的门 PASS"无关 —— 那张门不含 lm_head。
+        if lm_head_w8_effective(args.bit_width) and args.ctx not in LMHEAD_GATE_CITATIONS:
+            print(
+                "runner 拒绝: lm_head 也量化（LEMOQ_LMHEAD_W8）时 ctx=%d 没有 EXP-p1-06 的"
+                "lm_head 门实测 —— 硬规则 2 对新量化表面同样适用。先跑 F5 的门"
+                "（tools/quant_probe.py --arms f5_lmhead）。" % args.ctx,
                 file=sys.stderr,
             )
             return 2

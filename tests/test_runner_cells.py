@@ -345,6 +345,71 @@ def test_quantized_config_without_gate_citation_is_refused(capsys):
     assert "门实测" in out.err
 
 
+def test_quant_spec_includes_lm_head_only_when_switch_on(monkeypatch):
+    """F5：`LEMOQ_LMHEAD_W8=1` 才把 lm_head 加进量化 targets（默认关 = 原行为）。"""
+    monkeypatch.delenv("LEMOQ_LMHEAD_W8", raising=False)
+    off = quant_spec_for_cfg({"bit_width": "w8a16", "group_size": 128})
+    assert "lm_head" not in off.targets and off.keep_lm_head_fp16 is True
+    monkeypatch.setenv("LEMOQ_LMHEAD_W8", "1")
+    on = quant_spec_for_cfg({"bit_width": "w8a16", "group_size": 128})
+    assert "lm_head" in on.targets and on.keep_lm_head_fp16 is False
+    # fp16 格没有量化语义，开关无效
+    assert quant_spec_for_cfg({"bit_width": "fp16", "group_size": 128}) is None
+
+
+def test_lm_head_w8_without_gate_measurement_is_refused(capsys, monkeypatch):
+    """F5 fail-closed：开关开但 EXP-p1-06 的门没测（表空）⇒ 加载模型前拒绝 rc=2。
+
+    基础门（EXP-p1-04 的 w8a16 g128）PASS 与它无关 —— lm_head 是**第二个量化表面**，
+    硬规则 2 分别对每个表面成立。
+    """
+    import benchmarks.runner as R
+
+    monkeypatch.setenv("LEMOQ_LMHEAD_W8", "1")
+    assert R.LMHEAD_GATE_CITATIONS == {}
+    rc = runner_main(
+        [
+            "--exp",
+            "EXP-p2-01-dequant-fusion",
+            "--bit-width",
+            "w8a16",
+            "--group-size",
+            "128",
+            "--dequant",
+            "separate",
+            "--rmsnorm",
+            "hf",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "EXP-p1-06" in out.err
+
+
+def test_correctness_conjoins_lm_head_gate_when_effective(monkeypatch):
+    """F5 生效时 correctness 的门 = 基础门 ∧ lm_head 门；缺 lm_head 门 = FAIL（最后一道闸）。"""
+    import benchmarks.runner as R
+
+    cfg = {"bit_width": "w8a16", "group_size": 128, "ctx": 1024}
+    monkeypatch.delenv("LEMOQ_LMHEAD_W8", raising=False)
+    assert R.correctness_for_cell(cfg, consistency_passed=True)["gate"] == "PASS"
+
+    monkeypatch.setenv("LEMOQ_LMHEAD_W8", "1")
+    # 表空 ⇒ FAIL（不得静默当 lm_head 过门）
+    assert R.correctness_for_cell(cfg, consistency_passed=True)["gate"] == "FAIL"
+    # lm_head 门 PASS ⇒ 合取 PASS，且 payload 带第二个引用面
+    monkeypatch.setitem(
+        R.LMHEAD_GATE_CITATIONS, 1024, {"kl": 0.005, "top1": 0.97, "source": "EXP-p1-06/x.json"}
+    )
+    c = R.correctness_for_cell(cfg, consistency_passed=True)
+    assert c["gate"] == "PASS" and c["thresholds"]["lm_head_gate"]["gate"] == "PASS"
+    # lm_head 门 KL 超门 ⇒ 合取 FAIL（合取不许装饰）
+    monkeypatch.setitem(
+        R.LMHEAD_GATE_CITATIONS, 1024, {"kl": 0.02, "top1": 0.97, "source": "EXP-p1-06/x.json"}
+    )
+    assert R.correctness_for_cell(cfg, consistency_passed=True)["gate"] == "FAIL"
+
+
 def test_quantized_cudagraph_is_no_longer_refused_before_loading(capsys, monkeypatch):
     """P3（2026-10-07）：量化 × cudagraph 的"未接线"拒绝已删除。
 

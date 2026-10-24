@@ -1,4 +1,4 @@
-"""The four decode-path candidate switches: one source of truth for defaults.
+"""The decode-path candidate switches: one source of truth for defaults.
 
 `RESULTS.md` only ever publishes numbers for the **default** implementation, so the
 defaults must live in code (not in a shell export) and must be recorded in every
@@ -10,6 +10,8 @@ payload — exactly like `config.rmsnorm` after P2i.
     skip_mask_fill  LEMOQ_SKIP_MASK_FILL     True      mask-fill skip (adopted 2026-10-24)
     packed_qkv      LEMOQ_PACKED_QKV         True      F2 packed q/k/v (adopted 2026-10-24)
     kv_direct_write LEMOQ_KV_DIRECT_WRITE    True      F4 KV direct write (adopted 2026-10-25)
+    lm_head_w8      LEMOQ_LMHEAD_W8          False     F5 lm_head W8 量化（2026-10-25 接线，
+                                                       EXP-p1-06 门实测通过后才翻 True）
 
 2026-10-24: F1+F2 adopted — all four True after the valid refresh round
 (canary 0.30%, 23/23 cells, per-cell host_share ≤ 3.4%). Historical note: adoption
@@ -18,6 +20,12 @@ round (F1: three same-round A/Bs; F2: a compliant A/B), followed by the graph-ce
 refresh. Env vars stay as an explicit override for A/B arms and bisection; the
 payload records the *effective* state, so a flipped default is visible without
 the env.
+
+★ `lm_head_w8` 是第一个**量化表面**开关（其余五个都是 kernel/fusion 候选）：它改的是
+  `quant_spec_for_cfg` 的 targets（加 `lm_head`、`keep_lm_head_fp16=False`），并要求
+  `LMHEAD_GATE_CITATIONS`（benchmarks/runner.py）里有该 ctx 的门实测 —— 没有就在加载
+  模型前拒绝（硬规则 2 对新量化表面同样适用）。生效状态进 payload 的
+  `lm_head_w8_effective`（照 `packed_qkv_effective` 的"请求/生效分开记"）。
 """
 
 from __future__ import annotations
@@ -31,6 +39,7 @@ ENV_VARS: dict[str, str] = {
     "skip_mask_fill": "LEMOQ_SKIP_MASK_FILL",
     "packed_qkv": "LEMOQ_PACKED_QKV",
     "kv_direct_write": "LEMOQ_KV_DIRECT_WRITE",
+    "lm_head_w8": "LEMOQ_LMHEAD_W8",
 }
 
 FUSION_DEFAULTS: dict[str, bool] = {
@@ -39,6 +48,7 @@ FUSION_DEFAULTS: dict[str, bool] = {
     "skip_mask_fill": True,
     "packed_qkv": True,
     "kv_direct_write": True,
+    "lm_head_w8": False,
 }
 
 
