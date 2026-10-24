@@ -98,7 +98,8 @@
 **672 passed / 33 deselected / 40 个测试文件**（2026-10-25 起 **674 passed**：翻默认安全性修复
 新增 replay 门控与 route CPU 回退两条用例，`d02442e`）；MATURITY_REVIEW 轮起
 **694 passed / 42 个测试文件**（+20 = R1 显著性口径的两组测试，`2ccce61`；F4 K 门轮起
-**700 passed / 43 个测试文件**，+6 = KV 直写离线 K 门）；刷新后再按新的
+**700 passed / 43 个测试文件**，+6 = KV 直写离线 K 门；S2 交接轮起 **707 passed / 44**，
++7 = R2 时钟快照解析）；刷新后再按新的
 `results/` 复核 `payload` 计数。★ 2026-10-25 对账：Mac 侧 `EXP-*__*/result.json` 实为 **59 份**
 （48 done / 10 planned / 1 blocked——p0-03 by-design），此前的"101 份（84/13/4）"口径
 无法在 Mac 树上复现（59 格 + 31 份 p2j 归档 + 顶层历史工件另计）；**操作性验收以
@@ -107,7 +108,7 @@
 ## 7. 刷新后重排算子账本（S2 的输入）
 
 用刷新后的 `EXP-p4c-01__bit_width=w8a16_attn=kernel_ctx=1024` 取 `bottleneck.top_kernels`，
-按"HANDOFF_2026-10-24 §5"的预注册规则算 `gap` 与可捕获量，再把
+按预注册规则（现收于 [HANDOFF_2026-10-25.md](HANDOFF_2026-10-25.md) §1，机械执行器 `tools/operator_ledger.py`）算 `gap` 与可捕获量，再把
 `docs/FUSION_OPPORTUNITIES.md` §1 的账本整表换成新值（该文 §1.2 的字节数**不随刷新变**，
 只有实测 ms 与达成率变）。**不要**用旧账本挑选 S2 的算子。
 

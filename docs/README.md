@@ -8,7 +8,7 @@
 
 | 文档 | 是什么 | 给谁 |
 | --- | --- | --- |
-| [HANDOFF_2026-10-24.md](handoff/HANDOFF_2026-10-24.md) | **当前交接（自足版，可从零接管）**：§0 十分钟上下文 / §3 下一次开机的执行手册（补 F2 原始证据 → 23 格刷新 → 翻默认 → 同步数字 → merge）/ §5 S2 的预注册选择规则 / §8 接手自检清单 | 下一个上机的人 / agent |
+| [HANDOFF_2026-10-25.md](handoff/HANDOFF_2026-10-25.md) | **当前交接（自足版，可从零接管）**：§0 采纳轮后上下文（F1+F2 默认开、新 canonical 数字）/ §2 S2=F4 KV 直写的执行手册 / §3 验收红线 / §8 接手自检 | 下一个上机的人 / agent |
 | [ADOPTION_SYNC_2026-10-24.md](handoff/ADOPTION_SYNC_2026-10-24.md) | **刷新后数字同步映射**：每个会变的数字 → 格 id + 取值表达式 + 现用值；含"不随刷新变化"清单与**翻默认的连锁**（测试 / refusal / `packed_qkv_effective`） | 做采纳轮的人 |
 | [ISSUES_2026-10-23.md](handoff/ISSUES_2026-10-23.md) | **关机后本地可解决的问题清单**（P0 采纳轮 / P1 协议 / P2 文档 / P3 需 GPU）+ **2026-10-24 复盘**（N1–N4 与处置、剩余项按 S1/S2/S3 归属） | Mac 上接手的人 |
 | [MATURITY_REVIEW_2026-10-24.md](handoff/MATURITY_REVIEW_2026-10-24.md) | **外部标准对照的完善度评估**：量化协议 / 融合方法学 / 测量纪律 vs GPTQ·AWQ·KernelBench·MLPerf·torch.utils.benchmark 等公开口径（领先/持平/落后逐项判定）+ 差距清单 R1–R10（映射到既有 S/A/B/C 编号） | 后续开发 agent；想知道"离外部标准还差什么"的人 |

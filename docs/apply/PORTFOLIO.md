@@ -102,7 +102,7 @@
 |---|---|---|
 | batch 1→8：step p50 **87.20→86.29 ms 近平坦**，tok/s **11.47→92.71（8.08×）**，canary −3.448% | `results/batch_sweep.json` | ✅ 带"fp16 单臂、同轮"限定 |
 | occupancy 上界：三族 kernel blocks/SM ≤12/≤12/≤6，**上界 100%**（解析值非 ncu） | `results/occupancy.json` | ⚠️ 必须注明"解析上界" |
-| 测试 **700 passed / 33 deselected**（Mac CPU，`-m "not gpu"`，F4 K 门轮在 `opt/packed-qkv`；43 个测试文件） | 本地 pytest + GitHub Actions（A5） | ✅ 写"600+ 单测" |
+| 测试 **707 passed / 33 deselected**（Mac CPU，`-m "not gpu"`，S2 交接轮在 `opt/packed-qkv`；44 个测试文件） | 本地 pytest + GitHub Actions（A5） | ✅ 写"600+ 单测" |
 | 自研 Triton kernel 族：**4 已采纳 + fused-RoPE 候选（第 5 个）** | `src/lemoq/kernels/` | ✅ "4–5 个自研 kernel" |
 | 实验矩阵 64 格 / Mac 侧 59 份 result.json（48 done；GPU 盘另存归档）/ 三轮 VOID 不发数 | `configs/experiments.yaml`、`results/` | ✅ 方法论 |
 
