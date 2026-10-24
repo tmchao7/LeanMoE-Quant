@@ -1,0 +1,38 @@
+# A5: 四门验证的 CI(ROADMAP Tier A;MATURITY_REVIEW_2026-10-24 R9)
+#
+# 与本地门禁完全一致(AGENTS.md §6):ruff → black → pytest -m "not gpu" → tools.check_docs。
+# GPU 用例一律跳过(标记 gpu);torch 装 CPU 轮子(否则 PyPI 会拖 CUDA 全家桶,CI 缓存会爆)。
+# ruff/black 钉在与 .venv-mac 相同的版本,避免规则漂移让红绿取决于上传日期。
+name: gates
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install CPU torch first (satisfies torch>=2.7 so -e .[dev] won't pull CUDA wheels)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Install package and pinned gate tools
+        run: pip install -e ".[dev]" "ruff==0.16.8" "black==26.5.1"
+      - name: ruff
+        run: ruff check .
+      - name: black
+        run: black --check .
+      - name: pytest (not gpu)
+        run: python -m pytest -m "not gpu" -q
+      - name: check_docs
+        run: python -m tools.check_docs
