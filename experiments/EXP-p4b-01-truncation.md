@@ -43,6 +43,10 @@
   `EXP-p2-02`（grouped + cudagraph，per-token 4.083 ms）、`EXP-p2-01`（E2：反量化融合 vs 独立 ——
   它的 fused 臂就是 §2.8 里让量化第一次 >1× 的那个实现）
 
+★ **2026-10-25 F4 刷新**：F4 作用域=kernel 格，本实验（sdpa）格仅重盖章（config 补
+`kv_direct_write=False`）；p50 噪声内：fp16 3.5446/6.7805、w8a16 2.9589/6.2219、
+w8a8@4096 8.8232；E7 = **1.1979/1.0898**（2026-10-24 值 1.1974/1.0912 留档）。
+
 ★ **2026-10-24 采纳刷新（F1+F2 默认开）**：`FUSION_DEFAULTS` 四 True 后 23 格同轮重测（`results/EXP-f1-refresh/`，canary 0.30%、逐格 host_share ≤3.4%）。新采用 p50（cudagraph）：fp16 **3.5421/6.7841**、w8a16 **2.9582/6.2172**、w8a8@4096 **8.8189** ms；E7 `speedup_cudagraph` = **1.1974（1024）/ 1.0912（4096）**（P2j 值 1.1911/1.0888 留 §P2j，跨轮不混比）。w4a16 两格 gate FAIL 如旧（8.5879/11.8202 仅 evidence）。无 env 金丝雀：kernel 格 1.5590（Δ+0.03%）、sdpa 格 2.9542（Δ−0.14%，`packed_qkv_effective=False` 正确 no-op）。
 
 ## Hypothesis（先写，跑之前冻结；来自矩阵，原文不动）

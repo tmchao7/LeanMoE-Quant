@@ -281,7 +281,7 @@ kernel 尾多一条 load + add，**零额外字节**（省掉一次读 + 一次�
 
 ---
 
-### F4 — KV 写入融进 RoPE / attention（est 0.07–0.09 ms，风险最高）
+### F4 — KV 写入融进 RoPE / attention（✅ **已采纳 2026-10-25**：est 0.07–0.09，实测 kernel 格 −1.8~−3.0%）
 
 #### 现象
 

@@ -18,6 +18,15 @@
 
 ★ **2026-10-24 采纳刷新 = v4（canonical）**：F1+F2 默认开后的同轮重测（`results/EXP-f1-refresh/`）。量化收益：sdpa 臂 **1.1948**@1024 / **1.0912**@4096；kernel 臂 **1.4392**@1024 / **1.3711**@4096；最好格 `w8a16×kernel` = **1.5586/1.8140 ms**，vs `fp16×sdpa`（3.5344/6.7734）= **2.27× / 3.73×**（v3 值 1.1955/1.3034、1.87×/3.11× 留 §5.7，跨轮不混比）。开关作用域与 ADOPTION_SYNC §3 预告一致：route 全 MoE 格、rope/mask 限 kernel 格（kernel/步 377）、packed 仅量化 kernel 2 格（kernels/步 345）。
 
+★★ **2026-10-25 F4 采纳刷新 = v5（canonical）**：KV 直写（`LEMOQ_KV_DIRECT_WRITE`，五 True）。
+F4 证据链：GPU K 门 9/9（kernel vs HF update() 逐位，`tests/test_kv_direct_write_gpu.py`）；
+独立进程 A/B **VALID**（off 1.5576 → on 1.5118 ms，**−2.94%**，5/5 对，逐对差 41–49 µs ≈ 账本
+预测 50.3 µs，canary 0.154%，host ≤3.6%；`results/EXP-f4-ab-20261025/`）；刷新 23/23 OK、
+canary 0.336%（`results/EXP-f1-refresh/`，F4 轮）。kernel 格 −1.8~−3.0%：fp16×kernel
+**2.1960/2.4326**、w8a16×kernel **1.5116/1.7626 ms**（kernels/步 345→**329**：32 aten → 16 triton）；
+kernel 杠杆 **1.4528/1.3801**、最好格 **2.36×/3.85×**。A/B 显著性：n=5 全胜 sign p=0.0625，
+采纳依据=方向一致+效应量与预注册账本吻合（METRICS §2.2 口径）。
+
 ## 1. Hypothesis（跑之前写 —— 已随矩阵在 `25f7868` 提交，本文件没有事后修改它）
 
 ```text

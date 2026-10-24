@@ -12,23 +12,23 @@ settled — do not re-derive them and do not re-run their cells:
   ~19k kernels/step). Isolated the fused kernel is 1.21× cheaper per call — Python/launch eats it.
 - **E7 (`EXP-p4b-01`) — judged.** The truncation is real and **only the fused arm cashes it in**.
   ★ Refreshed 2026-10-08 (P2j, fused RMSNorm): the graph cells now read `speedup_cudagraph`
-  **1.1974** (1024) / **1.0912** (4096) — ★ **2026-10-24 adoption refresh** (F1+F2 defaults on,
-  23/23 cells, canary 0.30%): adopted p50s fp16 3.5421/6.7841, w8a16 2.9582/6.2172 ms
-  (pre-adoption P2j values 1.1911/1.0888 with fp16 3.5881/6.8269, w8a16 3.0124/6.2702 stay in §P2j). Canary drift 0.30%; the **eager**
+  **1.1979** (1024) / **1.0898** (4096) — ★ **2026-10-25 F4 adoption** (F1+F2+F4 defaults on,
+  23/23 cells, canary 0.336%): adopted p50s fp16 3.5446/6.7805, w8a16 2.9589/6.2219 ms
+  (2026-10-24 values 1.1974/1.0912 stay in that round's record). Canary drift 0.34%; the **eager**
   arm's 8 cells are **pre-P2i** — their refresh was VOID because a co-tenant's CPU load inflated
   `host_p50` (evidence: the *old* implementation re-run now shows
   `host_p50` 35.2 ms vs 1.5 ms archived, while `kernels_per_call` and `gpu_busy` match exactly).
   Host_share drops 77.5% → 1.6%, and the weight stream is only 42% (1024) / 23% (4096) of a graph
   step ⇒ even a perfect weight path ≤ ~1.74× / ~1.29×.
   ★★ **`w8a8@4096`'s citation gate flipped FAIL → PASS** under the fused norm, so those cells now
-  publish latency (8.8189 ms cudagraph, adoption refresh) — but the flip is 3/165 positions (borderline), so it is
+  publish latency (8.8232 ms cudagraph, F4 refresh) — but the flip is 3/165 positions (borderline), so it is
   **not** evidence that w8a8 works at 4096; see `EXP-p1-04` v2 §1 and `EXP-p4b-01` §P2j.
 
 - **`EXP-p4c-01` — supported (the other big non-weight block was the ATTENTION IMPLEMENTATION).**
   Swapping HF sdpa for this repo's split-KV core *inside the graph* cuts the step 1.36–2.44×.
-  **Canonical numbers are now v4** (2026-10-24 adoption refresh, F1+F2 on; record ★ section):
-  quantized **1.1948 (sdpa) / 1.4392 (kernel)** @1024 and **1.0912 / 1.3711** @4096, best cell
-  `w8a16 × kernel` = **2.27× / 3.73×** vs fp16 × sdpa (v3 was 1.1955/1.3034, 1.87×/3.11×).
+  **Canonical numbers are now v5** (2026-10-25 F4 adoption, F1+F2+F4 on): quantized
+  **1.1948 (sdpa) / 1.4528 (kernel)** @1024 and **1.0898 / 1.3801** @4096, best cell
+  `w8a16 × kernel` = **2.36× / 3.85×** vs fp16 × sdpa (v4 was 1.1948/1.4392, 2.27×/3.73×).
   Mechanism: the removed cost (attention core, then the norm chain) is bit-width-independent —
   a constant that helps the smaller (quantized) total relatively more.
   Canary in the v3 round: −0.067%; one cell was contaminated (`host_share` 51%) and re-run
@@ -57,7 +57,7 @@ settled — do not re-derive them and do not re-run their cells:
   is **3/165 positions** — the two measurements straddle the threshold, and the norm change also
   moves the fp16 reference's greedy tokens (w2/w4) ⇒ the honest reading is "**not resolvable at
   this budget**", not "it passes now". τ was not touched. The consequence was executed in P2j: the
-  refreshed `w8a8@4096` cells now publish latency (8.8189 ms cudagraph after the 2026-10-24 adoption refresh) and the flip is documented
+  refreshed `w8a8@4096` cells now publish latency (8.8232 ms cudagraph after the 2026-10-25 F4 refresh) and the flip is documented
   in `EXP-p4b-01` §P2j as a re-adjudication, not as "w8a8 works at 4096".
 
 - **A fix was tried and REFUTED (kept on purpose).** Replacing HF's `OlmoeRMSNorm` chain (7 kernels ×
@@ -153,11 +153,11 @@ in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`
 | cudagraph feasibility with the HF MoE path | `blocked` **by design** (hf + dynamic cache cannot capture) | `experiments/EXP-p0-03-baseline-cudagraph.md` |
 | Accuracy gate — the only source of `GATE_CITATIONS` | done — **v2** (2026-10-08, re-measured under the fused RMSNorm): all 6 rows re-measured; only `w8a8@4096` flips (borderline top-1) | `experiments/EXP-p1-04-prompt-set-gate.md` |
 | Precision side: error attribution, mixed bits, W8/W4 sweep | done (the old `EXP-p1-01` protocol was superseded by `p1-04`) | `experiments/EXP-p1-02-quant-error-attribution.md`, `experiments/EXP-p1-03-quant-mixed-bits.md`, `experiments/EXP-p1-01-w8-w4-accuracy.md` |
-| Attention path: eager, kernel, in-graph | done — ★ 2026-10-24 adoption refresh: eager **2.5642/2.9275**, kernel **2.2406/2.4779 ms** (P2j 值 2.6258/3.0004、2.5134/2.7483 留档) | `experiments/EXP-p2-03-decode-attention.md`, `experiments/EXP-p2-04-eager-attention.md`, `experiments/EXP-p2-05-attn-kernel.md` |
+| Attention path: eager, kernel, in-graph | done — ★ 2026-10-25 F4 refresh: eager 2.5642/2.9275（sdpa 格不动），kernel **2.1946/2.4326 ms**（F4 前 2.2406/2.4779） | `experiments/EXP-p2-03-decode-attention.md`, `experiments/EXP-p2-04-eager-attention.md`, `experiments/EXP-p2-05-attn-kernel.md` |
 | Grouped MoE GEMV (fp16) | done — ★ 2026-10-24 adoption refresh: 4.0829 → 3.6828 → **3.5340 ms** | `experiments/EXP-p2-02-moe-grouped-gemm.md` |
 | E2 dequant fusion, 6 cells, 8-bit **and** 4-bit | done — **`refuted`**; P2j refresh **VOID** for all 6 cells (eager/host-bound) ⇒ pre-P2i values kept, verdict unchanged | `experiments/EXP-p2-01-dequant-fusion.md` |
 | P3 wiring + E7, 16/16 cells | done — **judged**; refreshed 2026-10-08 (P2j): graph cells under the fused norm, eager cells **pre-P2i** (refresh VOID — host contention); `w8a8@4096` gate now reads PASS (borderline) | `experiments/EXP-p4b-01-truncation.md` |
-| In-graph attention × quantization, 8 cells | done — **supported**; **canonical = v4** (2026-10-24 adoption refresh): quantized **1.1948/1.4392** @1024, **1.0912/1.3711** @4096, best cell **2.27× / 3.73×** vs fp16 × sdpa (v3 值留档 §5.7) | `experiments/EXP-p4c-01-in-graph-attention.md` |
+| In-graph attention × quantization, 8 cells | done — **supported**; **canonical = v5** (2026-10-25 F4 adoption): quantized **1.1948/1.4528** @1024, **1.0898/1.3801** @4096, best cell **2.36× / 3.85×** vs fp16 × sdpa（w8a16×kernel **1.5116/1.7626 ms**, kernels/步 **329**） | `experiments/EXP-p4c-01-in-graph-attention.md` |
 | E4 routing overhead | done — **supported**: 44.2% of GPU busy, and **quantization-invariant** (4.478/4.512/4.526/4.555 ms for fp16/w8a16/w8a8/w4a16) | `experiments/EXP-p4-01-moe-routing-overhead.md` |
 | The elementwise/copy tail (0.90 ms, "~330 kernels") | done — classified: it is **~13 named families × 16–83 calls/step**, not a flat tail; module-level attribution VOID (its own K1 failed) | `experiments/EXP-p4c-02-elementwise-tail.md` |
 | W4 expert calibration (4-bit) | **done 2026-10-23 — negative result** (RTN / GPTQ / ≤25% whole-layer W8 fallback all fail the gate; no latency published) | `experiments/EXP-p1-05-w4-expert-calibration.md` |
@@ -191,7 +191,7 @@ that the science was not done — read the record first.
 | P4 | ✅ **done 2026-10-08 (except the counters)**: `tools/ncu_evidence.py` (counter path written, blocked on this host) + `docs/reference/NCU_EVIDENCE.md` + `RESULTS.md` + 3 charts generated from artifacts by `tools/make_figures.py` + README/HANDOFF corrections | closes Phase 2's last deliverable and Phase 7 | charts regenerate from `result.json` via `python -m tools.make_figures`; every number in RESULTS.md cites an artifact or record | no |
 | W4 | ✅ **done 2026-10-23** (`EXP-p1-05`, GPU diagnostic — **negative**): W8 control PASS; W4 RTN / W4 GPTQ / ≤25% whole-layer W8 fallback all FAIL ⇒ pre-registered refutation clause stops the expansion; no matrix registration, no `GATE_CITATIONS` change | 4-bit was the last unclosed bit-width in the quantization-ceiling story | record + artifacts rsynced to `lemoq-artifacts/EXP-p1-05-2026-10-23/` (outside git) | done |
 | **S1** | ✅ **done 2026-10-24** (Block A): A1 F2 A/B re-take **VALID** (off 1.9384 → on 1.8406 ms, −5.05%, 3/3 pairs, canary −0.12%) → A2 refresh **23/23 OK** (canary 0.30%, host ≤3.4%) → A3 `FUSION_DEFAULTS` four True (`938de63`; no-env canaries: kernel 1.5590 Δ+0.03% `packed_qkv_effective=True`, sdpa 2.9542 Δ−0.14% effective=False) → A4 numbers synced per `ADOPTION_SYNC_2026-10-24.md` → merge `main`. Headline: w8a16×kernel **1.5586/1.8140 ms** (kernels/step 539→345), E7 **1.1974/1.0912** | — | all acceptance criteria met | done |
-| **S2** | **One operator, picked by the pre-registered rule** (expected: F4 KV direct write ≈98 µs; fallback F3 residual epilogue 48 µs), behind its own switch, default off | largest *capturable* gap once F2 is in (the rule discounts bandwidth-only gaps to 0.3 and latency removal to 0.9) | isolated bench + K1 parity + fresh-process adjacent A/B (`ENV_OFF` needed once a default is on) before any default flip | no |
+| **S2** | ✅ **done 2026-10-25**: F4 KV direct write adopted (pre-registered rule picked it at 50.3 µs capturable; GPU K-gate 9/9 bitwise; A/B **VALID** off 1.5576 → on 1.5118 ms, −2.94%, 5/5 pairs, canary 0.154%; refresh 23/23, canary 0.336%; `FUSION_DEFAULTS` five True; kernels/步 345→329). Ledger re-run: latency-class vein mined out — next leader is gate_up 28.5 µs (config class) | — | all acceptance criteria met (tokens_equal + K1 + canary) | done |
 | **S3** | `lm_head` w8 (≈63 µs) **or** E6/E8 breadth | the last piece of the quantization lever, or the cheapest Tier B closure | **new gate row from a new measurement** (new experiment) before any latency is published | **YES** (new experiment / new `GATE_CITATIONS` row) |
 
 ## 5. Wrap-up (docs/config only — **done 2026-10-07**)

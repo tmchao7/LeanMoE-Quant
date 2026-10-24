@@ -18,7 +18,9 @@
   `EXP-p2-02-moe-grouped-gemm`（ctx=1024，sdpa prefill）、
   `EXP-p0-04-cudagraph-static-moe`（ctx=4096，sdpa prefill）
 
-★ **2026-10-24 采纳刷新**：route+rope+mask 默认开后同轮重测，采用 p50 **2.2406 / 2.4779 ms**（P2j 值 2.5134/2.7483 留上文；`results/EXP-f1-refresh/`，kernel/步 377）。
+★ **2026-10-25 F4 刷新**：KV 直写默认开后同轮重测，采用 p50 **2.1946 / 2.4326 ms**
+（F4 前 2.2406/2.4779；`results/EXP-f1-refresh/` F4 轮）。
+★ **2026-10-24 采纳刷新**：route+rope+mask 默认开后同轮重测，采用 p50 2.2406 / 2.4779 ms（P2j 值 2.5134/2.7483 留上文；`results/EXP-f1-refresh/`，kernel/步 377）。
 
 ## Hypothesis（跑之前写）
 
