@@ -994,6 +994,27 @@ def test_quantize_for_cfg_fp16_is_a_noop(tiny_olmoe):
     assert sum(p.numel() for p in tiny_olmoe.parameters()) == before
 
 
+def test_quantize_for_cfg_honours_lm_head_switch(monkeypatch):
+    """F5 端到端（CPU，runner 真跑路径）：开关开 ⇒ lm_head 真的被替换且账目跟随。
+
+    ★ 2026-10-25 自检补的空档：`quantize_for_cfg → quant_spec_for_cfg` 这条 runner
+      实际执行链在补测试前只有 GPU probe 走过（build_arms 是另一条构造路）——
+      A/B 首跑之前先在 Mac 上把链钉住。
+    """
+    import benchmarks.runner as R
+
+    monkeypatch.delenv("LEMOQ_LMHEAD_W8", raising=False)
+    off_report = quantize_for_cfg(_fresh_olmoe(), {"bit_width": "w8a16", "group_size": 32})
+    assert off_report.replaced.get("lm_head", 0) == 0
+    assert R.lm_head_w8_effective("w8a16", off_report) is False
+
+    monkeypatch.setenv("LEMOQ_LMHEAD_W8", "1")
+    on_report = quantize_for_cfg(_fresh_olmoe(), {"bit_width": "w8a16", "group_size": 32})
+    assert on_report.replaced.get("lm_head", 0) == 1, "开关开了却没替换 lm_head"
+    assert R.lm_head_w8_effective("w8a16", on_report) is True
+    assert "lm_head" in on_report.realized_by_target, "字节账没跟上 lm_head 的量化"
+
+
 def test_quantize_for_cfg_replaces_and_model_still_forwards(tiny_olmoe):
     import torch
 
