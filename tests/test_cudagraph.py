@@ -73,11 +73,12 @@ def test_blocked_and_failed_results_record_effective_fusion_switches(monkeypatch
         "LEMOQ_FUSED_ROUTE",
         "LEMOQ_SKIP_MASK_FILL",
         "LEMOQ_PACKED_QKV",
+        "LEMOQ_KV_DIRECT_WRITE",
     )
     for key in switches:
         monkeypatch.delenv(key, raising=False)
     cfg = {"ctx": 1024, "batch": 1, "max_new_tokens": 32, "warmup": 5, "timed": 20}
-    keys = ("fused_rope", "fused_route", "skip_mask_fill", "packed_qkv")
+    keys = ("fused_rope", "fused_route", "skip_mask_fill", "packed_qkv", "kv_direct_write")
 
     default = blocked_result(
         exp_id="EXP-x__ctx=1024",

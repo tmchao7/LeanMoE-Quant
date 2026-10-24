@@ -802,9 +802,28 @@ def _decode_forward_impl(
 
     if past_key_values is not None:
         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-        key_states, value_states = past_key_values.update(
-            key_states, value_states, self.layer_idx, cache_kwargs
-        )
+        from lemoq.kernels.fusion_switches import fusion_enabled  # noqa: PLC0415
+
+        kv_direct = fusion_enabled("kv_direct_write")
+        if kv_direct:
+            from lemoq.kernels.kv_direct import (  # noqa: PLC0415
+                kv_direct_write,
+                kv_direct_write_applicable,
+            )
+
+        if kv_direct and kv_direct_write_applicable(
+            past_key_values.layers[self.layer_idx], key_states, value_states
+        ):
+            # F4 候选（S2）：rope 后的 k/v 逐位直写 cache 的 [pos] 槽，替代
+            # update() 的 index_copy_ 链（每步 32 次 aten launch）。默认关
+            # （`fusion_switches.FUSION_DEFAULTS`），K 门见 tests/test_kv_direct_write.py。
+            layer = past_key_values.layers[self.layer_idx]
+            kv_direct_write(layer, key_states, value_states, cache_position)
+            key_states, value_states = layer.keys, layer.values
+        else:
+            key_states, value_states = past_key_values.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
 
     # ★ 核心替换：mask + q·kᵀ + softmax + w·v  ->  一次 kernel（只读 [0, filled)）
     #   注意这里**不再需要 4D mask**：kernel 不读未填充槽位。
