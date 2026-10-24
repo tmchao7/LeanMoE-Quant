@@ -75,11 +75,27 @@ import glob, json, os, statistics, sys
 
 out, pairs = sys.argv[1], int(sys.argv[2])
 runs = []
-for path in sorted(glob.glob(os.path.join(out, "[a-z][a-z][0-9][0-9].json"))):
+# 标签是 `<arm><%02d>`（off00 / on01 / ...）：按**运行序号**排序，不能按字典序，
+# 否则首尾金丝雀与配对都会错位。
+def _run_label(path):
+    """`off07.json` -> ('off', 7)，只看去扩展名后的运行标签；其它 json 返回 None。"""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    arm = "on" if stem.startswith("on") else "off" if stem.startswith("off") else None
+    if arm is None or not stem[len(arm):].isdigit():
+        return None
+    return arm, int(stem[len(arm):])
+
+
+labelled = [(pth, _run_label(pth)) for pth in glob.glob(os.path.join(out, "*.json"))]
+labelled = [(pth, lab) for pth, lab in labelled if lab is not None]
+labelled.sort(key=lambda item: item[1][1])
+names = [os.path.splitext(os.path.basename(pth))[0] for pth, _ in labelled]
+for name in names:
+    path = os.path.join(out, name + ".json")
     d = json.load(open(path))
     runs.append({
-        "file": os.path.basename(path),
-        "arm": "on" if os.path.basename(path).startswith("on") else "off",
+        "file": name,
+        "arm": "on" if name.startswith("on") else "off",
         "status": d.get("status"),
         "p50": d["latency"]["per_token_p50_ms"],
         "busy": (d.get("attribution") or {}).get("gpu_busy_ms"),
