@@ -34,9 +34,12 @@ def _inputs(batch=1, heads=16, kv=4, seq=1, d=128, dtype=torch.float32, device="
 # ---------------------------------------------------------------------------
 # 开关与签名
 # ---------------------------------------------------------------------------
-def test_env_default_off_and_honors_flag(monkeypatch):
+def test_env_default_matches_switches_and_honors_flag(monkeypatch):
+    """无 env ⇒ 生效值 = `FUSION_DEFAULTS`（翻默认后此测试不需要改动，2026-10-25）。"""
+    from lemoq.kernels.fusion_switches import FUSION_DEFAULTS
+
     monkeypatch.delenv("LEMOQ_FUSED_ROPE", raising=False)
-    assert rope._fused_rope_enabled() is False
+    assert rope._fused_rope_enabled() is FUSION_DEFAULTS["fused_rope"]
     monkeypatch.setenv("LEMOQ_FUSED_ROPE", "1")
     assert rope._fused_rope_enabled() is True
 

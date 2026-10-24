@@ -80,9 +80,12 @@ def test_skip_mask_still_enforces_capacity():
         sess._set_step_inputs(skip_mask=True)
 
 
-def test_env_helper_default_off_and_honors_flag(monkeypatch):
+def test_env_helper_default_matches_switches_and_honors_flag(monkeypatch):
+    """无 env ⇒ 生效值 = `FUSION_DEFAULTS`（翻默认后此测试不需要改动，2026-10-25）。"""
+    from lemoq.kernels.fusion_switches import FUSION_DEFAULTS
+
     monkeypatch.delenv("LEMOQ_SKIP_MASK_FILL", raising=False)
-    assert _skip_mask_fill_enabled() is False
+    assert _skip_mask_fill_enabled() is FUSION_DEFAULTS["skip_mask_fill"]
     monkeypatch.setenv("LEMOQ_SKIP_MASK_FILL", "0")
     assert _skip_mask_fill_enabled() is False
     monkeypatch.setenv("LEMOQ_SKIP_MASK_FILL", "1")
@@ -90,12 +93,13 @@ def test_env_helper_default_off_and_honors_flag(monkeypatch):
 
 
 def test_replay_paths_wire_the_flag_eager_and_capture_do_not():
-    """静态源码契约：env 只挂 replay；decode_eager/capture 永远默认 False。"""
+    """静态源码契约：env 经 `_replay_skip_mask()`（开关 × 捕获期能力）只挂 replay；
+    decode_eager/capture 永远默认 False。"""
     replay_src = inspect.getsource(StaticCacheDecodeSession.replay)
-    assert "_set_step_inputs(skip_mask=_skip_mask_fill_enabled())" in replay_src
+    assert "_set_step_inputs(skip_mask=self._replay_skip_mask())" in replay_src
 
     replay_at_src = inspect.getsource(StaticCacheDecodeSession.replay_at_position)
-    assert "_set_step_inputs(skip_mask=_skip_mask_fill_enabled())" in replay_at_src
+    assert "_set_step_inputs(skip_mask=self._replay_skip_mask())" in replay_at_src
 
     eager_src = inspect.getsource(StaticCacheDecodeSession.decode_eager)
     assert "_set_step_inputs()" in eager_src
@@ -104,6 +108,18 @@ def test_replay_paths_wire_the_flag_eager_and_capture_do_not():
     capture_src = inspect.getsource(StaticCacheDecodeSession.capture)
     assert "skip_mask" not in capture_src
     assert "_set_step_inputs()" in capture_src
+
+
+def test_replay_skip_mask_gates_on_captured_capability(monkeypatch):
+    """翻默认后的 no-op 语义（2026-10-25）：开关开了、但捕获期不是 mask-independent
+    （非 kernel 图格，如 p4b 的 sdpa）⇒ 不跳过，而不是 raise 成整格 blocked。"""
+    sess = _bare_session()  # _captured_mask_independent = True
+    monkeypatch.setenv("LEMOQ_SKIP_MASK_FILL", "1")
+    assert sess._replay_skip_mask() is True
+    sess._captured_mask_independent = False
+    assert sess._replay_skip_mask() is False
+    monkeypatch.setenv("LEMOQ_SKIP_MASK_FILL", "0")
+    assert sess._replay_skip_mask() is False
 
 
 def test_set_step_inputs_default_is_off():

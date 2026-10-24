@@ -2,7 +2,10 @@
 
 分层：
     - **CPU**（Mac 可跑）：钉死"目标语义"= fp32 softmax + 降序 top-K +（可选）归一化，
-      numpy oracle 与 torch 参考互证；无 CUDA 时调用 kernel 必须显式报错（不许静默降级）。
+      numpy oracle 与 torch 参考互证；无 CUDA 时**直接调用 kernel** 必须显式报错
+      （不许静默降级）。注意：`moe_static._route` 的候选分支另有 rope 同款的
+      **可用性回退**（CPU 张量 ⇒ ATen 原路，2026-10-25）—— 那是调用方的回退，
+      不是 kernel 静默降级，两层都有测试钉住。
     - **GPU**（`-m gpu`，服务器）：triton kernel vs ATen 参考的 1e-3 parity（无平局样本
       ids 精确相等）、`_route` env 开关的端到端一致性、fp16 logits 与非 2 幂 E。
 """
@@ -116,9 +119,25 @@ def test_route_env_switch_matches_aten(norm, monkeypatch):
 
 
 @pytest.mark.gpu
-def test_route_default_stays_aten(monkeypatch):
-    """默认（无 env）必须仍走 ATen —— 已录路径零影响的机械化保证。"""
+def test_route_default_matches_switches(monkeypatch):
+    """无 env ⇒ 生效值 = `FUSION_DEFAULTS`（翻默认后此测试不需要改动，2026-10-25）。"""
     monkeypatch.delenv("LEMOQ_FUSED_ROUTE", raising=False)
     from lemoq.kernels import moe_static
+    from lemoq.kernels.fusion_switches import FUSION_DEFAULTS
 
-    assert moe_static._fused_route_enabled() is False
+    assert moe_static._fused_route_enabled() is FUSION_DEFAULTS["fused_route"]
+
+
+def test_route_cpu_fallback_bit_exact_when_env_on(monkeypatch):
+    """翻默认后的可用性回退（2026-10-25）：CPU 张量上即使开关开也走 ATen 原路，
+    且与开关关**逐位相同**（rope `_decode_shape_guard` 同款）。kernel 本身的显式
+    报错不放松 —— 直接调 `routing_softmax_topk` 仍 raise（见上面的无静默回退测试）。"""
+    monkeypatch.delenv("LEMOQ_FUSED_ROUTE", raising=False)
+    x = torch.randn(3, 64)
+    rw = torch.randn(64, 64)
+    lg0, tw0, ti0 = _route(x, rw, top_k=8, norm_topk_prob=True)
+    monkeypatch.setenv("LEMOQ_FUSED_ROUTE", "1")
+    lg1, tw1, ti1 = _route(x, rw, top_k=8, norm_topk_prob=True)
+    assert torch.equal(lg1, lg0)
+    assert torch.equal(ti1, ti0)
+    assert torch.equal(tw1, tw0)

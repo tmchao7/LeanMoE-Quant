@@ -728,13 +728,25 @@ class StaticCacheDecodeSession:
         except Exception as exc:  # noqa: BLE001
             raise CudaGraphCaptureError("capture", exc) from exc
 
+    def _replay_skip_mask(self) -> bool:
+        """候选开关 × 捕获期能力：非 mask-independent ⇒ False（不适用即 no-op）。
+
+        旧语义是把 `_skip_mask_fill_enabled()` 直接传给 `_set_step_inputs`，由后者对
+        非 mask-independent 的 session raise —— 翻默认后，无 env 重跑非 kernel 图格
+        会整格 blocked（A3 的无 env 金丝雀 p4b/sdpa 正是这种格）。改为与 packed_qkv
+        的"不适用 ⇒ no-op"同款（2026-10-25 review）。显式请求的 A/B 拒绝在
+        `tools/profile_graph.py` 的参数检查（`--ab-mask-fill` 需 `attn=kernel`），
+        不受此影响；`_set_step_inputs(skip_mask=True)` 的直接误用仍然 raise。
+        """
+        return _skip_mask_fill_enabled() and self._captured_mask_independent
+
     def replay(self, *, synchronize: bool = True) -> Any:
         """Replay one decode step; optionally synchronize and advance state."""
         if self.graph is None or self.stream is None or self.logits is None:
             raise RuntimeError("capture must succeed before replay")
         try:
             with self.torch.cuda.stream(self.stream), self.torch.no_grad():
-                self._set_step_inputs(skip_mask=_skip_mask_fill_enabled())
+                self._set_step_inputs(skip_mask=self._replay_skip_mask())
                 self.graph.replay()
             if synchronize:
                 self.stream.synchronize()
@@ -769,7 +781,7 @@ class StaticCacheDecodeSession:
         self.set_position(position)
         try:
             with self.torch.cuda.stream(self.stream), self.torch.no_grad():
-                self._set_step_inputs(skip_mask=_skip_mask_fill_enabled())
+                self._set_step_inputs(skip_mask=self._replay_skip_mask())
                 self.graph.replay()
             if synchronize:
                 self.stream.synchronize()
