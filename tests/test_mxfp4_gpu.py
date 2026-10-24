@@ -42,7 +42,7 @@ def test_triton_mxfp4_matches_host_reference():
     _requires_gpu()
     for m, k, n, seed in [(1, 256, 128, 0), (4, 256, 128, 1), (1, 50, 128, 2), (1, 2048, 512, 3)]:
         x, q, _ = _case(m, k, n, seed)
-        w_ref = dequantize_mxfp4(q, dtype=torch.float32)  # (N, K)（pad 列已切回）
+        w_ref = dequantize_mxfp4(q, dtype=torch.float32).cuda()  # (N, K)（pad 列已切回）
         ref = x.float() @ w_ref.T
         got = dequant_gemm_fused(
             x,
