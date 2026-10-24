@@ -29,6 +29,8 @@
 | [NCU_EVIDENCE.md](reference/NCU_EVIDENCE.md) | kernel 级证据：计数器为何被阻断、替代口径 | 深读性能归因的人 |
 | [NCU_PLAN.md](reference/NCU_PLAN.md) | 换机才能做的 ncu 补测清单（当前 blocked） | 将来拿到 profiling 权限的人 |
 | [FUSION_RESEARCH.md](reference/FUSION_RESEARCH.md) | 联网调研及二次复核：融合/量化方法、避坑点、来源适用限制（公开报告值，非实测） | 做融合任务（F1–F6）前要外部依据的人 |
+| [QUANT_FORMAT_RECON_2026-10-25.md](reference/QUANT_FORMAT_RECON_2026-10-25.md) | **量化格式侦察**：FP8 无字节收益（跳过）、MXFP4 4.25 bits/w 可走向量路径（"tl.dot 前置"退役，vLLM/llama.cpp 同构先例）；实施顺序与坑清单 | 做 EXP-p3-02 前必读 | 
+| [KERNEL_MICROOPT_PLAYBOOK_2026-10-25.md](reference/KERNEL_MICROOPT_PLAYBOOK_2026-10-25.md) | **kernel 微优 playbook**：寄存器/occupancy↔带宽达成率（Little 定律）、cache modifier 策略、launch 节点成本、小拷贝坑清单、down_sum/gate_up 候选实验 | 写/调 Triton kernel 的人 | 
 | [MOE_CUDAGRAPH.md](reference/MOE_CUDAGRAPH.md) | 为什么 HF 的 MoE 进不了 CUDA Graph（预判+依据） | 理解 p0-03 blocked 结论的人 |
 | [SERVER_RUNBOOK.md](reference/SERVER_RUNBOOK.md) | 服务器到手后的命令序列 | 上机执行的人 |
 
