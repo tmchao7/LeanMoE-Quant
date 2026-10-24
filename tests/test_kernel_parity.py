@@ -44,14 +44,19 @@ def _case(m=4, k=256, n=512, bits=4, group_size=128, seed=0, device="cpu"):
     )
 
 
-def test_fused_and_separate_are_mathematically_equal():
+def test_fused_and_separate_are_mathematically_equal(monkeypatch):
     """两条路径的**数值必须相同** —— 差别只在是否物化中间张量（E2 的全部内容）。
 
     ★ 这条曾经是**空转**的：`dequant_gemm_fused_reference` 当时就是
     `return dequant_gemm_separate_reference(...)`，于是 a/b 是同一函数的两次调用，
-    `max_abs_err == 0.0` 在数学上不可能非 0 —— 一个恒真断言占了 K1 的位置。
-    现在 fused 是真的一条按组分块、不物化整块权重的路径，累加顺序不同，
-    所以差值是非零的 fp32 舍入量级。下面两条自检就是为了防止它再退化。
+    一个恒真断言占了 K1 的位置。现在 fused 是真的一条按组分块、不物化整块权重的路径。
+    下面两条**结构判别**自检就是为了防止它再退化：
+    自检 1a 抓直接别名（模块级 `fused = separate`）；自检 1b 抓包装别名（fused 内部
+    转调 separate）。
+
+    ★ 2026-10-24 修：原自检 1 是"差值 > 1e-12"（靠 fp32 舍入噪声证明两条路不同）。
+    linux CPU torch（CI）下两条累加路径**位级相同**（差值精确为 0.0），噪声假设
+    平台相关 ⇒ 换成结构判别，判别目标不变且更直接。
     """
     x, codes, scale, zero, gs = _case()
     a = dequant_gemm_separate_reference(x, codes, scale, zero, group_size=gs)
@@ -59,11 +64,28 @@ def test_fused_and_separate_are_mathematically_equal():
     rep = tolerance_report(a, b)
     assert rep["allclose_atol_1e-3"], rep
 
-    # 自检 1：两条路径必须真的是两条 —— 若 fused 又被改回 separate 的别名，
-    #   差值会塌成精确 0，断言会红。（实测差值是 1e-5 量级的 fp32 舍入。）
+    # 自检 1a：两条路径必须是两个不同的函数对象 —— 模块级别名（历史回归）在这里被抓。
     assert (
-        rep["max_abs_err"] > 1e-12
-    ), "fused 与 separate 的差值塌成 0 —— fused 又变成 separate 的别名了？"
+        dequant_gemm_fused_reference is not dequant_gemm_separate_reference
+    ), "fused 就是 separate 的直接别名"
+
+    # 自检 1b：fused 不得转调 separate（包装别名）。spy 打在模块属性上，
+    # fused 若通过模块命名空间转调，必被计数。
+    import lemoq.kernels.reference as ref_mod  # noqa: PLC0415
+
+    calls = {"n": 0}
+    orig = ref_mod.dequant_gemm_separate_reference
+
+    def _spy(*args, **kwargs):
+        calls["n"] += 1
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(ref_mod, "dequant_gemm_separate_reference", _spy)
+    try:
+        dequant_gemm_fused_reference(x, codes, scale, zero, group_size=gs)
+    finally:
+        monkeypatch.undo()
+    assert calls["n"] == 0, "fused 内部转调了 separate —— 它是包装别名，不是独立路径"
 
     # 自检 2：判别力 —— 把 scale 改坏，两条路径必须**不再**等价，否则上面那条
     #   allclose 说明不了任何事（一个不可能失败的断言比没有断言更糟）。
