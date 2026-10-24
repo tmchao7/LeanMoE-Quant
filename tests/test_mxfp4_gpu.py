@@ -54,9 +54,9 @@ def test_triton_mxfp4_matches_host_reference():
             symmetric=True,
             mxfp4=True,
         )
-        assert torch.allclose(got.cpu(), ref, **TOL), (m, k, n, seed)
+        assert torch.allclose(got, ref, **TOL), (m, k, n, seed)
         # 逐位核对（解码值全为二次幂 ⇒ fp32 下应无舍入差）
-        assert torch.equal(got.cpu(), ref), (m, k, n, seed)
+        assert torch.equal(got, ref), (m, k, n, seed)
 
 
 def test_triton_mxfp4_conjunction_half_vs_fp64_oracle():
