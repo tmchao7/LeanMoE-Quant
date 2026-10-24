@@ -242,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
                     arm["group_size"],
                     targets=tuple(arm["targets"]),
                     # ★ F5（EXP-p1-06）：臂要量 lm_head 就必须显式关掉这个保护。
-                    #   2026-10-25 实测：漏传它会让 lmhead_only 臂**静默替换 0 个模块**
+                    #   2026-10-24 实测：漏传它会让 lmhead_only 臂**静默替换 0 个模块**
                     #   （realized_bytes={}、ΔNLL 与 fp16 逐位相同——那次 PPL 因此作废）。
                     keep_lm_head_fp16=bool(arm.get("keep_lm_head_fp16", True)),
                 )

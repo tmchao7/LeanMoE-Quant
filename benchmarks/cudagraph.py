@@ -734,7 +734,7 @@ class StaticCacheDecodeSession:
         旧语义是把 `_skip_mask_fill_enabled()` 直接传给 `_set_step_inputs`，由后者对
         非 mask-independent 的 session raise —— 翻默认后，无 env 重跑非 kernel 图格
         会整格 blocked（A3 的无 env 金丝雀 p4b/sdpa 正是这种格）。改为与 packed_qkv
-        的"不适用 ⇒ no-op"同款（2026-10-25 review）。显式请求的 A/B 拒绝在
+        的"不适用 ⇒ no-op"同款（2026-10-24 review）。显式请求的 A/B 拒绝在
         `tools/profile_graph.py` 的参数检查（`--ab-mask-fill` 需 `attn=kernel`），
         不受此影响；`_set_step_inputs(skip_mask=True)` 的直接误用仍然 raise。
         """

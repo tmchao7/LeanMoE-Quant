@@ -209,7 +209,7 @@ def dequant_gemm_fused(
         raise NotImplementedError("fused dequant-GEMM 只实现 4/8-bit，得到 %d" % bits)
     # MXFP4（EXP-p3-02）：E2M1 码（无符号 0..15，自带符号位）+ E8M0 尺度字节（uint8）。
     # 语义契约 = lemoq/quant/mxfp4.py（主机侧量化器）；侦察依据见
-    # docs/reference/QUANT_FORMAT_RECON_2026-10-25（向量路径，无 tl.dot）。
+    # docs/reference/QUANT_FORMAT_RECON_2026-10-24（向量路径，无 tl.dot）。
     if mxfp4:
         if bits != 4:
             raise ValueError("mxfp4 只支持 4-bit E2M1，得到 bits=%r" % bits)

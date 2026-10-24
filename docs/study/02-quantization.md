@@ -37,7 +37,7 @@ grouped MoE 专家走单独的 [`moe_grouped_quant.py`](../../src/lemoq/kernels/
 
 ## 4. 精度门：怎么判断“能用”
 
-[`quant_gate.py`](../../benchmarks/quant_gate.py)、[`runner.GATE_CITATIONS`](../../benchmarks/runner.py)、[METRICS §1](../reference/METRICS.md) 是入口。当前 W8A16、group=128、fused RMSNorm 的 5 窗口 prompt gate：ctx=1024 的 KL **0.001361**、top-1 **0.975758**，两个阈值分别是 KL <0.01、top-1 ≥0.95；这是**本项目自定**的阈值。门测的是 teacher forcing 下 165 个位置，不能说成任意任务绝对正确。ctx=4096 要用另一个独立 gate；`w8a8@4096` 曾靠 3/165 个位置骑线 PASS，**2026-10-25 的 10 窗复测（KL 均值 0.0262>0.01）证明 5 窗 PASS 不稳健，已 de-publish**——该配置现在与 w4a16 同语义：照跑、只作 evidence、不发布延迟。这是"门样本量决定结论"的活教材。见 [p1-04 v3](../../experiments/EXP-p1-04-prompt-set-gate.md)。
+[`quant_gate.py`](../../benchmarks/quant_gate.py)、[`runner.GATE_CITATIONS`](../../benchmarks/runner.py)、[METRICS §1](../reference/METRICS.md) 是入口。当前 W8A16、group=128、fused RMSNorm 的 5 窗口 prompt gate：ctx=1024 的 KL **0.001361**、top-1 **0.975758**，两个阈值分别是 KL <0.01、top-1 ≥0.95；这是**本项目自定**的阈值。门测的是 teacher forcing 下 165 个位置，不能说成任意任务绝对正确。ctx=4096 要用另一个独立 gate；`w8a8@4096` 曾靠 3/165 个位置骑线 PASS，**2026-10-24 的 10 窗复测（KL 均值 0.0262>0.01）证明 5 窗 PASS 不稳健，已 de-publish**——该配置现在与 w4a16 同语义：照跑、只作 evidence、不发布延迟。这是"门样本量决定结论"的活教材。见 [p1-04 v3](../../experiments/EXP-p1-04-prompt-set-gate.md)。
 
 补充证据：PPL 是 WikiText-2 前 8192 token，fp16 9.1985、W8A16 9.2047（+0.067%）；MMLU 是 200 题分层子集，53.50%→52.50%（−1.0 点），样本小，不能泛化成“任务精度只降 1 点”。GSM8K 基座 0/15 是 floor，已放弃该口径。出处见 [RESULTS §3.1](../../RESULTS.md)。**gate FAIL 的格子 `latency` 必须为 `null`**，不能挑测量内部的快数字写简历。
 

@@ -360,7 +360,7 @@ def test_quant_spec_includes_lm_head_only_when_switch_on(monkeypatch):
 def test_lm_head_w8_without_gate_measurement_is_refused(capsys, monkeypatch):
     """F5 fail-closed：开关开但 EXP-p1-06 的门没测 ⇒ 加载模型前拒绝 rc=2。
 
-    ★ 2026-10-25 门实测落表后，"没测"是**模拟状态**（清空表）——这条测试钉的是
+    ★ 2026-10-24 门实测落表后，"没测"是**模拟状态**（清空表）——这条测试钉的是
     fail-closed 机制本身，不是表的内容（表的内容由下面那条钉死测试对工件负责）。
     基础门（EXP-p1-04 的 w8a16 g128）PASS 与它无关 —— lm_head 是**第二个量化表面**，
     硬规则 2 分别对每个表面成立。
@@ -653,7 +653,7 @@ def test_w8a8_at_4096_straddles_the_top1_threshold_across_implementations():
     assert t1 < TOP1_MIN <= t2, (t1, t2)
     # 位置级别的差距极小（165 个位置里 3 个）：这正是"贴线"而不是"改判"的证据
     assert abs(t2 - t1) * 165 <= 4, (t1, t2)
-    # ★ R3 裁决（2026-10-25）后引用表填的是 10 窗复测的 top-1 —— 与 5 窗的 t2 同值
+    # ★ R3 裁决（2026-10-24）后引用表填的是 10 窗复测的 top-1 —— 与 5 窗的 t2 同值
     # （都是 0.963636），但判定由 KL 均值（0.0262 > 0.01）翻成 FAIL（de-publish）。
     assert abs(gate_for_cell("w8a8", 128, 4096)["top1"] - t2) < 5e-7
 
@@ -997,7 +997,7 @@ def test_quantize_for_cfg_fp16_is_a_noop(tiny_olmoe):
 def test_quantize_for_cfg_honours_lm_head_switch(monkeypatch):
     """F5 端到端（CPU，runner 真跑路径）：开关开 ⇒ lm_head 真的被替换且账目跟随。
 
-    ★ 2026-10-25 自检补的空档：`quantize_for_cfg → quant_spec_for_cfg` 这条 runner
+    ★ 2026-10-24 自检补的空档：`quantize_for_cfg → quant_spec_for_cfg` 这条 runner
       实际执行链在补测试前只有 GPU probe 走过（build_arms 是另一条构造路）——
       A/B 首跑之前先在 Mac 上把链钉住。
     """

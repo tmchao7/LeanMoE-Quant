@@ -265,7 +265,7 @@ test_the_top1_criterion_actually_bites_at_ctx4096` 钉住。
   它们记录的 `gate FAIL` 是在 v1 下测的。按新引用表，`w8a8@4096` 会变成 PASS ⇒
   那些格子的 `verdict` 需要重跑才能改；**在重跑之前它们只是 v1 的证据**。
 
-## v3（2026-10-25，R3）：门样本 5→10 窗复测与 **de-publish 裁决**
+## v3（2026-10-24，R3）：门样本 5→10 窗复测与 **de-publish 裁决**
 
 预注册的稳健性复测（MATURITY_REVIEW R3，即 Follow-up #2 的 n≥10 要求）：同一协议只把窗口数
 5→10（`tools/quant_probe.py` 新臂组 `r3_windows`，只含 GATE_CITATIONS 引用的 w8a16/w8a8 g128；
@@ -284,7 +284,7 @@ test_the_top1_criterion_actually_bites_at_ctx4096` 钉住。
 top-1 均值 0.963636 与 5 窗**完全同值**（159/165 位置）—— 翻转的判据是 KL，不是 top-1。
 v2 的"贴线"疑点（3/165、贪心轨迹移动）由此从疑点变成**实测事实**：门估计对窗口数敏感。
 
-### 2. 裁决（用户批准，2026-10-25）：`w8a8@4096` **de-publish**
+### 2. 裁决（用户批准，2026-10-24）：`w8a8@4096` **de-publish**
 
 - `GATE_CITATIONS` 的 `("w8a8",128,4096)` 行**重指向 10 窗工件**（值 0.026159/0.963636，
   `gate_from_metrics` 推导 **FAIL**）；引用来源集中在新增的 `GATE_CITATION_SOURCES`

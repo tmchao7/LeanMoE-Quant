@@ -1,4 +1,4 @@
-# Kernel 微优 playbook — 带宽/寄存器压力/launch 开销(2026-10-25 调研)
+# Kernel 微优 playbook — 带宽/寄存器压力/launch 开销(2026-10-24 调研)
 
 > **性质：联网调研记录**（公开报告值/业界实践，非本项目实测），服务于两条线：
 > S2=F4 的 kernel 设计依据（已落地 `kv_direct.py`）与后续 down_sum/gate_up 的

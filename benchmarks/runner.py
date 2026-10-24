@@ -292,7 +292,7 @@ GATE_CITATIONS: dict[tuple[str, int, int], dict[str, Any]] = {
     #   表里填的是"当前实现"的实测值（规则：引用必须与跑的实现一致），不是"更好的那个"。
     ("w8a16", 128, 4096): {"kl": 0.000842, "top1": 0.975758, "rmsnorm": "fused"},
     ("w8a8", 128, 4096): {"kl": 0.026159, "top1": 0.963636, "rmsnorm": "fused"},
-    # ★★ R3 裁决（2026-10-25，用户批准 de-publish）：本行**不再引用 5 窗规范工件**，
+    # ★★ R3 裁决（2026-10-24，用户批准 de-publish）：本行**不再引用 5 窗规范工件**，
     #   改引 10 窗复测 `results/EXP-p1-04-r3-10win-ctx4096.json`（臂
     #   `w8a8_attn_experts_g128_r3`）。10 窗 KL 均值 0.0262 > 0.01（重尾：w7 单窗 0.2247、
     #   sd 0.066、spread 71.7×），top-1 均值 0.963636 与 5 窗同值 —— 推导判定 **FAIL**，
@@ -340,7 +340,7 @@ def citation_source_for(bit_width: str, group_size: int, ctx: int) -> dict[str, 
 #   `w8a16_lmhead_only_g128` 臂 aggregate（新测量抄入 + 钉死测试，禁止手写）——
 #   门臂是"只量化 lm_head"的隔离测量（一次一变量；组合臂 `w8a16_full_lmhead_g128`
 #   作为采纳证据进记录，不进门表）。
-#   ★ 2026-10-25 门实测落表（EXP-p1-06，5 窗 + ones 对照、wikitext、fused norm）：
+#   ★ 2026-10-24 门实测落表（EXP-p1-06，5 窗 + ones 对照、wikitext、fused norm）：
 #     近无损（KL 6.1e-5 / 6.6e-5，门 0.01；top-1 165/165 全对）。★ 本表只解锁 A/B 的
 #     ON 臂——**采纳（翻默认）仍以三链（KL/top-1、PPL<1%、MMLU<2 点）+ A/B + 刷新为准**
 #     （F5 规格红线）；PPL 首轮因 quant_ppl 的 keep 透传缺陷作废（d055994 修复）。

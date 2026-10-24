@@ -130,7 +130,7 @@ def build_arms(
             },
         )
     # ★ MXFP4 门臂（EXP-p3-02 的精度裁决；格式见 lemoq/quant/mxfp4.py 与
-    #   docs/reference/QUANT_FORMAT_RECON_2026-10-25）。组大小固定 32（OCP MX）。
+    #   docs/reference/QUANT_FORMAT_RECON_2026-10-24）。组大小固定 32（OCP MX）。
     #   阈值走 W4 档（--kl-gate-w4 0.05 / --top1-gate 0.95）——4-bit 类。
     add(
         "gate_mxfp4",

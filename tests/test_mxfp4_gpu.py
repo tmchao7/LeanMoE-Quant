@@ -57,7 +57,7 @@ def test_triton_mxfp4_matches_host_reference():
         assert torch.allclose(got, ref, **TOL), (m, k, n, seed)
         # ★ 逐位一致**不成立**且不该要求：单个乘积（二次幂 × 二次幂）确实精确，
         #   但 K 维**归约顺序**不同（tl.sum 树形 vs torch mm 的分块序）⇒ 末位 ULP
-        #   必有差。K1 的门是 PARITY_GATE（1e-3），不是位相等——2026-10-25 实测记录。
+        #   必有差。K1 的门是 PARITY_GATE（1e-3），不是位相等——2026-10-24 实测记录。
 
 
 def test_triton_mxfp4_conjunction_half_vs_fp64_oracle():

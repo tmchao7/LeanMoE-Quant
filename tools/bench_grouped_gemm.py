@@ -91,7 +91,7 @@ _SWEEP = {
         {"BLOCK_N": 256, "BLOCK_K": 64, "SPLIT_K": 1, "num_warps": 8},
         {"BLOCK_N": 128, "BLOCK_K": 64, "SPLIT_K": 2, "num_warps": 4},
         {"BLOCK_N": 64, "BLOCK_K": 128, "SPLIT_K": 4, "num_warps": 4},
-        # ★ 2026-10-25 补：pinned 默认（GROUPED_CONFIGS）此前**不在网格里**——
+        # ★ 2026-10-24 补：pinned 默认（GROUPED_CONFIGS）此前**不在网格里**——
         #   上一轮扫描因此无法回答"默认 vs 最优差多少"（网格缺陷，见 ISSUES 双轨轮记录）。
         #   默认行与网格行同表对比后，">5% 才立 config 实验"的判据才有分母。
         {
@@ -584,7 +584,7 @@ def main(argv: list[str] | None = None) -> int:
         #   2. down_sum SPLIT_K >= 4（第一轮前 6 名共有的性质）
         #   3. 再加 gate_up_act BLOCK_K=128（第二轮的赢家区）
         candidates_cfg = {
-            # ★ 2026-10-25：本轮问题 = "pinned 默认 vs v2 sweep 平坦最优"（F4 采纳后的
+            # ★ 2026-10-24：本轮问题 = "pinned 默认 vs v2 sweep 平坦最优"（F4 采纳后的
             #   L2/节点环境）。默认 = GROUPED_CONFIGS；候选 = sweep v2 36 平坦行最快。
             "pinned_default__g32x128w4_down64x128SK4w8": {
                 "gate_up_act": {"BLOCK_N": 32, "BLOCK_K": 128, "SPLIT_K": 1, "num_warps": 4},

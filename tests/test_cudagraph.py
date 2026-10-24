@@ -69,7 +69,7 @@ def test_blocked_and_failed_results_record_effective_fusion_switches(monkeypatch
     from lemoq.kernels import fusion_switches as fs
 
     # ★ 键集从 `ENV_VARS` 派生（不是手抄开关名）：加第 N 个开关时这条测试不用改，
-    #   与"断言对着 FUSION_DEFAULTS 比"是同一个意图（2026-10-25 加 lm_head_w8 时验证）。
+    #   与"断言对着 FUSION_DEFAULTS 比"是同一个意图（2026-10-24 加 lm_head_w8 时验证）。
     for env in fs.ENV_VARS.values():
         monkeypatch.delenv(env, raising=False)
     cfg = {"ctx": 1024, "batch": 1, "max_new_tokens": 32, "warmup": 5, "timed": 20}

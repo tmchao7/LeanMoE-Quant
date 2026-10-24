@@ -81,7 +81,7 @@ def test_skip_mask_still_enforces_capacity():
 
 
 def test_env_helper_default_matches_switches_and_honors_flag(monkeypatch):
-    """无 env ⇒ 生效值 = `FUSION_DEFAULTS`（翻默认后此测试不需要改动，2026-10-25）。"""
+    """无 env ⇒ 生效值 = `FUSION_DEFAULTS`（翻默认后此测试不需要改动，2026-10-24）。"""
     from lemoq.kernels.fusion_switches import FUSION_DEFAULTS
 
     monkeypatch.delenv("LEMOQ_SKIP_MASK_FILL", raising=False)
@@ -111,7 +111,7 @@ def test_replay_paths_wire_the_flag_eager_and_capture_do_not():
 
 
 def test_replay_skip_mask_gates_on_captured_capability(monkeypatch):
-    """翻默认后的 no-op 语义（2026-10-25）：开关开了、但捕获期不是 mask-independent
+    """翻默认后的 no-op 语义（2026-10-24）：开关开了、但捕获期不是 mask-independent
     （非 kernel 图格，如 p4b 的 sdpa）⇒ 不跳过，而不是 raise 成整格 blocked。"""
     sess = _bare_session()  # _captured_mask_independent = True
     monkeypatch.setenv("LEMOQ_SKIP_MASK_FILL", "1")

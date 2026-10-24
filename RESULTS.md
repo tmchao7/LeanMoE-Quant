@@ -50,7 +50,7 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | # | 杠杆 | 实测 | 口径 | 出处 |
 | --- | --- | --- | --- | --- |
 | 1 | **执行轴**（eager → cudagraph，同一实现、**同一轮**） | **2.43×** @1024 / **1.35×** @4096 | fp16：9.8841 → 4.0670 / 9.8716 → 7.3211 ms；`host_share` 67.3% → 1.4%。★ 用归档里那一轮的两个 payload，**不**用"pre-P2i eager vs post-P2j graph"（跨轮，会造出假的 2.75×） | 归档 `results/EXP-p2j-refresh/archive/EXP-p4b-01-*`；[EXP-p4b-01](experiments/EXP-p4b-01-truncation.md) §2.8.2 |
-| 2 | **量化**（w8a16 vs fp16，图内 fused 臂） | **1.1979×** @1024 / **1.0898×** @4096 | 同一实现只换 bit-width；★ 2026-10-25 F4 采纳刷新（canary 0.336%） | 同上 §F4 刷新（采用列 3.5446 / 2.9589） |
+| 2 | **量化**（w8a16 vs fp16，图内 fused 臂） | **1.1979×** @1024 / **1.0898×** @4096 | 同一实现只换 bit-width；★ 2026-10-24 F4 采纳刷新（canary 0.336%） | 同上 §F4 刷新（采用列 3.5446 / 2.9589） |
 | 3 | **注意力实现**（HF sdpa → 自研 split-KV，图内） | **1.4528×** @1024 / **1.3801×** @4096（w8a16 格） | vs **同格 fp16**；最好格 **2.36× / 3.85×** vs fp16×sdpa（★ F4 采纳后，F1+F2+F4 默认开） | [EXP-p4c-01](experiments/EXP-p4c-01-in-graph-attention.md) §F4 刷新 |
 | 4 | **融合 RMSNorm**（7 kernel → 1 kernel） | **1.2358×** 全步；kernel/步 **994 → 539** | 同进程交错 A/B，**15/15 轮获胜**；同一个 cudagraph 格在 P2j 前后 **4.0670 → 3.5881 ms（1.13×）**、采纳刷新后 **3.5421 ms** 是它的端到端兑现 | [EXP-p4c-02](experiments/EXP-p4c-02-elementwise-tail.md) §5.6 |
 | 5 | **KV 直写**（32 aten launch → 16 triton） | kernel 格 **−1.8~−3.0%**（w8a16×kernel **1.5586 → 1.5116 ms**） | F4 独立进程 A/B **5/5 对**（off 1.5576 → on 1.5118，**−2.94%**，canary 0.154%）；刷新轮 23/23、canary 0.336%；kernels/步 345→**329** | [EXP-p4c-01](experiments/EXP-p4c-01-in-graph-attention.md) §F4 |
@@ -115,7 +115,7 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | 自研 kernel 族（全部过 K1 parity 门 1e-3） | **4**：grouped MoE GEMV（fp16 + 8/4-bit）、dense 融合反量化 GEMM、split-KV decode attention、融合 RMSNorm |
 | Python（不含虚拟环境） | **35,400 行 / 103 文件**（`src` + `tools` + `benchmarks` + `tests` + `scripts`，不含 `__pycache__`；2026-10-23 实测） |
 | 测试 | **44 个 `test_*.py`**；Mac CPU **707 passed / 0 failed / 33 deselected**（S2 交接轮实测；deselected = `-m "not gpu"` 主动排除）；GPU 标记用例单独跑（交接轮 31 passed / 1 skipped）；同一套四门由 GitHub Actions 持续验证（A5） |
-| 实验矩阵 | 21 条声明 / **64 格展开**（`benchmarks.harness.expand(arch=sm_120)` 实算）；**16 条已执行**；Mac 树 `EXP-*__*/result.json` **59 份（48 done / 10 planned / 1 blocked——p0-03 by-design）**，GPU 盘另有 p2j 归档与历史工件；操作性验收以 `DRY=1 F2=1` 清单 = 23 格为准（2026-10-25 对账，ISSUES N5） |
+| 实验矩阵 | 21 条声明 / **64 格展开**（`benchmarks.harness.expand(arch=sm_120)` 实算）；**16 条已执行**；Mac 树 `EXP-*__*/result.json` **59 份（48 done / 10 planned / 1 blocked——p0-03 by-design）**，GPU 盘另有 p2j 归档与历史工件；操作性验收以 `DRY=1 F2=1` 清单 = 23 格为准（2026-10-24 对账，ISSUES N5） |
 | 度量纪律 | 实测带宽而非规格值；KL/top-1 门先于性能；schema 强制"门失败 ⇒ latency 为 null"；首尾同格金丝雀；同租户记录不 kill；覆盖前先归档 |
 
 ## 6. 明确的缺口（不含糊）

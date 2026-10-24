@@ -33,7 +33,7 @@ export LEMOQ_FUSED_ROPE=1 LEMOQ_FUSED_ROUTE=1 LEMOQ_SKIP_MASK_FILL=1
 [ "${LMHEAD:-0}" = "1" ] && export LEMOQ_LMHEAD_W8=1
 
 # ---- 1) 生成命令清单（从每个 payload 的 config 反推；跳过已刷新的格）----
-# ★ 2026-10-25：清单先进临时文件 —— DRY 模式**零副作用**。旧写法先建 archive/、清空
+# ★ 2026-10-24：清单先进临时文件 —— DRY 模式**零副作用**。旧写法先建 archive/、清空
 #   f1.log/contention.log 再判断 DRY，Mac 自检和 GPU 上的预检都会把上一轮证据抹掉；
 #   坏 payload ⇒ 非零退出中止，不以残缺清单续跑。
 LIST=$(mktemp /tmp/f1_cells.XXXXXX) || exit 1
@@ -81,7 +81,7 @@ for p in sorted(glob.glob("results/EXP-*__*/result.json")):
     packed = "1" if (os.environ.get("LEMOQ_PACKED_QKV") == "1" and kernel == "1" and quantized) else "0"
     # ★ 断点续跑要按**本格的期望值**判断（2026-10-24 修）：旧写法要求四个开关全 True，
     #   但 F2 只作用于 2 格，其余 21 格永远满足不了 ⇒ 重跑会整轮重来。
-    # F4 期望值（2026-10-25）：KV=1 时 kernel 格必须带 kv_direct_write=True、
+    # F4 期望值（2026-10-24）：KV=1 时 kernel 格必须带 kv_direct_write=True、
     #   非 kernel 格必须带 False（接线在 _decode_forward_impl ⇒ 非 kernel 格 no-op）；
     #   KV=0（旧轮）不检查——历史 payload 无该键属正常。
     kv_on = os.environ.get("LEMOQ_KV_DIRECT_WRITE") == "1"
@@ -176,7 +176,7 @@ run_one () {
   snap "$label-pre"
   echo "=== [$label] $exp $args start $(date -Is)" >> "$LOG"
   $PY -m benchmarks.runner --exp "$exp" --model "$M" $args --force > "$OUT/$label.log" 2>&1
-  # ★ 2026-10-25：必须同行声明 —— 旧写法 `local rc; rc=$?` 里 `local rc` 会把 $?
+  # ★ 2026-10-24：必须同行声明 —— 旧写法 `local rc; rc=$?` 里 `local rc` 会把 $?
   #   重置为 0，runner 的真实退出码从未进过日志/判定（实测 bash 语义）。
   local rc=$?
   echo "=== [$label] exit=$rc end $(date -Is)" >> "$LOG"
@@ -220,7 +220,7 @@ print("    [%s] bw=%-6s attn=%-6s ctx=%-5s exec=%-9s dq=%-8s norm=%-5s gate=%-4s
 PYEOF
 ) || rc2=$?
   printf '%s\n' "$check" >> "$LOG"
-  # ★ 2026-10-25：失败格不再静默 —— runner 非零退出、自检崩溃或自检有警告 ⇒ 记入
+  # ★ 2026-10-24：失败格不再静默 —— runner 非零退出、自检崩溃或自检有警告 ⇒ 记入
   #   failed.txt，轮末对账（清单数 = 干净刷新数 + 失败数），不干净就不许回填数字。
   if [ "$rc" -ne 0 ] || [ "$rc2" -ne 0 ] || printf '%s' "$check" | grep -q '!! '; then
     echo "$label" >> "$FAILS"
@@ -249,7 +249,7 @@ $PY -m tools.round_canary "$OUT/canary_head.json" "$OUT/canary_tail.json" --grap
   --out "$OUT/canary.json" >> "$LOG" 2>&1
 RC=$?
 echo "=== round_canary exit=${RC}（非 0 ⇒ 整轮 VOID，不要回填任何数字）===" >> "$LOG"
-# ---- 5) 对账（2026-10-25）：清单数 = 干净刷新数 + 失败数；失败格不静默 ----
+# ---- 5) 对账（2026-10-24）：清单数 = 干净刷新数 + 失败数；失败格不静默 ----
 N_FAILED=$(wc -l < "$FAILS" | tr -d ' ')
 echo "=== 对账：清单 $N_CELLS 格，失败/自检警告 $N_FAILED 格 ===" >> "$LOG"
 if [ "$N_FAILED" -gt 0 ]; then

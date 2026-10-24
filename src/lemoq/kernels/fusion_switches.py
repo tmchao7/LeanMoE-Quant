@@ -9,8 +9,8 @@ payload — exactly like `config.rmsnorm` after P2i.
     fused_route     LEMOQ_FUSED_ROUTE        True      fused routing (adopted 2026-10-24)
     skip_mask_fill  LEMOQ_SKIP_MASK_FILL     True      mask-fill skip (adopted 2026-10-24)
     packed_qkv      LEMOQ_PACKED_QKV         True      F2 packed q/k/v (adopted 2026-10-24)
-    kv_direct_write LEMOQ_KV_DIRECT_WRITE    True      F4 KV direct write (adopted 2026-10-25)
-    lm_head_w8      LEMOQ_LMHEAD_W8          False     F5 lm_head W8 量化（2026-10-25 接线，
+    kv_direct_write LEMOQ_KV_DIRECT_WRITE    True      F4 KV direct write (adopted 2026-10-24)
+    lm_head_w8      LEMOQ_LMHEAD_W8          False     F5 lm_head W8 量化（2026-10-24 接线，
                                                        EXP-p1-06 门实测通过后才翻 True）
 
 2026-10-24: F1+F2 adopted — all four True after the valid refresh round

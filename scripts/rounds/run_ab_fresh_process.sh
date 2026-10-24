@@ -39,7 +39,7 @@ case "$PAIRS" in ''|*[!0-9]*) echo "PAIRS 必须是正整数"; exit 2;; esac
 
 # ★ fail-closed（2026-10-24）：采纳会把候选翻成**默认开**。那时 off 臂若不显式写 0，
 #   两臂跑的是同一实现 ⇒ 静默量出"0% 收益"。这比 VOID 更坏，所以直接拒绝。
-# ★ 2026-10-25：探针本身失败（PY 不存在 / import 错）也一律拒绝 —— 旧写法探针失败
+# ★ 2026-10-24：探针本身失败（PY 不存在 / import 错）也一律拒绝 —— 旧写法探针失败
 #   得到空串后**静默放行**（fail-open），与本守卫的存在理由相反。
 SWITCH_VAR=${ENV_ON%%=*}
 # `PYTHONPATH=src`：Mac 上 lemoq 只以源码目录形式可用（没 pip install -e），
@@ -123,7 +123,7 @@ for arm in "${SEQ[@]}"; do
       > "$OUT/$label.log" 2>&1 || rc=$?
   fi
   echo "=== $label exit=$rc end $(date -Is)" >> "$OUT/ab.log"
-  # ★ 2026-10-25：runner 失败时不落新 payload —— 旧写法无条件 `cp` 会把**上一臂的
+  # ★ 2026-10-24：runner 失败时不落新 payload —— 旧写法无条件 `cp` 会把**上一臂的
   #   旧 payload**（status=done）存成当前臂的结果，status 门查不出这种错配。
   #   失败就留 FAILED 标记、不采 payload，让"有效对不足"把轮判 INVALID。
   if [ "$rc" -eq 0 ] && [ -f "$CELL/result.json" ]; then
@@ -173,7 +173,7 @@ for name in names:
         "kernels": (d.get("bottleneck") or {}).get("kernels_per_step"),
         "tokens": (d["correctness"] or {}).get("graph_output_tokens"),
         # ★ 从 ENV_VARS 动态派生，不得硬编码开关名——硬编码会让新注册的开关
-        #   在这里读到 None，把 VALID 轮误判成 INVALID（2026-10-25 F4 实测踩中）。
+        #   在这里读到 None，把 VALID 轮误判成 INVALID（2026-10-24 F4 实测踩中）。
         "switches": {k: d["config"].get(k) for k in ENV_VARS},
     })
 
@@ -213,7 +213,7 @@ if drift is None or abs(drift) > 5: reasons.append("canary 漂移 >5% 或缺失"
 if tokens_equal is False: reasons.append("跨臂 greedy token 不同")
 if len(off) != len(on) or len(off) < pairs: reasons.append("有效对不足 %d" % pairs)
 if mad is None or mad > 0.02: reasons.append("比值 MAD 过大（>2%）")
-# ★ 2026-10-25：逐 run 校验开关状态与臂一致 —— 堵两个静默假结果路径：
+# ★ 2026-10-24：逐 run 校验开关状态与臂一致 —— 堵两个静默假结果路径：
 #   (a) 环境残留（默认翻 on 后 off 臂忘了显式 0 ⇒ 两臂同实现量出假 0%）；
 #   (b) runner 失败后误采旧 payload（status=done 门查不出错配）。
 arm_mismatch = []

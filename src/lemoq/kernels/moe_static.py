@@ -273,7 +273,7 @@ def _route(x: Any, router_weight: Any, *, top_k: int, norm_topk_prob: bool):
         top_w, top_i = routing_softmax_topk(logits, top_k=top_k, norm_topk_prob=norm_topk_prob)
         return logits, top_w.to(x.dtype), top_i
     # ★ 请求了候选但张量不在 CUDA ⇒ ATen 原路（rope `_decode_shape_guard` 同款可用性
-    #   回退，2026-10-25 review）：翻默认后 CPU 测试与 Mac 运维路径不再炸；GPU 上
+    #   回退，2026-10-24 review）：翻默认后 CPU 测试与 Mac 运维路径不再炸；GPU 上
     #   请求=生效、行为不变。`routing_softmax_topk` 本身的显式报错**不放松** ——
     #   绕过 `_route` 直接调用它仍然严格（test_kernel_requires_cuda_without_silent_fallback）。
     weights = F.softmax(logits, dim=-1, dtype=torch.float)

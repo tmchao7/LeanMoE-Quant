@@ -8,7 +8,7 @@
 
 | 文档 | 是什么 | 给谁 |
 | --- | --- | --- |
-| [HANDOFF_2026-10-26.md](handoff/HANDOFF_2026-10-26.md) | **当前交接（自足版，可从零接管）**：§0 2026-10-25 轮后上下文（de-publish 闭环、F5 门 PASS、工具缺陷修复）/ §2 F5 采纳执行手册（PPL→MMLU→A/B→翻默认→刷新→回填）/ §3 中止路径 / §8 接手自检 | 下一个上机的人 / agent |
+| [HANDOFF_2026-10-25.md](handoff/HANDOFF_2026-10-25.md) | **当前交接（自足版，可从零接管）**：§0 2026-10-24 轮后上下文（de-publish 闭环、F5 门 PASS、工具缺陷修复）/ §2 F5 采纳执行手册（PPL→MMLU→A/B→翻默认→刷新→回填）/ §3 中止路径 / §8 接手自检 | 下一个上机的人 / agent |
 | [ADOPTION_SYNC_2026-10-24.md](handoff/ADOPTION_SYNC_2026-10-24.md) | **刷新后数字同步映射**：每个会变的数字 → 格 id + 取值表达式 + 现用值；含"不随刷新变化"清单与**翻默认的连锁**（测试 / refusal / `packed_qkv_effective`） | 做采纳轮的人 |
 | [ADOPTION_SYNC_F5_2026-10-25.md](handoff/ADOPTION_SYNC_F5_2026-10-25.md) | **F5 采纳轮的取数地图（预写）**：`lm_head` w8 翻默认后哪些数会动（量化格 p50 −40~80 µs、`[W]` −103 MB）、逐格检查点、文档同步清单与不变清单——刷新后回填 | 做明天 F5 采纳轮的人 |
 | [ISSUES_2026-10-23.md](handoff/ISSUES_2026-10-23.md) | **关机后本地可解决的问题清单**（P0 采纳轮 / P1 协议 / P2 文档 / P3 需 GPU）+ **2026-10-24 复盘**（N1–N4 与处置、剩余项按 S1/S2/S3 归属） | Mac 上接手的人 |
@@ -30,9 +30,9 @@
 | [NCU_EVIDENCE.md](reference/NCU_EVIDENCE.md) | kernel 级证据：计数器为何被阻断、替代口径 | 深读性能归因的人 |
 | [NCU_PLAN.md](reference/NCU_PLAN.md) | 换机才能做的 ncu 补测清单（当前 blocked） | 将来拿到 profiling 权限的人 |
 | [FUSION_RESEARCH.md](reference/FUSION_RESEARCH.md) | 联网调研及二次复核：融合/量化方法、避坑点、来源适用限制（公开报告值，非实测） | 做融合任务（F1–F6）前要外部依据的人 |
-| [QUANT_FORMAT_RECON_2026-10-25.md](reference/QUANT_FORMAT_RECON_2026-10-25.md) | **量化格式侦察**：FP8 无字节收益（跳过）、MXFP4 4.25 bits/w 可走向量路径（"tl.dot 前置"退役，vLLM/llama.cpp 同构先例）；实施顺序与坑清单 | 做 EXP-p3-02 前必读 | 
-| [KV_INT8_RECON_2026-10-25.md](reference/KV_INT8_RECON_2026-10-25.md) | **E6 KV INT8 立项材料**：字节账（@4096 省 ≈172 µs/步=最大已声明杠杆）、KIVI/KVQuant/vLLM 做法与避坑、F4 写路径挂点 + score 折叠（内层零解包）、预注册阶梯 v1→v3 与验收红线 | 决定 E6 立项的人；获批后实施的人 | 
-| [KERNEL_MICROOPT_PLAYBOOK_2026-10-25.md](reference/KERNEL_MICROOPT_PLAYBOOK_2026-10-25.md) | **kernel 微优 playbook**：寄存器/occupancy↔带宽达成率（Little 定律）、cache modifier 策略、launch 节点成本、小拷贝坑清单、down_sum/gate_up 候选实验 | 写/调 Triton kernel 的人 | 
+| [QUANT_FORMAT_RECON_2026-10-24.md](reference/QUANT_FORMAT_RECON_2026-10-24.md) | **量化格式侦察**：FP8 无字节收益（跳过）、MXFP4 4.25 bits/w 可走向量路径（"tl.dot 前置"退役，vLLM/llama.cpp 同构先例）；实施顺序与坑清单 | 做 EXP-p3-02 前必读 | 
+| [KV_INT8_RECON_2026-10-24.md](reference/KV_INT8_RECON_2026-10-24.md) | **E6 KV INT8 立项材料**：字节账（@4096 省 ≈172 µs/步=最大已声明杠杆）、KIVI/KVQuant/vLLM 做法与避坑、F4 写路径挂点 + score 折叠（内层零解包）、预注册阶梯 v1→v3 与验收红线 | 决定 E6 立项的人；获批后实施的人 | 
+| [KERNEL_MICROOPT_PLAYBOOK_2026-10-24.md](reference/KERNEL_MICROOPT_PLAYBOOK_2026-10-24.md) | **kernel 微优 playbook**：寄存器/occupancy↔带宽达成率（Little 定律）、cache modifier 策略、launch 节点成本、小拷贝坑清单、down_sum/gate_up 候选实验 | 写/调 Triton kernel 的人 | 
 | [MOE_CUDAGRAPH.md](reference/MOE_CUDAGRAPH.md) | 为什么 HF 的 MoE 进不了 CUDA Graph（预判+依据） | 理解 p0-03 blocked 结论的人 |
 | [SERVER_RUNBOOK.md](reference/SERVER_RUNBOOK.md) | 服务器到手后的命令序列 | 上机执行的人 |
 

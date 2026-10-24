@@ -1,6 +1,6 @@
 """test_kv_direct_write_gpu — F4 kernel 的 K 门（GPU；`tests/test_kv_direct_write.py` 的真核版）。
 
-钉住的口径（HANDOFF_2026-10-25 §3）：
+钉住的口径（HANDOFF_2026-10-24 §3）：
     - kernel 直写后的 cache 必须与 HF `StaticCache.update()` **逐位**相同（k、v、
       全部槽位——写入槽逐位相同 + 未填充槽原样）；
     - `kv_direct_write_applicable` 的守卫必须把不适用形态**显式拒到回退**

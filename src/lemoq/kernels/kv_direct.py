@@ -1,11 +1,11 @@
-"""kv_direct — F4 候选：KV 直写 kernel（默认关，S2 预注册选定，见 HANDOFF_2026-10-25 §2）。
+"""kv_direct — F4 候选：KV 直写 kernel（默认关，S2 预注册选定，见 HANDOFF_2026-10-24 §2）。
 
 把 rope 后的 k 与 v **逐位**写进 `StaticCache` 的 `[pos]` 槽，替代 HF
 `StaticLayer.update()` 的 `index_copy_`（每步 32 次 aten launch，实测 0.0560 ms、
 gap 55.9 µs——S2 账本第一名）。语义契约由 `kv_write.write_kv_slot` 钉死，
 K 门 = `tests/test_kv_direct_write.py` 的 kernel 用例与 HF 路径**逐位**对照。
 
-设计依据（2026-10-25 调研，`docs/reference/KERNEL_MICROOPT_PLAYBOOK_2026-10-25.md`）：
+设计依据（2026-10-24 调研，`docs/reference/KERNEL_MICROOPT_PLAYBOOK_2026-10-24.md`）：
 
     - vLLM `reshape_and_cache_flash`（csrc/cache_kernels.cu）：NHD 布局下写 cache
       是**平铺 coalesced copy**；本仓 (1,H,1,D)→(1,H,max,D) 同为平铺、无转置。
@@ -55,7 +55,7 @@ def kv_direct_write_applicable(cache_layer: Any, key_states: Any, value_states: 
         - k/v 形状 (1, H, 1, D)；
         - head_dim D 是 2 的幂（`tl.arange` 需要精确 BLOCK，无 mask 路径）；
         - 全部张量在 **CUDA** 上（CPU 张量即使形状匹配也回退——盒子上有 triton，
-          默认翻转后 CPU 测试必须走 update()，2026-10-25 实测踩中）。
+          默认翻转后 CPU 测试必须走 update()，2026-10-24 实测踩中）。
     """
     torch = _torch()
     if torch is None:

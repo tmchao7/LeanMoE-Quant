@@ -3,7 +3,7 @@
 为什么：4-bit 诊断（EXP-p1-05）判死的是 **int4-RTN**（fp16 组尺度 + 整数格点）；
 MXFP4 是不同的格式（E2M1 码 + 32 元素共享 **E8M0 幂 2 尺度**，4.25 bits/权重），
 是 5090（sm_120）的差异化存储格式，也是"4-bit 是否可行"的最后一次裁决
-（侦察与实施坑清单：`docs/reference/QUANT_FORMAT_RECON_2026-10-25.md`）。
+（侦察与实施坑清单：`docs/reference/QUANT_FORMAT_RECON_2026-10-24.md`）。
 
 本模块只做**主机侧**（量化/反量化/打包，torch float32 精度做 RTN），
 kernel 侧（load uint8 → nibble 解包 → e2m1 查表 → `exp2(scale−127)`）另起。

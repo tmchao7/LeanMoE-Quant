@@ -1,17 +1,17 @@
 # EXP-p1-06-lm-head-w8
 
-> ★ F5 立项（2026-10-25 用户批准）：`lm_head` 也量化成 w8a16 g128 —— 量化叙事的最后一块。
+> ★ F5 立项（2026-10-24 用户批准）：`lm_head` 也量化成 w8a16 g128 —— 量化叙事的最后一块。
 > 预注册：假设与判据**先于**门实测写定（本文写入时 probe 仍在跑、任何结果未读）。
 
 - **ID**: `EXP-p1-06-lm-head-w8`
-- **Date**: 2026-10-25
+- **Date**: 2026-10-24
 - **Operator**: agent（GPU：租用 RTX 5090 32 GB，sm_120，实测读带宽 1560.3 GB/s）
-- **Status**: `running`（★ 第一链已过，2026-10-25：门 probe 双 ctx PASS、门行已落表 `cd3c97e`；
-  PPL 重测 / MMLU / A/B / 刷新待下一 GPU 窗，见 `docs/handoff/HANDOFF_2026-10-26.md`）
+- **Status**: `running`（★ 第一链已过，2026-10-24：门 probe 双 ctx PASS、门行已落表 `cd3c97e`；
+  PPL 重测 / MMLU / A/B / 刷新待下一 GPU 窗，见 `docs/handoff/HANDOFF_2026-10-25.md`）
 - **接线**: `LEMOQ_LMHEAD_W8` 开关（默认关，commit `79f7b88`）；独立门表
   `LMHEAD_GATE_CITATIONS`（接线时为空 ⇒ fail-closed，门实测通过才填）
 - **上游规格**: `docs/FUSION_OPPORTUNITIES.md` F5（含 N7 口径修订）；立项批准记录在
-  `AGENTS.md` §4 S3 行与 `docs/handoff/HANDOFF_2026-10-26.md` §0
+  `AGENTS.md` §4 S3 行与 `docs/handoff/HANDOFF_2026-10-25.md` §0
 
 ## Hypothesis（跑之前写）
 
@@ -73,7 +73,7 @@ total params:    6.92B
 
 ## 结果
 
-### 第一链：门（KL/top-1）——**PASS，且近无损**（2026-10-25 GPU 实测）
+### 第一链：门（KL/top-1）——**PASS，且近无损**（2026-10-24 GPU 实测）
 
 `tools/quant_probe.py --arms f5_lmhead --prompt-windows 5 --prompt-source wikitext
 --include-ones-control --rmsnorm fused`（缓存 `wikitext2_test_64k.pt`）。
@@ -99,17 +99,17 @@ total params:    6.92B
 首轮 `results/EXP-p1-06-lm-head-w8/ppl_f5_lmhead.json` **无效**：`tools/quant_ppl.py` 的
 rtn 臂漏传 `keep_lm_head_fp16` ⇒ `lmhead_only` 臂静默替换 0 个模块（`realized_bytes={}`、
 ΔNLL 与 fp16 **逐位相同**）、`full` 臂只量了 attention+experts。缺陷已修（commit
-`d055994`），重测列入下一窗（照 `HANDOFF_2026-10-26.md` §2）。该 JSON 保留作缺陷证据。
+`d055994`），重测列入下一窗（照 `HANDOFF_2026-10-25.md` §2）。该 JSON 保留作缺陷证据。
 
 ### 第三链：MMLU —— 待测
 
 ## Verdict
 
-**部分判定**（2026-10-25）：精度第一链（KL/top-1 门）**PASS，近无损**，`lm_head` w8a16 g128
+**部分判定**（2026-10-24）：精度第一链（KL/top-1 门）**PASS，近无损**，`lm_head` w8a16 g128
 的精度疑虑解除——EXP-p1-02 档 5"lm_head 对 KL/top-1 最敏感"的保留理由在 W8 g128 粒度下
 不成立（165/165 位置一致）。
 **采纳判定未完成**：按 F5 规格红线，翻默认仍需 PPL（<1%）+ MMLU（<2 点）+ 合规 A/B +
-23 格刷新——全部排在下一 GPU 窗（`docs/handoff/HANDOFF_2026-10-26.md` §2）。
+23 格刷新——全部排在下一 GPU 窗（`docs/handoff/HANDOFF_2026-10-25.md` §2）。
 开关 `LEMOQ_LMHEAD_W8` 当前**默认关**；门行落表只解锁 A/B 的 ON 臂。
 
 ## Applicability

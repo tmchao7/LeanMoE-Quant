@@ -3,11 +3,11 @@
 > MXFP4（OCP MX v1.0：E2M1 码 + 32 元素共享 E8M0 幂 2 尺度，4.25 bits/权重）作为
 > **存储格式**的量化实验。结论先说：**精度门 FAIL，负结果关闭**——RTN-MXFP4 比当年
 > 判死 int4-RTN 的同一道门**更差**，方向与量级精确命中预注册预判
-> （[`docs/reference/QUANT_FORMAT_RECON_2026-10-25.md`](../docs/reference/QUANT_FORMAT_RECON_2026-10-25.md) §0.6：
+> （[`docs/reference/QUANT_FORMAT_RECON_2026-10-24.md`](../docs/reference/QUANT_FORMAT_RECON_2026-10-24.md) §0.6：
 > "E8M0 幂 2 组尺度比 int4 的 fp16 组尺度更粗"）。
 
 - **ID**: `EXP-p3-02-mxfp4-block-scale`
-- **Date**: 2026-10-25
+- **Date**: 2026-10-24
 - **Machine**: AutoDL RTX 5090 32GB（sm_120，实测带宽 1560.6 GB/s）；torch 2.8.0+cu128 / triton 3.4.0 / transformers 4.57.6
 - **Status**: `done`（**负结果**；精度门 FAIL ⇒ 无延迟发布，两格 `separate/fused` 不跑——
   与 [EXP-p1-05](EXP-p1-05-w4-expert-calibration.md) 的处置先例一致：数值都不对的配置，
@@ -22,7 +22,7 @@
 "FP4 的 GEMM 优势被反量化与 host 开销吃掉，端到端收益远小于 4x"；
 refutation_signal = "端到端也拿到接近 4x"。
 
-★ 2026-10-25 侦察（QUANT_FORMAT_RECON）退役了"必须先切 tl.dot"的前置（向量路径可实现），
+★ 2026-10-24 侦察（QUANT_FORMAT_RECON）退役了"必须先切 tl.dot"的前置（向量路径可实现），
 并**预注册了本窗口的实际结果**："RTN-MXFP4 plausibly fails the same gate that killed
 int4-RTN; pivot to NVFP4-style fp scales if FAIL"。门结果走了第一个分支。
 
