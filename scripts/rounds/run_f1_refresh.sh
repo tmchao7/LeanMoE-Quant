@@ -78,11 +78,22 @@ for p in sorted(glob.glob("results/EXP-*__*/result.json")):
     packed = "1" if (os.environ.get("LEMOQ_PACKED_QKV") == "1" and kernel == "1" and quantized) else "0"
     # ★ 断点续跑要按**本格的期望值**判断（2026-10-24 修）：旧写法要求四个开关全 True，
     #   但 F2 只作用于 2 格，其余 21 格永远满足不了 ⇒ 重跑会整轮重来。
+    # F4 期望值（2026-10-25）：KV=1 时 kernel 格必须带 kv_direct_write=True、
+    #   非 kernel 格必须带 False（接线在 _decode_forward_impl ⇒ 非 kernel 格 no-op）；
+    #   KV=0（旧轮）不检查——历史 payload 无该键属正常。
+    kv_on = os.environ.get("LEMOQ_KV_DIRECT_WRITE") == "1"
+    if kv_on:
+        kv_ok = (c.get("kv_direct_write") is True) if kernel == "1" else (
+            c.get("kv_direct_write") is False
+        )
+    else:
+        kv_ok = True
     refreshed = (
         c.get("fused_route") is True
         and (kernel != "1" or (c.get("fused_rope") is True and c.get("skip_mask_fill") is True))
         and ((c.get("packed_qkv_effective") is True) if packed == "1"
              else (c.get("packed_qkv_effective") in (False, None)))
+        and kv_ok
     )
     if refreshed:
         continue
