@@ -20,9 +20,12 @@ settled — do not re-derive them and do not re-run their cells:
   `host_p50` 35.2 ms vs 1.5 ms archived, while `kernels_per_call` and `gpu_busy` match exactly).
   Host_share drops 77.5% → 1.6%, and the weight stream is only 42% (1024) / 23% (4096) of a graph
   step ⇒ even a perfect weight path ≤ ~1.74× / ~1.29×.
-  ★★ **`w8a8@4096`'s citation gate flipped FAIL → PASS** under the fused norm, so those cells now
-  publish latency (8.8232 ms cudagraph, F4 refresh) — but the flip is 3/165 positions (borderline), so it is
-  **not** evidence that w8a8 works at 4096; see `EXP-p1-04` v2 §1 and `EXP-p4b-01` §P2j.
+  ★★ **`w8a8@4096` is DE-PUBLISHED (R3 adjudication, 2026-10-25).** The P2i flip FAIL → PASS was
+  3/165 positions (borderline); the pre-registered 10-window re-measurement
+  (`results/EXP-p1-04-r3-10win-ctx4096.json`) shows KL mean **0.0262 > 0.01** (heavy tail: w7
+  0.2247, sd 0.066) — the 5-window PASS is **not robust**. The citation row now cites the
+  10-window artifact (derived verdict **FAIL**), so those cells run as evidence only: the
+  published 8.8232 ms cudagraph is **withdrawn**. See `EXP-p1-04` v3 and `EXP-p4b-01` §R3.
 
 - **`EXP-p4c-01` — supported (the other big non-weight block was the ATTENTION IMPLEMENTATION).**
   Swapping HF sdpa for this repo's split-KV core *inside the graph* cuts the step 1.36–2.44×.
@@ -53,12 +56,13 @@ settled — do not re-derive them and do not re-run their cells:
   (P2i, 2026-10-08).** `--rmsnorm {fused,hf}` (default `fused`), the implementation is recorded in
   `config.rmsnorm`, and there is a 6th load-time refusal for machines without triton/CUDA.
   Gate under the fused norm (5 windows): w8a16 **0.001361/0.000842** @1024/@4096 (both still PASS),
-  w4a16 FAIL both, **and `w8a8@4096` FLIPS from FAIL to PASS** (top-1 0.9455 → 0.9636). ★ That flip
+  w4a16 FAIL both, **and `w8a8@4096` FLIPPED from FAIL to PASS** (top-1 0.9455 → 0.9636). ★ That flip
   is **3/165 positions** — the two measurements straddle the threshold, and the norm change also
   moves the fp16 reference's greedy tokens (w2/w4) ⇒ the honest reading is "**not resolvable at
-  this budget**", not "it passes now". τ was not touched. The consequence was executed in P2j: the
-  refreshed `w8a8@4096` cells now publish latency (8.8232 ms cudagraph after the 2026-10-25 F4 refresh) and the flip is documented
-  in `EXP-p4b-01` §P2j as a re-adjudication, not as "w8a8 works at 4096".
+  this budget**", not "it passes now". τ was not touched. ★★ **R3 (2026-10-25) then de-published
+  it**: the 10-window re-measurement (KL mean 0.0262 > 0.01, heavy tail) showed the 5-window PASS
+  is not robust, and the user approved withdrawing the published latency — the citation row now
+  cites the 10-window artifact (verdict FAIL, evidence-only, w4a16 semantics); see `EXP-p1-04` v3.
 
 - **A fix was tried and REFUTED (kept on purpose).** Replacing HF's `OlmoeRMSNorm` chain (7 kernels ×
   65 norms/step, incl. 130 dtype casts) with torch's fused `F.rms_norm` is **5% slower**
@@ -158,7 +162,7 @@ in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`
 | --- | --- | --- |
 | Gate-0 probe, fp16 baseline, static MoE + cudagraph | done — P2j refresh: probes re-run, but all their cells are **host-bound ⇒ refresh VOID**, pre-P2i values kept | `experiments/EXP-p0-02-baseline-fp16.md`, `experiments/EXP-p0-04-cudagraph-static-moe.md` |
 | cudagraph feasibility with the HF MoE path | `blocked` **by design** (hf + dynamic cache cannot capture) | `experiments/EXP-p0-03-baseline-cudagraph.md` |
-| Accuracy gate — the only source of `GATE_CITATIONS` | done — **v2** (2026-10-08, re-measured under the fused RMSNorm): all 6 rows re-measured; only `w8a8@4096` flips (borderline top-1) | `experiments/EXP-p1-04-prompt-set-gate.md` |
+| Accuracy gate — the only source of `GATE_CITATIONS` | done — **v3** (2026-10-25, R3 10-window re-adjudication): `w8a8@4096` **de-published** (10-window KL mean 0.0262 > 0.01 ⇒ 5-window PASS not robust; row now cites the 10-window artifact, verdict FAIL); all other rows unchanged | `experiments/EXP-p1-04-prompt-set-gate.md` |
 | Precision side: error attribution, mixed bits, W8/W4 sweep | done (the old `EXP-p1-01` protocol was superseded by `p1-04`) | `experiments/EXP-p1-02-quant-error-attribution.md`, `experiments/EXP-p1-03-quant-mixed-bits.md`, `experiments/EXP-p1-01-w8-w4-accuracy.md` |
 | Attention path: eager, kernel, in-graph | done — ★ 2026-10-25 F4 refresh: eager 2.5642/2.9275（sdpa 格不动），kernel **2.1946/2.4326 ms**（F4 前 2.2406/2.4779） | `experiments/EXP-p2-03-decode-attention.md`, `experiments/EXP-p2-04-eager-attention.md`, `experiments/EXP-p2-05-attn-kernel.md` |
 | Grouped MoE GEMV (fp16) | done — ★ 2026-10-24 adoption refresh: 4.0829 → 3.6828 → **3.5340 ms** | `experiments/EXP-p2-02-moe-grouped-gemm.md` |
@@ -191,7 +195,7 @@ that the science was not done — read the record first.
 | P2b | ✅ **classified 2026-10-07** (`EXP-p4c-02`): the 0.90 ms tail is **13 named families × 16–83 calls/step** — copies 0.17 (149 calls), RMSNorm mean+rsqrt 0.15–0.25, KV-cache write+cat 0.11, residual add 0.05, routing topK 0.05; **no single kernel >20%** | it was the largest non-weight bucket left | `experiments/EXP-p4c-02-elementwise-tail.md` | no |
 | P2f | ✅ **identified 2026-10-07** (`EXP-p4c-02` §5.5): the copy family is **`aten::_to_copy` ×150/step (0.185 ms)** — dtype casts from HF's RMSNorm (`to(fp32)` + `to(fp16)` per norm × 65 norms) plus the norm's `pow/mean/rsqrt/mul` chain ⇒ P2f and the norm question are **the same fix** | — | — | no |
 | P2i | ✅ **done 2026-10-08**: plumbing + `--aggregate-only` (interrupted-run finalisation by the tool's own aggregation code) + gate re-measured **under the fused norm** for both ctx + `GATE_CITATIONS`/artifacts/tests updated + `EXP-p4c-01`'s 8 cells re-run as **v3** (canary −0.067%, one contaminated cell re-run clean) | P2h passed K1+D but the gate on record was HF-norm | `EXP-p1-04` v2 section + `EXP-p4c-01` §5.7 + `results/EXP-p4c-01-run/v3_*` | done |
-| P2j | ✅ **done 2026-10-08** (31 cells re-run, canary +0.13%): **13 graph cells adopted** (host ≤5%) — e.g. p4b's cudagraph set (E7 now **1.1911/1.0888**; 1.1927 was the canary-first denominator), p2-02 4.08→3.68, p2-04 3.11/3.48→2.63/3.00, p2-05 3.01/3.24→2.51/2.75; **18 host-bound cells VOID** (co-tenant CPU load; proved by the `--rmsnorm hf` control: `kernels_per_call`/`gpu_busy` match the archive exactly while `host_p50` goes 1.5 → 35.2 ms) ⇒ their pre-P2i payloads were **restored as canonical** and the contended refresh copies are kept in `results/EXP-p2j-refresh/contended/`. `w8a8@4096`'s gate flip is documented as a re-adjudication (borderline) | the norm swap made every recorded ms stale | per-record "★ P2j 刷新" sections + `results/EXP-p2j-refresh/` | done |
+| P2j | ✅ **done 2026-10-08** (31 cells re-run, canary +0.13%): **13 graph cells adopted** (host ≤5%) — e.g. p4b's cudagraph set (E7 now **1.1911/1.0888**; 1.1927 was the canary-first denominator), p2-02 4.08→3.68, p2-04 3.11/3.48→2.63/3.00, p2-05 3.01/3.24→2.51/2.75; **18 host-bound cells VOID** (co-tenant CPU load; proved by the `--rmsnorm hf` control: `kernels_per_call`/`gpu_busy` match the archive exactly while `host_p50` goes 1.5 → 35.2 ms) ⇒ their pre-P2i payloads were **restored as canonical** and the contended refresh copies are kept in `results/EXP-p2j-refresh/contended/`. `w8a8@4096`'s gate flip is documented as a re-adjudication (borderline) — **since withdrawn by the R3 de-publish (2026-10-25, see the v3 row above)** | the norm swap made every recorded ms stale | per-record "★ P2j 刷新" sections + `results/EXP-p2j-refresh/` | done |
 | P2k | **Re-run the 18 host-bound cells on a quiet box** (p0-02 ×2, p0-04 ×2, p2-01 ×6, p4b eager ×8) | their refresh was VOID on the shared card; their conclusions don't depend on the norm (~0.4 ms in an 8–272 ms step) so this is about record hygiene, not science | the same protocol (archive → re-run → canary → per-record update); if the box is never quiet, keep the pre-P2i labels | no (just needs a quiet machine) |
 | P2c | Widen the routing classifier (torch `topk`/`sort`/`index_select`/`gather`/`scatter`) so the **grouped** path's routing cost can be quoted | `EXP-p4-01` §5.3: the classifier's 0.0% on the grouped path is a **blind spot**, not a measurement | new rules + tests; the number must be produced in its own round | **YES — it changes the meaning of the `routing_share_pct` field** |
 | P3 | Breadth: E5 (`EXP-p4-02`), E6 (`EXP-p5-01`), E8 (`EXP-p8-01`, needs the V100), E1's group axis under the corrected prompt set, dense curves, batch sweep (E3 — today it has **no** experiment), FP8/MXFP4 (`EXP-p3-01/02`); W4A16 is **closed as a negative result** (`EXP-p1-05`), so only a >25% mixed-bit fallback would be a new experiment | each closes a declared hypothesis or lever; several need a matrix entry that does not exist | per matrix entry; E8 only after the same protocol passes on the V100 | partial: new matrix entries need approval |
@@ -199,7 +203,8 @@ that the science was not done — read the record first.
 | W4 | ✅ **done 2026-10-23** (`EXP-p1-05`, GPU diagnostic — **negative**): W8 control PASS; W4 RTN / W4 GPTQ / ≤25% whole-layer W8 fallback all FAIL ⇒ pre-registered refutation clause stops the expansion; no matrix registration, no `GATE_CITATIONS` change | 4-bit was the last unclosed bit-width in the quantization-ceiling story | record + artifacts rsynced to `lemoq-artifacts/EXP-p1-05-2026-10-23/` (outside git) | done |
 | **S1** | ✅ **done 2026-10-24** (Block A): A1 F2 A/B re-take **VALID** (off 1.9384 → on 1.8406 ms, −5.05%, 3/3 pairs, canary −0.12%) → A2 refresh **23/23 OK** (canary 0.30%, host ≤3.4%) → A3 `FUSION_DEFAULTS` four True (`938de63`; no-env canaries: kernel 1.5590 Δ+0.03% `packed_qkv_effective=True`, sdpa 2.9542 Δ−0.14% effective=False) → A4 numbers synced per `ADOPTION_SYNC_2026-10-24.md` → merge `main`. Headline: w8a16×kernel **1.5586/1.8140 ms** (kernels/step 539→345), E7 **1.1974/1.0912** | — | all acceptance criteria met | done |
 | **S2** | ✅ **done 2026-10-25**: F4 KV direct write adopted (pre-registered rule picked it at 50.3 µs capturable; GPU K-gate 9/9 bitwise; A/B **VALID** off 1.5576 → on 1.5118 ms, −2.94%, 5/5 pairs, canary 0.154%; refresh 23/23, canary 0.336%; `FUSION_DEFAULTS` five True; kernels/步 345→329). Ledger re-run: latency-class vein mined out — next leader is gate_up 28.5 µs (config class) | — | all acceptance criteria met (tokens_equal + K1 + canary) | done |
-| **S3** | `lm_head` w8 (≈63 µs) **or** E6/E8 breadth | the last piece of the quantization lever, or the cheapest Tier B closure | **new gate row from a new measurement** (new experiment) before any latency is published | **YES** (new experiment / new `GATE_CITATIONS` row) |
+| **S3** | `lm_head` w8 (≈60 µs, N7 口径：地板 0.1319→0.066 ms) **or** E6/E8 breadth | the last piece of the quantization lever, or the cheapest Tier B closure | **new gate row from a new measurement** (new experiment) before any latency is published | **F5 半边已批准（2026-10-25）**：走 `LEMOQ_LMHEAD_W8` 开关 + 独立 `LMHEAD_GATE_CITATIONS`（KL/top-1 + PPL<1% + MMLU<2 点三链）+ A/B + 刷新；E6/E8 仍待批 |
+| **R3** | ✅ **done 2026-10-25 — de-publish 裁决（是）**：`w8a8@4096` 门行重指向 10 窗复测工件（KL 0.026159 ⇒ 推导 FAIL，top-1 0.963636 与 5 窗同值），已发布的 8.8232 ms 撤销；该格照跑、latency 只进 `gate_failed_evidence`（w4a16 同款语义）；引用来源集中在 `GATE_CITATION_SOURCES` | 10 窗重测显示 5 窗 PASS 不稳健（w7 重尾 0.2247），用户批准撤销 | `benchmarks/runner.py` 门表 + `experiments/EXP-p1-04` v3 + `EXP-p4b-01` §R3 | done |
 
 ## 5. Wrap-up (docs/config only — **done 2026-10-07**)
 

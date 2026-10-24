@@ -265,6 +265,39 @@ test_the_top1_criterion_actually_bites_at_ctx4096` 钉住。
   它们记录的 `gate FAIL` 是在 v1 下测的。按新引用表，`w8a8@4096` 会变成 PASS ⇒
   那些格子的 `verdict` 需要重跑才能改；**在重跑之前它们只是 v1 的证据**。
 
+## v3（2026-10-25，R3）：门样本 5→10 窗复测与 **de-publish 裁决**
+
+预注册的稳健性复测（MATURITY_REVIEW R3，即 Follow-up #2 的 n≥10 要求）：同一协议只把窗口数
+5→10（`tools/quant_probe.py` 新臂组 `r3_windows`，只含 GATE_CITATIONS 引用的 w8a16/w8a8 g128；
+`--prompt-windows 10 --prompt-source wikitext --rmsnorm fused`）。工件：
+`results/EXP-p1-04-r3-10win-ctx{1024,4096}.json`。
+
+| 臂 | ctx=1024 KL（10 窗） | ctx=4096 KL（10 窗） | top-1（1024 / 4096） | verdict |
+| --- | --- | --- | --- | --- |
+| w8a16 g128 | 0.001325（sd 0.0006） | 0.001766（sd 0.0020） | 0.9788 / 0.9848 | **PASS / PASS（稳健）** |
+| w8a8 g128 | 0.035051（max 0.1680） | **0.026159（max 0.2247）** | 0.9667 / 0.9636 | **FAIL / FAIL** |
+
+### 1. ★ `w8a8@4096` 的 5 窗 PASS **不稳健** —— 判定随窗口数翻转
+
+10 窗 KL 均值 **0.0262 > 0.01**，被单个重尾窗口拽翻（ctx=4096 的 w7 单窗 **0.2247**，
+其余 9 窗全部 ≤0.0055；sd 0.066、spread 71.7×；ctx=1024 同型：w0 0.0952 / w6 0.1680）。
+top-1 均值 0.963636 与 5 窗**完全同值**（159/165 位置）—— 翻转的判据是 KL，不是 top-1。
+v2 的"贴线"疑点（3/165、贪心轨迹移动）由此从疑点变成**实测事实**：门估计对窗口数敏感。
+
+### 2. 裁决（用户批准，2026-10-25）：`w8a8@4096` **de-publish**
+
+- `GATE_CITATIONS` 的 `("w8a8",128,4096)` 行**重指向 10 窗工件**（值 0.026159/0.963636，
+  `gate_from_metrics` 推导 **FAIL**）；引用来源集中在新增的 `GATE_CITATION_SOURCES`
+  （测试与 payload 都从它取）。其余 5 行不动（w8a16 两 ctx 在 10 窗下稳健 PASS，
+  判定与引用工件都不变；w8a8@1024 判定本就 FAIL）。
+- 后果：`w8a8@4096` 的格子**照跑照测**，但 latency 只进 `_measurement.gate_failed_evidence`
+  （与 `w4a16` 行同一语义）；此前发布的 8.8232 ms（cudagraph，F4 刷新）**撤销**。
+  τ 阈值一字未动 —— 这是**收紧**，不是放松。
+- 该格的完整判定史：v1 FAIL（top-1 骑线）→ v2 PASS（同 3/165 翻转）→ **v3 FAIL
+  （10 窗 KL 均值超门）**。三版工件都在（`probe_prompt_set_ctx4096_v1_hf_norm.json` /
+  `probe_prompt_set_ctx4096.json` / `EXP-p1-04-r3-10win-ctx4096.json`），留档测试
+  `test_w8a8_at_4096_straddles_the_top1_threshold_across_implementations` 钉住前两版。
+
 ## Follow-ups
 
 1. **w8a8 的激活量化需要单独一个实验**（激活 scale 粒度 × clamp）：它现在是 Phase 1 唯一
