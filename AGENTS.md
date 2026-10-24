@@ -327,6 +327,7 @@ the V100 box, the Mac) diverge, so:
 | `docs/handoff/HANDOFF_2026-10-23.md` | 此前一轮：W4 负结果、F2 定位与合规 A/B、刷新轮作用域（历史上下文） |
 | `docs/handoff/ISSUES_2026-10-23.md` | 遗留问题清单 + **2026-10-24 复盘**（N1–N4 四条新发现与处置、剩余项按 S1/S2/S3 归属） |
 | `docs/handoff/ADOPTION_SYNC_2026-10-24.md` | 采纳后的数字同步映射 + 翻默认的连锁（测试/refusal/`packed_qkv_effective`） |
+| `docs/handoff/ADOPTION_SYNC_F5_2026-10-25.md` | F5（lm_head w8）采纳轮的取数地图（预写，翻默认后回填） |
 | `docs/apply/PORTFOLIO.md` | 面向实习投递的自述：简历 bullet（中英）、面试必问三题的标准答法、岗位映射与如实缺口（**不引入任何新数字**） |
 | `docs/figures/` | the three charts, regenerated from artifacts by `python -m tools.make_figures` |
 | `docs/README.md` | 文档地图：`docs/` 下每份文档是什么、给谁看 |
