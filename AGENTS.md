@@ -135,6 +135,15 @@ in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`
    axis is genuinely needed (`attn`, `moe`, `batch` are the known candidates), **ask first**.
    The same applies to overwriting a `result.json` that already exists: archive the old one under
    `results/<EXP-ID>-run/v1_archive/`, re-run with `--force`, and say `v1`/`v2` in the record.
+10. **Positioning rule (user-set 2026-10-24): batch=1 single-stream — no serving-engine
+    integration.** vLLM/SGLang (or their nano/mini variants) are never adopted as a runtime or
+    dependency: their wins (continuous batching, PagedAttention paging, scheduler reuse) live at
+    high concurrency, outside this problem domain (`docs/ROADMAP.md` Tier D; every payload stamps
+    `SCOPE_NOT_APPLICABLE`). R7 (`docs/handoff/R7_RECON_2026-10-24.md` §5) is a **one-shot
+    optional external measurement anchor only** — it must not grow into an integration. The known
+    **extension direction** is the nano/mini variants of those engines — but adopting them
+    **implies supporting batch>1, i.e. a change of project positioning**: that needs the user's
+    approval first plus a matrix/scope re-open per rule 9. An agent never starts it on its own.
 
 ## 3. Where the project stands (authority: the records + artifacts)
 
