@@ -77,7 +77,8 @@
 | 连锁 | 现在的行为 |
 | --- | --- |
 | `packed_qkv` 有两个前置（`attn=kernel` **且** 量化） | 不适用 ⇒ **no-op**（不安装、不报错）；payload 记 `packed_qkv`（请求）+ `packed_qkv_effective`（生效）。`blocked`/`failed` 的 payload 生效恒为 `False` |
-| 两个测试曾写死"默认全 False" | 已改成对着 `FUSION_DEFAULTS` 断言 + 新增 `packed_qkv_applicable` 用例 ⇒ **翻默认不需要改测试** |
+| 两个测试曾写死"默认全 False" | 已改成对着 `FUSION_DEFAULTS` 断言 + 新增 `packed_qkv_applicable` 用例。★ **2026-10-25 复核**：该结论当时**只对 packed_qkv 轴成立**——`test_fused_rope` / `test_skip_mask_fill` / `test_routing_fusion`(gpu) 三处还写死 `is False`；`fused_route` 无 CPU 回退（翻默认后 ~15+ 个 CPU 测试会 RuntimeError）；`skip_mask_fill` 对非 kernel 图格 replay 会 raise（A3 的无 env 金丝雀 p4b/sdpa 会整格 blocked）。**已全部修复**（`d02442e`：route 可用性回退 + replay 门控 `_replay_skip_mask()` + 三断言改对 `FUSION_DEFAULTS`）——离线彩排：临时四默认全翻 ⇒ `pytest -m "not gpu"` **674 passed / 33 deselected 全绿** ⇒ 现在"翻默认不需要改测试"才真正成立 |
+| 翻默认的 commit 里要顺手改的"默认关"注释（今天仍是正确描述，勿提前改） | `fusion_switches.py` 模块 docstring 的表格、`packed_qkv.py` docstring、`rope.py` 开关 docstring、`moe_static._fused_route_enabled` docstring、`cudagraph.py` 的 `_skip_mask_fill_enabled` 附近、`attn_decode.py` packed 回退注释、`_routing_triton.py` 模块 docstring、`docs/FUSION_OPPORTUNITIES.md` F2 候选状态行——与 A3 的默认翻转放同一个 commit，不留"注释说默认关、代码默认开"的矛盾 |
 | 显式请求的 A/B（`--ab-packed-qkv`） | 仍**拒绝** fp16 / 非 kernel 格：那是主动比较，静默 no-op 会量出假的 0% |
 | `scripts/rounds/run_ab_fresh_process.sh` 在翻默认之后 | off 臂必须给 `ENV_OFF="LEMOQ_PACKED_QKV=0"`；不给 ⇒ fail-closed 拒绝（否则两臂同实现） |
 | `scripts/rounds/run_f1_refresh.sh` 的开关写法 | 四个开关**显式写 0/1**（不再 `unset`），所以采纳前后行为一致；断点跳过按本格期望值判断 |
@@ -85,8 +86,12 @@
 ## 6. 刷新后顺手要订正的计数（与采纳无关，但同一次提交做完）
 
 `RESULTS.md` §5 的测试计数、`ROADMAP` §1、`PORTFOLIO` L105 已按 2026-10-24 实测订正为
-**672 passed / 33 deselected / 40 个测试文件**；刷新后再按新的 `results/` 复核 `payload` 计数
-（当前 101 份：84 done / 13 planned / 4 blocked）。
+**672 passed / 33 deselected / 40 个测试文件**（2026-10-25 起 **674 passed**：翻默认安全性修复
+新增 replay 门控与 route CPU 回退两条用例，`d02442e`）；刷新后再按新的 `results/` 复核
+`payload` 计数。★ 2026-10-25 对账：Mac 侧 `EXP-*__*/result.json` 实为 **59 份**
+（48 done / 10 planned / 1 blocked——p0-03 by-design），此前的"101 份（84/13/4）"口径
+无法在 Mac 树上复现（59 格 + 31 份 p2j 归档 + 顶层历史工件另计）；**操作性验收以
+`DRY=1 F2=1` 清单 = 23 格为准**（23 格所需 payload 已核实全部在盘，见 ISSUES N5）。
 
 ## 7. 刷新后重排算子账本（S2 的输入）
 
@@ -94,3 +99,9 @@
 按"HANDOFF_2026-10-24 §5"的预注册规则算 `gap` 与可捕获量，再把
 `docs/FUSION_OPPORTUNITIES.md` §1 的账本整表换成新值（该文 §1.2 的字节数**不随刷新变**，
 只有实测 ms 与达成率变）。**不要**用旧账本挑选 S2 的算子。
+
+★ 2026-10-25：这一步已机械化 —— `python -m tools.operator_ledger <cell>/result.json`
+（`tools/operator_ledger.py`）内置 §1.2 的固定字节表与捕获率，直接输出排名；
+用它对**刷新前** payload 复算与 HANDOFF §5 预演逐条一致（F4 KV 直写 97.9 µs > F3 43.2 >
+gate_up 28.1 > down_sum 25.0；lm_head 的 gap ≈ −5 µs 被规则自动过滤，见 ISSUES N7；
+dequant_gemm 不进榜——F2 本轮已采纳其 config 改善）。刷新轮跑完后再对同一格跑一次即为正式账本。
