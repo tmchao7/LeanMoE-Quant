@@ -408,6 +408,21 @@ def build_arms(
                     "layers": None,
                 },
             )
+    # ★ R3（MATURITY_REVIEW）：门样本 5→10 窗的精简臂组——只含 GATE_CITATIONS 里
+    #   引用的两个 scheme（w8a16/w8a8，g128），让 10 窗重测不必跑满 9 格。
+    #   阈值不变（w8 走 KL<0.01，w8a8 的激活 fake-quant 在 QuantLinear 内）。
+    for scheme in ("w8a16", "w8a8"):
+        add(
+            "r3_windows",
+            {
+                "id": "%s_attn_experts_g128_r3" % scheme,
+                "kind": "rtn",
+                "scheme": scheme,
+                "group_size": 128,
+                "targets": ["attention", "experts"],
+                "layers": None,
+            },
+        )
     add("noop", {"id": "noop_a", "kind": "noop", "targets": [], "layers": None})
     add("noop", {"id": "noop_b", "kind": "noop", "targets": [], "layers": None})
     add("noop", {"id": "noop_final", "kind": "noop", "targets": [], "layers": None})
