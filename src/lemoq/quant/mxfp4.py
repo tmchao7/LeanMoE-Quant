@@ -114,7 +114,8 @@ def dequantize_packed(
     codes = unpack_4bit(packed, signed=False).to(torch.uint8).reshape(out_features, padded_in)
     mag = torch.tensor(_E2M1_MAG, dtype=torch.float32, device=codes.device)[(codes & 0x7).long()]
     signed = torch.where((codes & 0x8) > 0, -1.0, 1.0)
-    scale = scales.float().apply_(e8m0_to_scale)
+    # E8M0 → 2^(X−127)：与 kernel 同式（幂 2 精确）。apply_ 只支持 CPU，勿用。
+    scale = torch.exp2(scales.float() - 127.0)
     w = (mag * signed).reshape(out_features, n_blocks, block)
     w = w * scale.unsqueeze(-1)
     w = w.reshape(out_features, padded_in)[:, :orig_in]
