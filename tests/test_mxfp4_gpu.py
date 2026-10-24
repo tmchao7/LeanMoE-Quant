@@ -63,9 +63,10 @@ def test_triton_mxfp4_conjunction_half_vs_fp64_oracle():
     """A6 合取：err_kernel ≤ 1.5 × err_baseline（双方对 fp64 oracle）。"""
     _requires_gpu()
     x, q, _ = _case(1, 256, 128, 7)
+    # 参照数学统一留 CPU（权重是精确二次幂值），只有 kernel 输入上卡。
     w64 = dequantize_mxfp4(q).double()
-    oracle = x.double() @ w64.T
-    ref = x.float() @ dequantize_mxfp4(q, dtype=torch.float32).T
+    oracle = x.cpu().double() @ w64.T
+    ref = x.cpu().float() @ dequantize_mxfp4(q, dtype=torch.float32).T
     got = (
         dequant_gemm_fused(
             x,
