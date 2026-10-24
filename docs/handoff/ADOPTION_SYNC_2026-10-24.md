@@ -110,7 +110,8 @@
 ## 7. 刷新后重排算子账本（S2 的输入）
 
 用刷新后的 `EXP-p4c-01__bit_width=w8a16_attn=kernel_ctx=1024` 取 `bottleneck.top_kernels`，
-按预注册规则（现收于 [HANDOFF_2026-10-25.md](HANDOFF_2026-10-25.md) §1，机械执行器 `tools/operator_ledger.py`）算 `gap` 与可捕获量，再把
+按预注册规则（机械执行器 `tools/operator_ledger.py`；原 HANDOFF_2026-10-25 §1 文本已随
+交接退役，规则真值以执行器为准）算 `gap` 与可捕获量，再把
 `docs/FUSION_OPPORTUNITIES.md` §1 的账本整表换成新值（该文 §1.2 的字节数**不随刷新变**，
 只有实测 ms 与达成率变）。**不要**用旧账本挑选 S2 的算子。
 
