@@ -56,7 +56,14 @@ def _int8_cache(seed: int = 0, filled: int | None = None):
     vc[0, :, n:] = 0
     ks[0, :, n:] = 1.0
     vs[0, :, n:] = 1.0
-    return q, kc, ks, vc, vs, n
+    return (
+        q.cuda(),
+        kc.cuda(),
+        ks.cuda(),
+        vc.cuda(),
+        vs.cuda(),
+        n,
+    )
 
 
 def _fp64_dequant_attention(q, kc, ks, vc, vs, n):
@@ -99,11 +106,15 @@ def test_cache_write_scatters_at_pos():
     assert _requires_gpu()
     g = torch.Generator().manual_seed(4)
     S, D = 16, HEAD_DIM
-    kc = torch.randint(-100, 101, (1, HEADS, S, D), generator=g, dtype=torch.int8)
-    ks = torch.rand(1, HEADS, S, generator=g, dtype=torch.float32).to(torch.float16) * 0.04 + 0.01
+    kc = torch.randint(-100, 101, (1, HEADS, S, D), generator=g, dtype=torch.int8).cuda()
+    ks = (
+        (torch.rand(1, HEADS, S, generator=g, dtype=torch.float32) * 0.04 + 0.01)
+        .to(torch.float16)
+        .cuda()
+    )
     bufs = {"kc": kc.clone(), "ks": ks.clone(), "vc": kc.clone(), "vs": ks.clone()}
-    new_k = torch.randn(1, HEADS, 1, D, generator=g, dtype=torch.float32).to(torch.float16)
-    new_v = torch.randn(1, HEADS, 1, D, generator=g, dtype=torch.float32).to(torch.float16)
+    new_k = torch.randn(1, HEADS, 1, D, generator=g, dtype=torch.float32).to(torch.float16).cuda()
+    new_v = torch.randn(1, HEADS, 1, D, generator=g, dtype=torch.float32).to(torch.float16).cuda()
     pos = torch.tensor([5], dtype=torch.int64, device=kc.device)
     kv_int8_cache_write(bufs, new_k, new_v, pos)
     # [pos] 槽 = 参考行量化（逐位）
