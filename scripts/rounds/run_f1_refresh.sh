@@ -9,6 +9,9 @@
 #                                                        作用域=attn=kernel 的格，与 rope/mask 同）
 #   F2=1 KV=1 LMHEAD=1 …                              # 再叠加 F5 lm_head w8（须先有合规 A/B；
 #                                                        作用域=量化格；EXP-p1-06 门行须已落表）
+#   F2=1 KV=1 LMHEAD=1 KV8=1 …                        # 再叠加 E6 KV int8（须先有合规 A/B；
+#                                                        作用域=attn=kernel 的格——fp16 与量化都要；
+#                                                        KV_INT8_GATE_CITATIONS 须已落表）
 #
 # 前提（缺一条就不要跑）：
 #   1) F1 三项：同轮 A/B 已测（8.39% / 3.0% / 1.33%）+ 自然文本检查 PASS（2026-10-23）；
@@ -31,6 +34,7 @@ export LEMOQ_FUSED_ROPE=1 LEMOQ_FUSED_ROUTE=1 LEMOQ_SKIP_MASK_FILL=1
 [ "${F2:-0}" = "1" ] && export LEMOQ_PACKED_QKV=1
 [ "${KV:-0}" = "1" ] && export LEMOQ_KV_DIRECT_WRITE=1
 [ "${LMHEAD:-0}" = "1" ] && export LEMOQ_LMHEAD_W8=1
+[ "${KV8:-0}" = "1" ] && export LEMOQ_KV_INT8=1
 
 # ---- 1) 生成命令清单（从每个 payload 的 config 反推；跳过已刷新的格）----
 # ★ 2026-10-24：清单先进临时文件 —— DRY 模式**零副作用**。旧写法先建 archive/、清空
@@ -100,6 +104,15 @@ for p in sorted(glob.glob("results/EXP-*__*/result.json")):
         )
     else:
         lh_ok = True
+    # ★ E6 期望值：KV8=1 时 kernel 格必须带 kv_int8_effective=True（fp16 与量化都算——
+    #   KV 量化与权重位宽正交）、非 kernel 格必须带 False；KV8=0 不检查（历史无键属正常）。
+    kv8_on = os.environ.get("LEMOQ_KV_INT8") == "1"
+    if kv8_on:
+        kv8_ok = (c.get("kv_int8_effective") is True) if kernel == "1" else (
+            c.get("kv_int8_effective") is False
+        )
+    else:
+        kv8_ok = True
     refreshed = (
         c.get("fused_route") is True
         and (kernel != "1" or (c.get("fused_rope") is True and c.get("skip_mask_fill") is True))
@@ -107,6 +120,7 @@ for p in sorted(glob.glob("results/EXP-*__*/result.json")):
              else (c.get("packed_qkv_effective") in (False, None)))
         and kv_ok
         and lh_ok
+        and kv8_ok
     )
     if refreshed:
         continue
@@ -141,7 +155,7 @@ cp -p "$LIST" "$CELLS"
 FAILS="$OUT/failed.txt"; : > "$FAILS"
 snap () { { echo "--- $1 $(date -Is)"; nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader;
             nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader; } >> "$CONT" 2>&1; }
-echo "env: rope=$LEMOQ_FUSED_ROPE route=$LEMOQ_FUSED_ROUTE mask=$LEMOQ_SKIP_MASK_FILL packed=${LEMOQ_PACKED_QKV:-0} kv=${LEMOQ_KV_DIRECT_WRITE:-0} lmhead=${LEMOQ_LMHEAD_W8:-0}" >> "$LOG"
+echo "env: rope=$LEMOQ_FUSED_ROPE route=$LEMOQ_FUSED_ROUTE mask=$LEMOQ_SKIP_MASK_FILL packed=${LEMOQ_PACKED_QKV:-0} kv=${LEMOQ_KV_DIRECT_WRITE:-0} lmhead=${LEMOQ_LMHEAD_W8:-0} kv8=${LEMOQ_KV_INT8:-0}" >> "$LOG"
 echo "清单 $N_CELLS 格" >> "$LOG"; cat "$LIST" >> "$LOG"
 
 # ---- 2) 归档 + 重跑 + 逐格自检 ----
@@ -172,6 +186,9 @@ run_one () {
   else
     export LEMOQ_LMHEAD_W8=0
   fi
+  # E6 KV int8：接线在 _decode_forward_impl ⇒ 作用域=kernel 格（fp16/量化都要）；
+  # 非 kernel 格显式写 0（同 F4 口径）。
+  if [ "$kernel" = "1" ] && [ "${KV8:-0}" = "1" ]; then export LEMOQ_KV_INT8=1; else export LEMOQ_KV_INT8=0; fi
   [ -f "$OUT/archive/$label.json" ] || cp -p "$cell/result.json" "$OUT/archive/$label.json" 2>/dev/null
   snap "$label-pre"
   echo "=== [$label] $exp $args start $(date -Is)" >> "$LOG"
@@ -212,6 +229,13 @@ if os.environ.get("LEMOQ_LMHEAD_W8") == "1" and lm_quantized:
         warn.append("lm_head_w8_effective=%r（应为 true）" % (eff_lh,))
 elif eff_lh:
     warn.append("lm_head_w8_effective=%r（本格不该装上）" % (eff_lh,))
+# ★ E6 生效检查：KV8=1 且 kernel 格 ⇒ kv_int8_effective 必须 True；其余必须 False/None。
+eff_kv8 = cfg.get("kv_int8_effective")
+if os.environ.get("LEMOQ_KV_INT8") == "1" and kernel:
+    if eff_kv8 is not True:
+        warn.append("kv_int8_effective=%r（应为 true）" % (eff_kv8,))
+elif eff_kv8:
+    warn.append("kv_int8_effective=%r（本格不该装上）" % (eff_kv8,))
 print("    [%s] bw=%-6s attn=%-6s ctx=%-5s exec=%-9s dq=%-8s norm=%-5s gate=%-4s p50=%-9s host=%-5s kernels=%-4s %s" % (
     lbl, cfg.get("bit_width"), cfg.get("attn"), cfg.get("ctx"), cfg.get("execution"), cfg.get("dequant"),
     cfg.get("rmsnorm"),
