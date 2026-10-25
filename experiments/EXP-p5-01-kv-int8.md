@@ -7,14 +7,11 @@
 - **ID**: `EXP-p5-01-kv-int8`（矩阵条目已存在：`configs/experiments.yaml`，ctx [1024, 2048, 4096]）
 - **Date**: 2026-10-24（立项/骨架）；kernel 与测量 2026-10-25 窗
 - **Operator**: agent（GPU：租用 RTX 5090 32 GB，sm_120，实测读带宽 1560.3 GB/s）
-- **Status**: `running`（★ kernel 工程完成 2026-10-25：写路径 `kv_int8_write` K 门 4/4 逐位
-  （`2269c11`）+ 读路径 int8 split-KV parity 4/4 vs fp64 oracle 1e-3（`0f1a025`，含部分填充/
-  多 split）+ cache 写散布/bulk 量化逐位（`8a844d6`）= **8/8**。★ 读路径首跑抓到并修掉
-  head-stride bug（reshape 后 3D 的 stride(1)=D 被当 head 步长，head 0 恰好对、其余头全错）。
-  ★★ 门测量首轮**无效（假 0）**：probe 的轨迹用 HF DynamicCache，换核 decode 前向在
-  `filled is None` 时回退原路 ⇒ int8 从未执行（`kv_int8_runs=0`、KL 恰 0.0）——工件保留作
-  证据（`results/EXP-p5-01-kv-int8/gate_e6_kvint8*.json`）。**剩**：门口径改走 StaticCache
-  轨迹（探针需挂 `_lemoq_filled_len` 会话机制）→ A/B → 翻默认）
+- **Status**: `running`（★ kernel 工程 + **门已过** 2026-10-25：K 门 8/8（见结果节）；
+  门两 ctx PASS——v3 forced 轨迹口径 KL 0.001276/0.000622、top-1 0.9818/0.9879，
+  已落表 `KV_INT8_GATE_CITATIONS`（`552d2ac`）。方法学两课全记录在案：首轮假 0
+  （DynamicCache 回退）与 v2 自由贪心复利口径（不是门）——工件分代保留。
+  **剩**：A/B（两 ctx）→ Δ>MAD ⇒ 翻默认 → KV8=1 刷新 → 回填）
 - **上游规格**: `docs/reference/KV_INT8_RECON_2026-10-24.md`（字节账/工业界做法/工程形状/阶梯）
 
 ## Hypothesis（矩阵原文 + 预注册细化）
@@ -86,11 +83,56 @@ tests/test_kv_int8_gpu.py         # GPU：write 逐位 + roundtrip（kernel 落�
 
 ## 结果
 
-（待 kernel 窗；只填实测。）
+### K 门（kernel 级，2026-10-25）——8/8 全过
+
+写路径 `kv_int8_write` 4/4（codes/scale 逐位、零行、roundtrip ≤0.6·scale、守卫拒绝）+
+读路径 int8 split-KV 4/4（fp64 oracle parity 1e-3：含部分填充、多 split、cache 写散布、
+bulk 量化）。过程修掉三个真 bug：读路径 head-stride（reshape 后 3D 的 `stride(1)`=D 不是
+S·D，`0f1a025`）、测试参考的 batched 广播串头（×3，全部冤枉了 kernel）、fp16-scale 除法
+1-ulp（kernel 约定：fp32 除、fp16 存）。
+
+### 门（KL/top-1，2026-10-25）——**两 ctx PASS**（v3 forced 轨迹口径）
+
+**方法学两课（工件全保留）**：
+
+- **首轮（DynamicCache）假 0 作废**：`kv_int8_runs=0`、KL 恰 0.0——换核 decode 前向在
+  `filled is None` 时回退 HF 原路，int8 从未执行。修复 = probe 轨迹改
+  `StaticCacheDecodeSession` 会话（`_lemoq_filled_len` 设备张量挂 cache 对象；
+  `97b71c0`）。同 commit 修掉一个真污染点：`_lemoq_kv_int8_bufs` 挂在模块上只增不减，
+  prefill 现在会显式作废它（换窗口/换 prompt 的静默复用旧 codes）。
+- **v2（自由贪心）是复利口径，不是门**：臂自己 argmax，borderline token 一翻后续位置
+  全是苹果比橘子（@1024 w1 KL 6.92/top1 0.27；@4096 w3/w4 同型）。**未翻窗的 KL 才是
+  纯扰动**：@1024 ≈1e-4、@4096 ≈2-4e-4——比门限低两个量级。预注册"重跑**同一条**贪心
+  轨迹"的正确实现是 **forced**（喂 fp16 参考轨迹的 token 流，照
+  `check_fusion_candidate.collect` 的机制；`963bee7`）。v2 两 ctx 工件保留作
+  "生成确实会变（贪心 borderline 翻 token）"的行为证据——与 w8a8 门复测时
+  "fp16 参考的贪心 token 也在动"是同型现象，不是精度崩塌。
+
+**v3 门实测（5 窗 wikitext + ones 对照、fused norm、StaticCache 会话、forced）**，
+工件 `results/EXP-p5-01-kv-int8/gate_e6_kvint8{,_ctx4096}_v3.json`，已落表
+`KV_INT8_GATE_CITATIONS`（`552d2ac`，钉死测试含假 0 复发自检：每窗 runs=512>0）：
+
+| ctx | KL mean（5 窗） | KL max 窗 | top-1（集合级） | 判定 |
+| --- | --- | --- | --- | --- |
+| 1024 | **0.001276** | 0.00423 | **0.981818**（3/165 翻） | **PASS** |
+| 4096 | **0.000622** | 0.00120 | **0.987879**（2/165 翻） | **PASS** |
+
+ones 对照：8.2e-04（@1024）/ 7.4e-04（@4096），top1 均 1.0。noop 三臂 Δ 恰 0（恢复干净）。
+与权重门对照：@1024 KL 0.001276 vs w8a16 权重门 0.001361——同量级；@4096 反而更稳
+（0.000622）。
+
+### A/B（独立进程·同轮相邻）
+
+（待跑：w8a16×kernel @1024 与 @4096 各一轮，ENV_ON=LEMOQ_KV_INT8=1；预期
+@4096 −150~170 µs、@1024 −43 µs。）
+
+### 刷新与采纳
+
+（待跑：A/B VALID 且 Δ>MAD ⇒ 翻默认 → KV8=1 刷新 23 格 → 回填。）
 
 ## Verdict
 
-（待门 + A/B 齐。）
+（待 A/B；门链已齐：K 门 8/8 + 门两 ctx PASS。）
 
 ## Applicability
 
