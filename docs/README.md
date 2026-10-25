@@ -41,6 +41,7 @@
 | 文档 | 是什么 | 给谁 |
 | --- | --- | --- |
 | [PORTFOLIO.md](apply/PORTFOLIO.md) | 简历 bullet（中英）、面试必问三题标准答法、岗位映射与如实缺口 | 投递与面试前的你 |
+| [ASSESSMENT_2026-10-25.md](apply/ASSESSMENT_2026-10-25.md) | **外部对标评估**：量化/融合两条线逐项挂论文与工业基准（KIVI/vLLM FP8/Marlin/Flash-Decoding/TRT-LLM/llama.cpp），按岗位给适配度与风险答法 | 投递前校准预期、面试备弹药 |
 
 ## study/ — 两周源码与实验自学
 
