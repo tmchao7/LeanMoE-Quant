@@ -11,7 +11,7 @@
 <text x="485.3" y="392.0" font-size="10.0" fill="#57606a" font-weight="400" text-anchor="middle">6%</text>
 <line x1="600.0" y1="88.0" x2="600.0" y2="372.0" stroke="#d8dee4" stroke-width="1.0"/>
 <text x="600.0" y="392.0" font-size="10.0" fill="#57606a" font-weight="400" text-anchor="middle">9%</text>
-<text x="250.0" y="116.4" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fused RoPE</text>
+<text x="250.0" y="116.4" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fused RoPE (F1)</text>
 <rect x="256.0" y="96.0" width="320.7" height="30.0" fill="#e8590c" opacity="1.00" rx="3.0"/>
 <text x="584.7" y="116.4" font-size="11.5" fill="#1f2328" font-weight="600" text-anchor="start">−8.39%</text>
 <text x="650.0" y="116.4" font-size="9.5" fill="#57606a" font-weight="400" text-anchor="start">A/B · fused_rope_ab</text>
@@ -20,7 +20,7 @@
 <text x="514.0" y="156.4" font-size="11.5" fill="#1f2328" font-weight="600" text-anchor="start">−6.54%</text>
 <text x="650.0" y="156.4" font-size="9.5" fill="#57606a" font-weight="400" text-anchor="start">5/5 pairs · EXP-e6-ab-4096-run2</text>
 <text x="250.0" y="196.4" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">packed q/k/v GEMM (F2)</text>
-<rect x="256.0" y="176.0" width="183.8" height="30.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
+<rect x="256.0" y="176.0" width="183.8" height="30.0" fill="#e8590c" opacity="1.00" rx="3.0"/>
 <text x="447.8" y="196.4" font-size="11.5" fill="#1f2328" font-weight="600" text-anchor="start">−4.81%</text>
 <text x="650.0" y="196.4" font-size="9.5" fill="#57606a" font-weight="400" text-anchor="start">3/3 pairs · EXP-p4c-01 §F2</text>
 <text x="250.0" y="236.4" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">lm_head W8 quant (F5)</text>
@@ -39,4 +39,10 @@
 <rect x="256.0" y="336.0" width="50.8" height="30.0" fill="#e8590c" opacity="1.00" rx="3.0"/>
 <text x="314.8" y="356.4" font-size="11.5" fill="#1f2328" font-weight="600" text-anchor="start">−1.33%</text>
 <text x="650.0" y="356.4" font-size="9.5" fill="#57606a" font-weight="400" text-anchor="start">A/B · skip_mask_fill_ab</text>
+<rect x="256.0" y="400.0" width="14.0" height="14.0" fill="#e8590c" opacity="1.00" rx="3.0"/>
+<text x="276.0" y="411.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">fusion (F1/F2)</text>
+<rect x="384.3" y="400.0" width="14.0" height="14.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
+<text x="404.3" y="411.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">KV path (F4)</text>
+<rect x="500.9" y="400.0" width="14.0" height="14.0" fill="#12b886" opacity="1.00" rx="3.0"/>
+<text x="520.9" y="411.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">quantization (F5/E6)</text>
 </svg>

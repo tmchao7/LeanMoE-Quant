@@ -53,34 +53,34 @@
       "note": "E7 同一轮的 eager 臂（P2j 刷新 VOID，保留 pre-P2i 规范值）"
     },
     "p4c_fp16_sdpa_1024": {
-      "value": 3.5885,
-      "source": "results/EXP-p4c-01-run/v3_canaryB_fp16_sdpa_1024_result.json → latency.per_token_p50_ms",
-      "note": "v3 金丝雀 B（同轮 fp16×sdpa 参照）"
+      "value": 3.566,
+      "source": "results/EXP-p4c-01-in-graph-attention__bit_width=fp16_attn=sdpa_ctx=1024/result.json → latency.per_token_p50_ms",
+      "note": "v7 canonical（fp16×sdpa 参照）"
     },
     "p4c_fp16_sdpa_4096": {
-      "value": 6.8243,
-      "source": "results/EXP-p4c-01-run/v3_fp16_sdpa_4096_result.json → latency.per_token_p50_ms",
+      "value": 6.8329,
+      "source": "results/EXP-p4c-01-in-graph-attention__bit_width=fp16_attn=sdpa_ctx=4096/result.json → latency.per_token_p50_ms",
       "note": null
     },
     "p4c_fp16_kernel_1024": {
-      "value": 2.5079,
-      "source": "results/EXP-p4c-01-run/v3_fp16_kernel_1024_result.json → latency.per_token_p50_ms",
+      "value": 2.2028,
+      "source": "results/EXP-p4c-01-in-graph-attention__bit_width=fp16_attn=kernel_ctx=1024/result.json → latency.per_token_p50_ms",
       "note": null
     },
     "p4c_fp16_kernel_4096": {
-      "value": 2.7559,
-      "source": "results/EXP-p4c-01-run/v3_fp16_kernel_4096_result.json → latency.per_token_p50_ms",
+      "value": 2.3484,
+      "source": "results/EXP-p4c-01-in-graph-attention__bit_width=fp16_attn=kernel_ctx=4096/result.json → latency.per_token_p50_ms",
       "note": null
     },
     "p4c_w8a16_sdpa_1024": {
-      "value": 3.0036,
-      "source": "results/EXP-p4c-01-run/v3_w8a16_sdpa_1024_result.json → latency.per_token_p50_ms",
-      "note": "v3 同轮的 w8a16×sdpa，用作 attention 那一跳的分母"
+      "value": 2.9165,
+      "source": "results/EXP-p4c-01-in-graph-attention__bit_width=w8a16_attn=sdpa_ctx=1024/result.json → latency.per_token_p50_ms",
+      "note": "v7 同轮的 w8a16×sdpa，用作 attention 那一跳的分母"
     },
     "p4c_w8a16_kernel_1024": {
-      "value": 1.9241,
-      "source": "results/EXP-p4c-01-run/v3_w8a16_kernel_1024_result.json → latency.per_token_p50_ms",
-      "note": "本项目延迟最低的一格"
+      "value": 1.4602,
+      "source": "results/EXP-p4c-01-in-graph-attention__bit_width=w8a16_attn=kernel_ctx=1024/result.json → latency.per_token_p50_ms",
+      "note": "本项目延迟最低的一格（v7 canonical）"
     },
     "norm_hf_step_ms": {
       "value": 2.4143,

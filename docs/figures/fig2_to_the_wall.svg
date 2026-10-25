@@ -37,11 +37,11 @@
 <text x="286.0" y="366.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">w8a16 + CUDA Graph</text>
 <text x="379.1" y="366.5" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">2.91 ms</text>
 <text x="397.1" y="366.5" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">1.23×  quantization (same round)</text>
-<rect x="300.0" y="407.8" width="53.3" height="18.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
+<rect x="300.0" y="407.8" width="30.8" height="18.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
 <text x="286.0" y="420.8" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">w8a16 × split-KV kernel</text>
-<text x="345.3" y="420.8" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">1.92 ms</text>
-<text x="363.3" y="420.8" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">1.56×  attention impl (vs its own same-round sdpa 3.00 ms)</text>
+<text x="338.8" y="420.8" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.46 ms</text>
+<text x="394.0" y="420.8" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">2.00×  attention impl (vs its own same-round sdpa 2.92 ms)</text>
 <line x1="338.2" y1="108.0" x2="338.2" y2="448.0" stroke="#adb5bd" stroke-width="1.6" stroke-dasharray="5 3"/>
 <text x="346.2" y="102.0" font-size="10.5" fill="#57606a" font-weight="600" text-anchor="start">byte floor 1.5982 ms</text>
-<text x="24.0" y="494.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">The earlier-round baseline sits 52× above the floor; the best cell is 1.20× above it.</text>
+<text x="24.0" y="494.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">Baseline sits 52× above the floor. The best cell reads 0.91× of it — below the fp16-accounting floor, because KV-INT8 streams half the KV bytes (E6).</text>
 </svg>

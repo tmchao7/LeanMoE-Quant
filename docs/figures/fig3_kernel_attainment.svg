@@ -3,38 +3,38 @@
 <text x="24.0" y="34.0" font-size="17.0" fill="#1f2328" font-weight="600" text-anchor="start">Kernel-level: necessary bytes vs measured time (isolated, L2 flushed)</text>
 <text x="24.0" y="56.0" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="start">One call per subject. attainment = hand-computed necessary bytes / cold time / measured achievable bandwidth (1561.9 GB/s).</text>
 <text x="24.0" y="71.0" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="start">ncu performance counters are blocked on this host — see docs/reference/NCU_EVIDENCE.md §1.</text>
-<line x1="230.0" y1="118.0" x2="230.0" y2="404.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="230.0" y="422.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">0%</text>
-<line x1="387.5" y1="118.0" x2="387.5" y2="404.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="387.5" y="422.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">25%</text>
-<line x1="545.0" y1="118.0" x2="545.0" y2="404.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="545.0" y="422.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">50%</text>
-<line x1="702.5" y1="118.0" x2="702.5" y2="404.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="702.5" y="422.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">75%</text>
-<line x1="860.0" y1="118.0" x2="860.0" y2="404.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="860.0" y="422.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">100%</text>
-<text x="545.0" y="444.0" font-size="11.0" fill="#57606a" font-weight="400" text-anchor="middle">% of measured achievable DRAM bandwidth (cold)</text>
-<text x="216.0" y="145.8" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">MoE grouped GEMV (fp16)</text>
-<rect x="230.0" y="132.8" width="447.3" height="18.0" fill="#12b886" opacity="1.00" rx="3.0"/>
-<text x="685.3" y="145.8" font-size="10.5" fill="#1f2328" font-weight="600" text-anchor="start">71.0%   0.0963 ms</text>
-<text x="216.0" y="193.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">MoE grouped GEMV (w8a16)</text>
-<rect x="230.0" y="180.5" width="352.8" height="18.0" fill="#12b886" opacity="1.00" rx="3.0"/>
-<text x="590.8" y="193.5" font-size="10.5" fill="#1f2328" font-weight="600" text-anchor="start">56.0%   0.0635 ms</text>
-<text x="216.0" y="241.2" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">MoE grouped GEMV (w4a16)</text>
-<rect x="230.0" y="228.2" width="278.5" height="18.0" fill="#12b886" opacity="1.00" rx="3.0"/>
-<text x="516.5" y="241.2" font-size="10.5" fill="#1f2328" font-weight="600" text-anchor="start">44.2%   0.0430 ms</text>
-<text x="216.0" y="288.8" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fused dequant-GEMM (w8a16)</text>
-<rect x="230.0" y="275.8" width="597.9" height="18.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
-<text x="835.9" y="288.8" font-size="10.5" fill="#1f2328" font-weight="600" text-anchor="start">94.9%   0.0758 ms</text>
-<text x="216.0" y="336.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">split-KV attention (ctx=1024)</text>
-<rect x="230.0" y="323.5" width="367.3" height="18.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
-<text x="605.3" y="336.5" font-size="10.5" fill="#1f2328" font-weight="600" text-anchor="start">58.3%   0.0143 ms</text>
-<text x="216.0" y="384.2" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fused RMSNorm (H=2048)</text>
-<rect x="230.0" y="371.2" width="2.0" height="18.0" fill="#c92a2a" opacity="1.00" rx="3.0"/>
-<text x="240.0" y="384.2" font-size="10.5" fill="#c92a2a" font-weight="400" text-anchor="start">below the 5.0 µs event floor — not measurable</text>
-<text x="230.0" y="462.0" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">expert GEMV — bytes ↓ / time ↓ (vs fp16):</text>
-<text x="480.0" y="462.0" font-size="10.5" fill="#1f2328" font-weight="400" text-anchor="start">fp16   1.00× / 1.00×</text>
-<text x="610.0" y="462.0" font-size="10.5" fill="#1f2328" font-weight="400" text-anchor="start">w8a16  1.97× / 1.52×</text>
-<text x="740.0" y="462.0" font-size="10.5" fill="#1f2328" font-weight="400" text-anchor="start">w4a16  3.88× / 2.24×</text>
-<text x="230.0" y="480.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">Byte savings do not convert 1:1 — the in-kernel unpacking is the added cost, so attainment falls as bit-width drops.</text>
+<line x1="230.0" y1="118.0" x2="230.0" y2="392.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="230.0" y="410.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">0%</text>
+<line x1="370.0" y1="118.0" x2="370.0" y2="392.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="370.0" y="410.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">25%</text>
+<line x1="510.0" y1="118.0" x2="510.0" y2="392.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="510.0" y="410.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">50%</text>
+<line x1="650.0" y1="118.0" x2="650.0" y2="392.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="650.0" y="410.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">75%</text>
+<line x1="790.0" y1="118.0" x2="790.0" y2="392.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="790.0" y="410.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">100%</text>
+<text x="510.0" y="432.0" font-size="11.0" fill="#57606a" font-weight="400" text-anchor="middle">% of measured achievable DRAM bandwidth (cold)</text>
+<text x="216.0" y="144.8" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">MoE grouped GEMV (fp16)</text>
+<rect x="230.0" y="131.8" width="397.6" height="18.0" fill="#12b886" opacity="1.00" rx="3.0"/>
+<text x="635.6" y="144.8" font-size="10.5" fill="#1f2328" font-weight="600" text-anchor="start">71.0%   0.0963 ms</text>
+<text x="216.0" y="190.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">MoE grouped GEMV (w8a16)</text>
+<rect x="230.0" y="177.5" width="313.6" height="18.0" fill="#12b886" opacity="1.00" rx="3.0"/>
+<text x="551.6" y="190.5" font-size="10.5" fill="#1f2328" font-weight="600" text-anchor="start">56.0%   0.0635 ms</text>
+<text x="216.0" y="236.2" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">MoE grouped GEMV (w4a16)</text>
+<rect x="230.0" y="223.2" width="247.5" height="18.0" fill="#12b886" opacity="1.00" rx="3.0"/>
+<text x="485.5" y="236.2" font-size="10.5" fill="#1f2328" font-weight="600" text-anchor="start">44.2%   0.0430 ms</text>
+<text x="216.0" y="281.8" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fused dequant-GEMM (w8a16)</text>
+<rect x="230.0" y="268.8" width="531.4" height="18.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
+<text x="769.4" y="281.8" font-size="10.5" fill="#1f2328" font-weight="600" text-anchor="start">94.9%   0.0758 ms</text>
+<text x="216.0" y="327.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">split-KV attention (ctx=1024)</text>
+<rect x="230.0" y="314.5" width="326.5" height="18.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
+<text x="564.5" y="327.5" font-size="10.5" fill="#1f2328" font-weight="600" text-anchor="start">58.3%   0.0143 ms</text>
+<text x="216.0" y="373.2" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fused RMSNorm (H=2048)</text>
+<rect x="230.0" y="360.2" width="2.0" height="18.0" fill="#c92a2a" opacity="1.00" rx="3.0"/>
+<text x="240.0" y="373.2" font-size="10.5" fill="#c92a2a" font-weight="400" text-anchor="start">below the 5.0 µs event floor — not measurable</text>
+<text x="230.0" y="450.0" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">expert GEMV — bytes ↓ / time ↓ (vs fp16):</text>
+<text x="470.0" y="450.0" font-size="10.5" fill="#1f2328" font-weight="400" text-anchor="start">fp16  1.00× / 1.00×</text>
+<text x="620.0" y="450.0" font-size="10.5" fill="#1f2328" font-weight="400" text-anchor="start">w8a16  1.97× / 1.52×</text>
+<text x="770.0" y="450.0" font-size="10.5" fill="#1f2328" font-weight="400" text-anchor="start">w4a16  3.88× / 2.24×</text>
+<text x="230.0" y="468.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">Byte savings do not convert 1:1 — the in-kernel unpacking is the added cost, so attainment falls as bit-width drops.</text>
 </svg>

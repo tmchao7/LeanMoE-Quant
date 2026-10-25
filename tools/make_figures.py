@@ -100,39 +100,39 @@ SOURCES: dict[str, dict[str, str]] = {
         "ptr": "latency.per_token_p50_ms",
         "note": "E7 同一轮的 eager 臂（P2j 刷新 VOID，保留 pre-P2i 规范值）",
     },
-    # --- EXP-p4c-01 的 v3（融合 RMSNorm，canonical） ---
+    # --- EXP-p4c-01 的 v7（2026-10-25 E6 采纳刷新，canonical） ---
     "p4c_fp16_sdpa_1024": {
         "kind": "payload",
-        "path": "results/EXP-p4c-01-run/v3_canaryB_fp16_sdpa_1024_result.json",
+        "path": "results/EXP-p4c-01-in-graph-attention__bit_width=fp16_attn=sdpa_ctx=1024/result.json",
         "ptr": "latency.per_token_p50_ms",
-        "note": "v3 金丝雀 B（同轮 fp16×sdpa 参照）",
+        "note": "v7 canonical（fp16×sdpa 参照）",
     },
     "p4c_fp16_sdpa_4096": {
         "kind": "payload",
-        "path": "results/EXP-p4c-01-run/v3_fp16_sdpa_4096_result.json",
+        "path": "results/EXP-p4c-01-in-graph-attention__bit_width=fp16_attn=sdpa_ctx=4096/result.json",
         "ptr": "latency.per_token_p50_ms",
     },
     "p4c_fp16_kernel_1024": {
         "kind": "payload",
-        "path": "results/EXP-p4c-01-run/v3_fp16_kernel_1024_result.json",
+        "path": "results/EXP-p4c-01-in-graph-attention__bit_width=fp16_attn=kernel_ctx=1024/result.json",
         "ptr": "latency.per_token_p50_ms",
     },
     "p4c_fp16_kernel_4096": {
         "kind": "payload",
-        "path": "results/EXP-p4c-01-run/v3_fp16_kernel_4096_result.json",
+        "path": "results/EXP-p4c-01-in-graph-attention__bit_width=fp16_attn=kernel_ctx=4096/result.json",
         "ptr": "latency.per_token_p50_ms",
     },
     "p4c_w8a16_sdpa_1024": {
         "kind": "payload",
-        "path": "results/EXP-p4c-01-run/v3_w8a16_sdpa_1024_result.json",
+        "path": "results/EXP-p4c-01-in-graph-attention__bit_width=w8a16_attn=sdpa_ctx=1024/result.json",
         "ptr": "latency.per_token_p50_ms",
-        "note": "v3 同轮的 w8a16×sdpa，用作 attention 那一跳的分母",
+        "note": "v7 同轮的 w8a16×sdpa，用作 attention 那一跳的分母",
     },
     "p4c_w8a16_kernel_1024": {
         "kind": "payload",
-        "path": "results/EXP-p4c-01-run/v3_w8a16_kernel_1024_result.json",
+        "path": "results/EXP-p4c-01-in-graph-attention__bit_width=w8a16_attn=kernel_ctx=1024/result.json",
         "ptr": "latency.per_token_p50_ms",
-        "note": "本项目延迟最低的一格",
+        "note": "本项目延迟最低的一格（v7 canonical）",
     },
     # --- 融合 RMSNorm 全步 A/B（记录正文，工件是 fused_norm_ab.json） ---
     "norm_hf_step_ms": {
@@ -316,17 +316,17 @@ def fig1(inputs: dict[str, Any]) -> str:
             "Execution\n(eager → CUDA Graph)",
             [
                 (
-                    "ctx=1024",
+                    "@1024",
                     ratio("fp16_eager_1024", "fp16_cudagraph_1024_pre_p2j"),
                     COLORS["fp16"],
-                    "%s → %s ms, pre-P2j round"
+                    "%s → %s ms"
                     % (ms("fp16_eager_1024"), ms("fp16_cudagraph_1024_pre_p2j")),
                 ),
                 (
-                    "ctx=4096",
+                    "@4096",
                     ratio("fp16_eager_4096", "fp16_cudagraph_4096_pre_p2j"),
                     COLORS["fp16"],
-                    "%s → %s ms, pre-P2j round"
+                    "%s → %s ms"
                     % (ms("fp16_eager_4096"), ms("fp16_cudagraph_4096_pre_p2j")),
                 ),
             ],
@@ -335,13 +335,13 @@ def fig1(inputs: dict[str, Any]) -> str:
             "Quantization\n(w8a16 vs fp16, in-graph)",
             [
                 (
-                    "ctx=1024",
+                    "@1024",
                     ratio("fp16_cudagraph_1024", "w8a16_cudagraph_1024"),
                     COLORS["quant"],
                     "%s → %s ms" % (ms("fp16_cudagraph_1024"), ms("w8a16_cudagraph_1024")),
                 ),
                 (
-                    "ctx=4096",
+                    "@4096",
                     ratio("fp16_cudagraph_4096", "w8a16_cudagraph_4096"),
                     COLORS["quant"],
                     "%s → %s ms" % (ms("fp16_cudagraph_4096"), ms("w8a16_cudagraph_4096")),
@@ -352,13 +352,13 @@ def fig1(inputs: dict[str, Any]) -> str:
             "Attention impl\n(HF sdpa → split-KV)",
             [
                 (
-                    "fp16, ctx=1024",
+                    "@1024",
                     ratio("p4c_fp16_sdpa_1024", "p4c_fp16_kernel_1024"),
                     COLORS["attn"],
                     "%s → %s ms" % (ms("p4c_fp16_sdpa_1024"), ms("p4c_fp16_kernel_1024")),
                 ),
                 (
-                    "fp16, ctx=4096",
+                    "@4096",
                     ratio("p4c_fp16_sdpa_4096", "p4c_fp16_kernel_4096"),
                     COLORS["attn"],
                     "%s → %s ms" % (ms("p4c_fp16_sdpa_4096"), ms("p4c_fp16_kernel_4096")),
@@ -369,7 +369,7 @@ def fig1(inputs: dict[str, Any]) -> str:
             "Fused RMSNorm\n(7 kernels → 1, whole step)",
             [
                 (
-                    "ctx=1024",
+                    "@1024",
                     float(inputs["norm_hf_step_ms"]["value"])
                     / float(inputs["norm_ours_step_ms"]["value"]),
                     COLORS["norm"],
@@ -380,19 +380,19 @@ def fig1(inputs: dict[str, Any]) -> str:
         ),
     ]
 
-    w, h = 940, 430
+    w, h = 1180, 620
     svg = Svg(
         w,
         h,
         "Each lever measured with its own same-round A/B",
         [
-            "OLMoE-1B-7B-0924, batch=1 decode, RTX 5090, measured achievable bandwidth 1561.9 GB/s.",
-            "Ratio > 1.0 = faster. These are four independent A/Bs: do not multiply them (AGENTS.md rule 3).",
+            "OLMoE-1B-7B-0924, batch=1 decode, RTX 5090, measured achievable bandwidth 1560.3 GB/s.",
+            "Ratio > 1.0 = faster. These are four independent A/Bs: do not multiply them (RESULTS.md rule).",
         ],
     )
-    left, right, top, bottom = 210, 60, 108, 62
+    left, right, top, bottom = 210, 420, 108, 62
     plot_w, plot_h = w - left - right, h - top - bottom
-    vmax = 3.0
+    vmax = 3.4
 
     def x_of(v: float) -> float:
         return left + plot_w * (v / vmax)
@@ -431,20 +431,10 @@ def fig1(inputs: dict[str, Any]) -> str:
                 svg.text(left + 6, by + 12, note, size=10.5, color=MUTED)
                 continue
             svg.rect(left, by, max(1.0, x_of(value) - left), bar_h, color, radius=3)
+            # ★ caption 统一放**条外右侧**（2026-10-25 视觉审计：条内白字会压住条外
+            #   黑字——两套分支都画导致重叠）。画布已按最长 caption 预算加宽。
             caption = "%.2f×  %s   (%s)" % (value, sublabel, note)
-            if x_of(value) + 8 + _text_width(caption, 11) > w - 12:
-                # 放不下就写进条内（右对齐、白字），别让标注跑到画布外面
-                svg.text(
-                    x_of(value) - 8,
-                    by + 12.5,
-                    caption,
-                    size=11,
-                    color="#ffffff",
-                    weight="600",
-                    anchor="end",
-                )
-            else:
-                svg.text(x_of(value) + 8, by + 12.5, caption, size=11, color=INK, weight="600")
+            svg.text(x_of(value) + 8, by + 12.5, caption, size=11, color=INK, weight="600")
 
     # 1.0× 参考线（"没变"）
     svg.line(x_of(1.0), top - 8, x_of(1.0), top + plot_h + 4, COLORS["warn"], width=1.4, dash="4 3")
@@ -556,17 +546,32 @@ def fig2(inputs: dict[str, Any]) -> str:
         else:
             svg.rect(left, y, max(2.0, x_of(value) - left), bar_h, color, radius=3)
         svg.text(left - 14, y + 13, label, size=11.5, color=INK, anchor="end")
-        svg.text(
-            x_of(value) - 8,
-            y + 13,
-            "%.2f ms" % value,
-            size=11,
-            color=COLORS["warn"] if i == 0 else "#ffffff",
-            weight="600",
-            anchor="end",
-        )
+        # ★ ms 值标签：条够宽放条内（白字）；窄条（<70px）放条外右侧黑字——
+        #   末跳 1.46 ms 的条只有 ~30px，白字会被截（视觉审计 2026-10-25）。
+        label_w = _text_width("%.2f ms" % value, 11)
+        if x_of(value) - left > label_w + 16:
+            svg.text(
+                x_of(value) - 8,
+                y + 13,
+                "%.2f ms" % value,
+                size=11,
+                color=COLORS["warn"] if i == 0 else "#ffffff",
+                weight="600",
+                anchor="end",
+            )
+        else:
+            svg.text(
+                x_of(value) + 8,
+                y + 13,
+                "%.2f ms" % value,
+                size=11,
+                color=INK,
+                weight="600",
+            )
         if hop:
-            svg.text(x_of(value) + 10, y + 13, hop, size=10.5, color=MUTED)
+            # hop 注记起点也要让开条外的 ms 标签
+            hop_x = x_of(value) + 10 + (0 if x_of(value) - left > label_w + 16 else label_w + 10)
+            svg.text(hop_x, y + 13, hop, size=10.5, color=MUTED)
 
     xf = x_of(floor)
     svg.line(xf, top - 10, xf, top + plot_h + 4, COLORS["floor"], width=1.6, dash="5 3")
@@ -574,7 +579,8 @@ def fig2(inputs: dict[str, Any]) -> str:
     svg.text(
         24,
         h - 16,
-        "The earlier-round baseline sits %.0f× above the floor; the best cell is %.2f× above it."
+        "Baseline sits %.0f× above the floor. The best cell reads %.2f× of it — below the fp16-"
+        "accounting floor, because KV-INT8 streams half the KV bytes (E6)."
         % (context[1] / floor, chain[-1][1] / floor),
         size=10.5,
         color=MUTED,
@@ -637,7 +643,7 @@ def fig3(inputs: dict[str, Any]) -> str:
             "ncu performance counters are blocked on this host — see docs/reference/NCU_EVIDENCE.md §1.",
         ],
     )
-    left, right, top, bottom = 230, 120, 118, 96
+    left, right, top, bottom = 230, 190, 118, 108
     plot_w, plot_h = w - left - right, h - top - bottom
     vmax = 100.0
 
@@ -711,9 +717,9 @@ def fig3(inputs: dict[str, Any]) -> str:
         byte_ratio = base_b / rec["analytical_bytes"]["read"]
         time_ratio = base_ms / ms
         svg.text(
-            left + 250 + i * 130,
+            left + 240 + i * 150,
             foot_y,
-            "%-6s %.2f× / %.2f×" % (key.split("_")[1], byte_ratio, time_ratio),
+            "%s  %.2f× / %.2f×" % (key.split("_")[1], byte_ratio, time_ratio),
             size=10.5,
             color=INK,
         )
@@ -735,9 +741,11 @@ def fig4(inputs: dict[str, Any]) -> str:
     每行的工件引用在 RESULTS.md；E6 @1024 的 −0.78% 因条形太短只在脚注提及）。
     """
     levers = [
-        ("fused RoPE", 8.39, "A/B", "fused_rope_ab", "norm"),
+        # 颜色 = 开关类别（图例语义统一，2026-10-25 视觉审计）：
+        #   norm 橙 = kernel/fusion 融合（F1/F2）、attn 黄 = KV 路径（F4）、quant 绿 = 量化（F5/E6）
+        ("fused RoPE (F1)", 8.39, "A/B", "fused_rope_ab", "norm"),
         ("KV INT8 read path (E6, ctx=4096)", 6.54, "5/5 pairs", "EXP-e6-ab-4096-run2", "quant"),
-        ("packed q/k/v GEMM (F2)", 4.81, "3/3 pairs", "EXP-p4c-01 §F2", "attn"),
+        ("packed q/k/v GEMM (F2)", 4.81, "3/3 pairs", "EXP-p4c-01 §F2", "norm"),
         ("lm_head W8 quant (F5)", 4.13, "5/5 pairs", "EXP-f5-ab-20261025", "quant"),
         ("fused routing top-k (F1)", 3.00, "A/B", "routing_ab", "norm"),
         ("KV direct write (F4)", 2.94, "5/5 pairs", "EXP-p4c-01 §F4", "attn"),
@@ -779,6 +787,17 @@ def fig4(inputs: dict[str, Any]) -> str:
         # ★ 注释放**固定列**（x=650，不跟随条尾浮动）：条尾 x 最大 ~577、值标签最长
         #   到 ~640，注记列最长串 650+~190 仍在画布内（跟随式曾被渲染器裁边）。
         svg.text(650, y + row_h * 0.68, "%s · %s" % (pairs, src), size=9.5, color=MUTED)
+    # 图例（颜色 = 开关类别）：画布底部，色块+文字
+    legend_y = y0 + len(levers) * (row_h + gap) + 34
+    lx = x0
+    for label, key in (
+        ("fusion (F1/F2)", "norm"),
+        ("KV path (F4)", "attn"),
+        ("quantization (F5/E6)", "quant"),
+    ):
+        svg.rect(lx, legend_y - 10, 14, 14, COLORS[key], radius=3)
+        svg.text(lx + 20, legend_y + 1, label, size=10.5, color=MUTED)
+        lx += 20 + _text_width(label, 10.5) + 26
     return svg.render()
 
 
