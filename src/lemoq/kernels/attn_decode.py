@@ -841,6 +841,12 @@ def _decode_forward_impl(
     filled = _filled_len_of(past_key_values)
     q_len = int(hidden_states.shape[1])
     if output_attentions or q_len != 1 or filled is None or position_embeddings is None:
+        if q_len != 1 and getattr(self, "_lemoq_kv_int8_bufs", None) is not None:
+            # ★ E6：prefill = 一段新序列开始。int8 镜像必须作废，下一个 decode 步
+            #   对新 cache 重新 bulk——否则静默复用上一会话/窗口的 codes（prompt 一换
+            #   就是污染）。同 prompt 的重复 prefill（runner 的 reset 循环）数值等价，
+            #   作废只是多付一次 bulk。prefill 恒 eager，不经过图，capture 安全。
+            self._lemoq_kv_int8_bufs = None
         return original(
             hidden_states,
             attention_mask=attention_mask,

@@ -179,3 +179,49 @@ def test_bulk_quantize_whole_cache_and_zero_slots():
     assert (err <= 0.6 * bufs["ks"][0, :, :6].float().unsqueeze(-1)).all()
     # 零行：scale=1.0、codes=0
     assert (bufs["ks"][0, :, 6:] == 1.0).all() and (bufs["kc"][0, :, 6:] == 0).all()
+
+
+def test_prefill_invalidates_stale_kv_int8_buffers():
+    """★ 跨会话污染守卫（2026-10-25 修）：prefill（q_len!=1 的回退）必须作废 int8 镜像。
+
+    `_lemoq_kv_int8_bufs` 挂在 attention 模块上、只增不减——probe 换窗口/换 prompt 的
+    新 StaticCache 会话若复用旧 codes，读到的还是上一段序列的 KV（静默污染）。
+    钉住两条语义：prefill 作废；DynamicCache 的 decode 回退（filled is None、q_len==1）
+    **不**作废。
+    """
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from lemoq.kernels.attn_decode import _decode_forward_impl  # noqa: PLC0415
+
+    def _self_with(bufs):
+        calls = []
+
+        def fake_original(*a, **k):
+            calls.append(len(a))
+            return ("out", None)
+
+        return (
+            SimpleNamespace(_lemoq_original_forward=fake_original, _lemoq_kv_int8_bufs=bufs),
+            calls,
+        )
+
+    # prefill：q_len=4 → 回退原路，且 bufs 被作废
+    mod, calls = _self_with({"kc": "stale"})
+    out = _decode_forward_impl(
+        mod,
+        torch.zeros(1, 4, 8),
+        past_key_values=object(),
+        position_embeddings=(torch.zeros(1), torch.zeros(1)),
+    )
+    assert out == ("out", None) and calls == [1]
+    assert mod._lemoq_kv_int8_bufs is None, "prefill 后旧 int8 镜像必须作废"
+
+    # DynamicCache 的 decode（q_len=1、filled is None）回退：bufs 保持不动
+    mod2, _ = _self_with({"kc": "keep"})
+    _decode_forward_impl(
+        mod2,
+        torch.zeros(1, 1, 8),
+        past_key_values=object(),  # 无 _lemoq_filled_len
+        position_embeddings=(torch.zeros(1), torch.zeros(1)),
+    )
+    assert mod2._lemoq_kv_int8_bufs == {"kc": "keep"}, "decode 回退不应作废镜像"

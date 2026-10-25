@@ -838,6 +838,48 @@ def aggregate_windows(
     return result
 
 
+def _static_session_trajectory(
+    model: Any, ids: Any, *, max_new_tokens: int
+) -> tuple[list[Any], list[int]]:
+    """E6 轨迹口径：StaticCache 会话贪心 decode（与 runner 图格同机制）。
+
+    ★ 为什么不能用 DynamicCache（首轮门假 0 的根因）：换核 decode 前向在
+    `filled is None`（DynamicCache 没有 `_lemoq_filled_len`）时**显式回退 HF 原路**，
+    int8 分支从未执行。会话机制照 `StaticCacheDecodeSession`：设备张量
+    `_lemoq_filled_len` 挂在 cache 对象上，每步 `_set_step_inputs` 在图外 fill。
+    参考臂（env 关）与实验臂（env 开）必须走**同一条**会话路径——差一个变量（KV 位宽）。
+
+    返回 `(traj_logits, tokens)`：traj = [prefill 位置, decode 步 1..N]（1+N 条，
+    与权重门的 33 位置/窗同构）；tokens = [t1..tN]（喂进各步的贪心 token，含 seed）。
+    """
+    import gc  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+
+    from benchmarks.cudagraph import StaticCacheDecodeSession  # noqa: PLC0415
+
+    if not ids.is_cuda:
+        ids = ids.to("cuda")
+    session = StaticCacheDecodeSession(
+        model, ids, ctx=int(ids.shape[1]), max_new_tokens=max_new_tokens
+    )
+    try:
+        out0 = session.prefill()  # 幂等重跑（__init__ 已 prefill 过一次），取 prefill 位置 logits
+        traj: list[Any] = [out0.logits[:, -1:, :].float()]
+        tokens = [int(session.seed_token_id)]
+        for step in range(max_new_tokens):
+            logits = session.decode_eager()
+            traj.append(logits[:, -1:, :].float())
+            if step < max_new_tokens - 1:
+                tokens.append(int(session.current_token_id))
+    finally:
+        del session
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    return traj, tokens
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--model", default=None, help="模型路径/ID；`--aggregate-only` 时不需要")
@@ -1123,6 +1165,9 @@ def main(argv: list[str] | None = None) -> int:
             with open(args.json, "w", encoding="utf-8") as fh:
                 json.dump(result, fh, ensure_ascii=False, indent=2, default=str)
 
+    # ★ E6 在场时参考轨迹也必须走 StaticCache 会话：换核 decode 对 DynamicCache
+    #   回退原路，参考（fp16 kernel）与臂（int8）必须差且仅差 KV 位宽这一个变量。
+    e6_present = any(a["kind"] == "kv_int8" for a in arms)
     for label, ids in prompts:
         # ★ `_snapshot` 是**把原模块停在 CPU** 上省显存的，所以任何一次模型前向之前
         #   都必须先恢复 —— 否则第一次前向就会 "mat2 is on cpu"。这同时保证每个窗口
@@ -1131,19 +1176,24 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "=== 窗口 %s: 取轨迹（fp16 贪心 %d 步）===" % (label, args.max_new_tokens), flush=True
         )
-        tokens: list[int] = []
-        ref_traj_logits: list[Any] = []
-        with torch.no_grad():
-            out = model(ids, use_cache=True)
-            past = out.past_key_values
-            ref_traj_logits.append(out.logits[:, -1:, :].float())
-            tok = out.logits[:, -1:, :].argmax(dim=-1)
-            for _ in range(args.max_new_tokens):
-                tokens.append(int(tok.item()))
-                out = model(tok, past_key_values=past, use_cache=True)
+        if e6_present:
+            ref_traj_logits, tokens = _static_session_trajectory(
+                model, ids, max_new_tokens=args.max_new_tokens
+            )
+        else:
+            tokens = []
+            ref_traj_logits = []
+            with torch.no_grad():
+                out = model(ids, use_cache=True)
                 past = out.past_key_values
                 ref_traj_logits.append(out.logits[:, -1:, :].float())
                 tok = out.logits[:, -1:, :].argmax(dim=-1)
+                for _ in range(args.max_new_tokens):
+                    tokens.append(int(tok.item()))
+                    out = model(tok, past_key_values=past, use_cache=True)
+                    past = out.past_key_values
+                    ref_traj_logits.append(out.logits[:, -1:, :].float())
+                    tok = out.logits[:, -1:, :].argmax(dim=-1)
         reference_logits = teacher_forced_logits(model, ids, tokens, device=device)
         reference_hidden = _capture_hidden(model, ids, n_layers=n_layers)
         torch.cuda.synchronize()
@@ -1249,37 +1299,29 @@ def main(argv: list[str] | None = None) -> int:
                 elif arm["kind"] == "kv_int8":
                     # ★ E6（EXP-p5-01）：KV INT8 的门口径是**轨迹 logits**——teacher
                     #   forcing 是 prefill（q_len>1 走 HF 原路），KV 扰动不在那个口径里。
-                    #   臂 = 开关 env ON 重跑同一条贪心轨迹，逐步 logits 对 fp16 参考轨迹
-                    #   比较（每窗 33 位置 = 1 prompt + 32 步，5 窗 165 位置与权重门同构）。
+                    #   臂 = 开关 env ON、与参考同一条 StaticCache 会话路径重跑贪心轨迹，
+                    #   逐步 logits 对 fp16 参考轨迹比较（每窗 33 位置 = 1 prompt + 32 步，
+                    #   5 窗 165 位置与权重门同构）。DynamicCache 会让 decode 回退原路——
+                    #   那正是首轮假 0 的根因，禁止再走。
                     from benchmarks.cudagraph import compare_logits  # noqa: PLC0415
+                    from lemoq.kernels.attn_decode import attention_int8_runs  # noqa: PLC0415
 
                     env_name = "LEMOQ_KV_INT8"
                     old_env = os.environ.get(env_name)
+                    runs_before = attention_int8_runs(model)
                     os.environ[env_name] = "1"
-                    arm_traj: list[Any] = []
                     try:
-                        with torch.no_grad():
-                            out = model(ids, use_cache=True)
-                            past = out.past_key_values
-                            arm_traj.append(out.logits[:, -1:, :].float())
-                            tok = out.logits[:, -1:, :].argmax(dim=-1)
-                            for _ in range(args.max_new_tokens):
-                                out = model(tok, past_key_values=past, use_cache=True)
-                                past = out.past_key_values
-                                arm_traj.append(out.logits[:, -1:, :].float())
-                                tok = out.logits[:, -1:, :].argmax(dim=-1)
+                        arm_traj, _arm_tokens = _static_session_trajectory(
+                            model, ids, max_new_tokens=args.max_new_tokens
+                        )
                         report = compare_logits(ref_traj_logits, arm_traj)
                         entry["kl"] = float(report["kl"])
                         entry["top1_agreement"] = float(report["top1_agreement"])
                         entry["metric_basis"] = (
-                            "trajectory（decode 步 logits vs fp16 轨迹；teacher forcing "
-                            "是 prefill 口径，对 KV 扰动不敏感故不采用）"
+                            "trajectory（decode 步 logits vs fp16 轨迹，StaticCache 会话；"
+                            "teacher forcing 是 prefill 口径，对 KV 扰动不敏感故不采用）"
                         )
-                        entry["kv_int8_runs"] = sum(
-                            int(getattr(m, "_lemoq_kv_int8_runs", 0))
-                            for m in model.model.layers
-                            if hasattr(m, "self_attn")
-                        )
+                        entry["kv_int8_runs"] = attention_int8_runs(model) - runs_before
                     finally:
                         if old_env is None:
                             os.environ.pop(env_name, None)
