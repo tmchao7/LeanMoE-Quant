@@ -1,6 +1,6 @@
-"""E6（EXP-p5-01）KV INT8 的**参考数学**与守卫 —— kernel（10-25 窗落地）的对照物。
+"""E6（EXP-p5-01）KV INT8 的参考数学、守卫与**写路径 kernel**。
 
-本模块今天（2026-10-24）只落三样**CPU 可测**的东西：
+模块结构（K 门对照物在前，kernel 在后——判据与实现分得清）：
 
     1. 参考量化数学（K 门的对照物）——kernel 必须逐位复现它的舍入链：
            amax(fp32) → scale = amax/127 → q = round(x/scale)（half-to-even）
@@ -11,14 +11,13 @@
        绝不静默算错（照 `kv_direct_write_applicable` 的教训：缺 is_cuda 检查
        让盒子上的 CPU 测试崩过一次）。
     3. 折叠代数的参考恒等式（读路径"内层零解包"的依据，RECON §3.2）。
+    4. `kv_int8_write` Triton kernel（grid=(2H,)：K 行×H + V 行×H；行内 amax 归约
+       → int8 行 + fp16 scale）。★ 舍入用 `libdevice.rint`（half-to-even）——
+       `tl.round` 是 half-away-from-zero，与 torch.round 逐位不齐（.5 值上必炸，
+       K 门是逐位判据）。
 
 舍入约定是**预注册**的（EXP-p5-01 记录 §Method）：kernel 对不齐是实现问题，
 不是判据问题——与 F4 的 K 门同一立场。
-
-    name                状态        说明
-    kv_int8_write       10-25 窗    Triton 写 kernel（grid=(2H,)：K 行×H + V 行×H；
-                                    行内 amax 归约 → int8 行 + fp16 scale 写静态 buffer）。
-                                    `tests/test_kv_int8_gpu.py` 已按名预置，落地自动激活。
 """
 
 from __future__ import annotations
@@ -110,3 +109,101 @@ def _torch() -> Any:
         return torch
     except Exception:  # noqa: BLE001
         return None
+
+
+# ---------------------------------------------------------------------------
+# 写路径 kernel（惰性定义：CPU 导入安全，照 kv_direct._get_kernel 模式）
+# ---------------------------------------------------------------------------
+
+_TRITON_KERNEL: Any = None
+
+
+def _get_kernel() -> Any:
+    """惰性编译入口（CPU 导入安全；CUDA 上首次调用才 import triton）。"""
+    global _TRITON_KERNEL
+    if _TRITON_KERNEL is not None:
+        return _TRITON_KERNEL
+    import triton  # noqa: PLC0415
+    import triton.language as tl  # noqa: PLC0415
+    from triton.language.extra import libdevice  # noqa: PLC0415
+
+    @triton.jit
+    def _kv_int8_write_kernel(
+        k_ptr,
+        v_ptr,
+        kc_ptr,
+        ks_ptr,
+        vc_ptr,
+        vs_ptr,
+        HEADS: tl.constexpr,
+        D: tl.constexpr,
+    ):
+        """grid=(2*HEADS,)：pid < HEADS 量 k 行，否则量 v 行。
+
+        参考数学的逐位复刻（EXP-p5-01 §Method 预注册舍入链）：fp32 amax → /127
+        → **rint（half-to-even）** → clamp ±127 → int8；scale 存 fp16。全零行
+        scale=1.0。★ 不许用 `tl.round`——它是 half-away-from-zero，与 torch.round
+        在 .5 值上逐位不齐，而 K 门是逐位判据。偏移 int32（H·D ≪ 2^31）。
+        """
+        pid = tl.program_id(0)
+        offs = tl.arange(0, D)
+        if pid < HEADS:
+            x = tl.load(k_ptr + pid * D + offs).to(tl.float32)
+            amax = tl.max(tl.abs(x), axis=0)
+            s = tl.where(amax > 0, amax / 127.0, 1.0)
+            q = libdevice.rint(x / s)
+            q = tl.minimum(tl.maximum(q, -127.0), 127.0)
+            tl.store(kc_ptr + pid * D + offs, q.to(tl.int8))
+            tl.store(ks_ptr + pid, s.to(tl.float16))
+        else:
+            base = (pid - HEADS) * D
+            x = tl.load(v_ptr + base + offs).to(tl.float32)
+            amax = tl.max(tl.abs(x), axis=0)
+            s = tl.where(amax > 0, amax / 127.0, 1.0)
+            q = libdevice.rint(x / s)
+            q = tl.minimum(tl.maximum(q, -127.0), 127.0)
+            tl.store(vc_ptr + base + offs, q.to(tl.int8))
+            tl.store(vs_ptr + (pid - HEADS), s.to(tl.float16))
+
+    _TRITON_KERNEL = _kv_int8_write_kernel
+    return _TRITON_KERNEL
+
+
+def kv_int8_write(
+    k_new: Any,
+    v_new: Any,
+    *,
+    k_codes: Any = None,
+    k_scale: Any = None,
+    v_codes: Any = None,
+    v_scale: Any = None,
+) -> tuple[Any, Any, Any, Any]:
+    """写路径入口：把 (1,H,1,D) 的 k/v 行量化为 int8 codes + fp16 per-token scale。
+
+    out 四件套缺省时就地分配（**K 门/测试便捷**）；decode 集成时传 cache 的
+    **静态地址**切片（图捕获兼容，照 F4）。守卫不满足 ⇒ RuntimeError——调用方
+    必须先查 `kv_int8_rows_applicable`，不满足就走 fp16 写（回退不是本函数职责）。
+    """
+    torch = _torch()
+    if not kv_int8_rows_applicable(k_new, v_new):
+        raise RuntimeError(
+            "kv_int8_write: 守卫不满足——先查 kv_int8_rows_applicable，不满足走 fp16 写"
+        )
+    heads, dim = k_new.shape[1], k_new.shape[-1]
+    if k_codes is None:
+        k_codes = torch.empty((1, heads, 1, dim), dtype=torch.int8, device=k_new.device)
+        k_scale = torch.empty((1, heads, 1), dtype=torch.float16, device=k_new.device)
+        v_codes = torch.empty((1, heads, 1, dim), dtype=torch.int8, device=v_new.device)
+        v_scale = torch.empty((1, heads, 1), dtype=torch.float16, device=v_new.device)
+    _get_kernel()[(2 * heads,)](
+        k_new,
+        v_new,
+        k_codes,
+        k_scale,
+        v_codes,
+        v_scale,
+        HEADS=heads,
+        D=dim,
+        num_warps=1,
+    )
+    return k_codes, k_scale, v_codes, v_scale
