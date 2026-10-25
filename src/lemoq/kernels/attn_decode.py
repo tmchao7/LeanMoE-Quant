@@ -623,6 +623,107 @@ def attn_decode_forward(
     return out
 
 
+def attn_decode_forward_int8(
+    q: Any,
+    k_codes: Any,
+    k_scale: Any,
+    v_codes: Any,
+    v_scale: Any,
+    filled_len: Any,
+    *,
+    config: dict[str, Any] | None = None,
+    scale: float | None = None,
+) -> Any:
+    """E6（EXP-p5-01）：int8 镜像 cache 的 decode attention —— **scale 折叠，内层零解包**。
+
+    `k_codes/v_codes`：(1,H,S,D) int8（per-token 对称量化，`kv_int8_bulk_quantize` +
+    `kv_int8_cache_write` 维护）；`k_scale/v_scale`：(1,H,S) fp16 per-token scale。
+    分数/权重折叠的代数见 `_attn_triton._attn_split_kernel_int8`；与"先反量化再
+    attention"代数恒等、结合序不同 ⇒ parity 判据 = fp64 oracle + PARITY_GATE 1e-3。
+    combine kernel 与 fp16 路径**共用**（m/l/acc 语义相同）。
+    """
+    torch = _torch()
+    cfg = merged_config(config)
+    for name, tensor in (("q", q), ("k_codes", k_codes), ("v_codes", v_codes)):
+        if not torch.is_tensor(tensor) or tensor.dim() != 4:
+            raise ValueError("%s 必须是 4 维张量" % name)
+        if tensor.stride(-1) != 1:
+            raise ValueError("%s 的最后一维必须连续" % name)
+    for name, tensor in (("k_scale", k_scale), ("v_scale", v_scale)):
+        if not torch.is_tensor(tensor) or tensor.dim() != 3:
+            raise ValueError("%s 必须是 3 维 (1,H,S)" % name)
+    if k_codes.dtype != torch.int8 or v_codes.dtype != torch.int8:
+        raise ValueError("codes 必须 int8")
+    if k_scale.dtype != torch.float16 or v_scale.dtype != torch.float16:
+        raise ValueError("scale 必须 fp16")
+    if int(q.shape[2]) != 1 or int(q.shape[0]) != 1:
+        raise NotImplementedError("int8 attention 只处理 batch=1 / q_len=1")
+    heads, seq_len, head_dim = int(k_codes.shape[1]), int(k_codes.shape[2]), int(k_codes.shape[3])
+    if tuple(k_codes.shape) != tuple(v_codes.shape) or int(q.shape[1]) != heads:
+        raise ValueError("k/v codes 形状必须一致且头数与 q 相同")
+    if tuple(k_scale.shape) != (1, heads, seq_len) or tuple(v_scale.shape) != (1, heads, seq_len):
+        raise ValueError("scale 必须是 (1,H,S)")
+    if not (k_codes.is_cuda and q.is_cuda):
+        raise RuntimeError("int8 attention 需要 CUDA")
+    if int(head_dim - 1) & int(head_dim) or head_dim < 2:
+        raise ValueError("head_dim 必须是 2 的幂")
+
+    filled = _filled_tensor(filled_len, device=q.device, seq_len=seq_len)
+    num_splits = resolve_num_splits(cfg.get("num_splits"), heads=heads, device=q.device)
+    plan = launch_plan(
+        heads=heads,
+        head_dim=head_dim,
+        num_splits=num_splits,
+        block_n=int(cfg["split"]["BLOCK_N"]),
+        block_d=int(cfg["combine"]["BLOCK_D"]),
+    )
+    qc = q.reshape(heads, head_dim)
+    if not qc.is_contiguous():
+        qc = qc.contiguous()
+    kc = k_codes.reshape(heads, seq_len, head_dim)
+    vc = v_codes.reshape(heads, seq_len, head_dim)
+    ksc = k_scale.reshape(heads, seq_len)
+    vsc = v_scale.reshape(heads, seq_len)
+
+    triton, kernels = _kernels()
+    _ = triton
+    dev = q.device
+    m = torch.empty(plan["split"]["m_shape"], dtype=torch.float32, device=dev)
+    l = torch.empty(plan["split"]["l_shape"], dtype=torch.float32, device=dev)
+    acc = torch.empty(plan["split"]["acc_shape"], dtype=torch.float32, device=dev)
+    out = torch.empty(plan["combine"]["out_shape"], dtype=q.dtype, device=dev)
+    qk_scale = (scale if scale is not None else 1.0 / math.sqrt(head_dim)) * LOG2E
+    kernels._attn_split_kernel_int8[plan["split"]["grid"]](
+        qc,
+        kc,
+        ksc,
+        vc,
+        vsc,
+        filled,
+        m,
+        l,
+        acc,
+        int(kc.stride(1)),
+        seq_len,
+        D=head_dim,
+        NUM_SPLITS=num_splits,
+        BLOCK_N=plan["BLOCK_N"],
+        QK_SCALE=float(qk_scale),
+        num_warps=int(cfg["split"]["num_warps"]),
+    )
+    kernels._attn_combine_kernel[plan["combine"]["grid"]](
+        m,
+        l,
+        acc,
+        out,
+        D=head_dim,
+        NUM_SPLITS=num_splits,
+        BLOCK_D=plan["BLOCK_D"],
+        num_warps=int(cfg["combine"]["num_warps"]),
+    )
+    return out
+
+
 def warm(
     *,
     heads: int,
@@ -800,6 +901,7 @@ def _decode_forward_impl(
     else:
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
+    new_key, new_value = key_states, value_states  # int8 镜像写要用"新行"（下面会被换成整段 cache）
     if past_key_values is not None:
         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
         from lemoq.kernels.fusion_switches import fusion_enabled  # noqa: PLC0415
@@ -825,18 +927,54 @@ def _decode_forward_impl(
                 key_states, value_states, self.layer_idx, cache_kwargs
             )
 
-    # ★ 核心替换：mask + q·kᵀ + softmax + w·v  ->  一次 kernel（只读 [0, filled)）
-    #   注意这里**不再需要 4D mask**：kernel 不读未填充槽位。
-    #   key_states/value_states 是整段 cache（(1,H,max_len,D) 的连续张量），
-    #   长度由 kernel 从设备内存读，shape 里没有长度。
-    attn_output = attn_decode_forward(
-        query_states,
-        key_states,
-        value_states,
-        filled,
-        config=self._lemoq_attn_config,
-        backend=self._lemoq_attn_backend,
-    )
+    # ★ E6（EXP-p5-01）：int8 镜像 cache 读路径（默认关）。fp16 cache 照常维护
+    #   （正确性网）；int8 buffer 是**读源**——attention 从 int8 读，scale 折叠进
+    #   分数/权重（内层零解包）。首次调用 bulk 量化整段 cache（eager warmup 相位，
+    #   免 host 长度；capture 期调用会显式拒绝——初始化绝不能进图）。
+    from lemoq.kernels.fusion_switches import fusion_enabled as _fusion_enabled  # noqa: PLC0415
+
+    if _fusion_enabled("kv_int8"):
+        if self._lemoq_attn_backend != "triton":
+            raise RuntimeError("kv_int8 需要 attn backend=triton（oracle 只用于单测）")
+        bufs = getattr(self, "_lemoq_kv_int8_bufs", None)
+        if bufs is None:
+            import torch as _t  # noqa: PLC0415
+
+            if _t.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "kv_int8 的 buffer 初始化不能发生在 capture 里——先跑 eager warmup 步"
+                )
+            from lemoq.kernels.kv_int8 import kv_int8_init_buffers  # noqa: PLC0415
+
+            layer = past_key_values.layers[self.layer_idx]
+            bufs = kv_int8_init_buffers(layer.keys, layer.values, filled=None)
+            self._lemoq_kv_int8_bufs = bufs
+        from lemoq.kernels.kv_int8 import kv_int8_cache_write  # noqa: PLC0415
+
+        kv_int8_cache_write(bufs, new_key, new_value, cache_position)
+        attn_output = attn_decode_forward_int8(
+            query_states,
+            bufs["kc"],
+            bufs["ks"],
+            bufs["vc"],
+            bufs["vs"],
+            filled,
+            config=self._lemoq_attn_config,
+        )
+        self._lemoq_kv_int8_runs = getattr(self, "_lemoq_kv_int8_runs", 0) + 1
+    else:
+        # ★ 核心替换：mask + q·kᵀ + softmax + w·v  ->  一次 kernel（只读 [0, filled)）
+        #   注意这里**不再需要 4D mask**：kernel 不读未填充槽位。
+        #   key_states/value_states 是整段 cache（(1,H,max_len,D) 的连续张量），
+        #   长度由 kernel 从设备内存读，shape 里没有长度。
+        attn_output = attn_decode_forward(
+            query_states,
+            key_states,
+            value_states,
+            filled,
+            config=self._lemoq_attn_config,
+            backend=self._lemoq_attn_backend,
+        )
 
     attn_output = attn_output.transpose(1, 2).contiguous()
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
@@ -875,6 +1013,13 @@ def attention_cores_replaced(model: Any) -> int:
     """已被替换的 attention 模块数（供 runner/bench 记录与自检）。"""
     return sum(
         1 for module in _attention_modules(model) if hasattr(module, "_lemoq_original_forward")
+    )
+
+
+def attention_int8_runs(model: Any) -> int:
+    """E6：所有 attention 模块的 int8 decode 运行计数之和（payload `kv_int8_effective` 的证据）。"""
+    return sum(
+        int(getattr(module, "_lemoq_kv_int8_runs", 0)) for module in _attention_modules(model)
     )
 
 

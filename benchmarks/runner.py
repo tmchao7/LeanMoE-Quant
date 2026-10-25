@@ -361,6 +361,12 @@ LMHEAD_GATE_CITATIONS: dict[int, dict[str, Any]] = {
     },
 }
 
+# ★ E6（EXP-p5-01）：KV INT8 的**第三张门表**（cache 侧运行时量化，独立于权重位宽——
+#   fp16 格同样被它作用）。接线时为空（fail-closed：开关开 + 无门实测 ⇒ 加载前拒绝）。
+#   数值只能来自 `results/EXP-p5-01-kv-int8/` 的门工件（轨迹口径：decode 步 logits 的
+#   KL/top-1 对 fp16 轨迹——teacher forcing 是 prefill，KV 扰动不在那个口径里）。
+KV_INT8_GATE_CITATIONS: dict[int, dict[str, Any]] = {}
+
 
 def lm_head_w8_effective(bit_width: str, qreport: Any = None) -> bool:
     """F5 开关的**生效**判定：开关开 + 该格是量化格（fp16 没有量化语义）。
@@ -375,6 +381,23 @@ def lm_head_w8_effective(bit_width: str, qreport: Any = None) -> bool:
     if qreport is None:
         return True
     return int(qreport.replaced.get("lm_head", 0) or 0) > 0
+
+
+def kv_int8_gate_state(ctx: int) -> dict[str, Any] | None:
+    """E6 的门状态：None=开关关（不作用）；gate=MISSING=没测过；否则推导判定。
+
+    KV INT8 作用在 **cache 侧**（独立于权重位宽）——fp16 格与量化格同样被门约束。
+    判定口径与 F5 同（KL<0.01 且 top-1≥0.95 的合取），但来源是**轨迹**工件
+    （decode 步 logits 对 fp16 轨迹——teacher forcing 是 prefill，KV 扰动不在那里）。
+    """
+    from lemoq.kernels.fusion_switches import fusion_enabled  # noqa: PLC0415
+
+    if not fusion_enabled("kv_int8"):
+        return None
+    cite = KV_INT8_GATE_CITATIONS.get(int(ctx))
+    if cite is None:
+        return {"gate": "MISSING"}
+    return dict(cite, gate=gate_from_metrics("w8a16", cite["kl"], cite["top1"]))
 
 
 # docs/reference/METRICS.md §1 的门槛（**门不动**；本表只引用实测，不改门槛）
@@ -576,10 +599,26 @@ def correctness_for_cell(cfg: dict[str, Any], *, consistency_passed: bool) -> di
         #   是"未测"还是"漏记"（schema 会校验这一条，见 validate_ppl_declaration）。
         "ppl_note": PPL_NOT_MEASURED_NOTE,
     }
+    # ★ E6：KV INT8 作用在 cache 侧（fp16 格与量化格同样被门约束）——两个分支共用这道闸。
+    kv_gate = kv_int8_gate_state(int(cfg.get("ctx") or 0))
+    kv_pass = kv_gate is None or kv_gate["gate"] == "PASS"
+    if kv_gate is not None and kv_gate["gate"] != "PASS":
+        note = (
+            (
+                "KV INT8（LEMOQ_KV_INT8）在 ctx=%d 没有 EXP-p5-01 的门实测 —— 不得报性能数字。"
+                % cfg.get("ctx")
+            )
+            if kv_gate["gate"] == "MISSING"
+            else (
+                "KV INT8 引用门 FAIL（kl=%.6f > 0.01，轨迹口径）—— latency 只进 evidence。"
+                % kv_gate["kl"]
+            )
+        )
+        return dict(base, gate="FAIL", thresholds={"note": note, "kv_int8_gate": kv_gate})
     if bit_width == "fp16":
         return dict(
             base,
-            gate="PASS" if consistency_passed else "FAIL",
+            gate="PASS" if (consistency_passed and kv_pass) else "FAIL",
             thresholds={
                 "note": (
                     "fp16 基线：KL / top-1 对参考实现无意义（本配置即参考），故为 null。"
@@ -588,6 +627,7 @@ def correctness_for_cell(cfg: dict[str, Any], *, consistency_passed: bool) -> di
                 "kl_max_w8": KL_MAX_W8,
                 "kl_max_w4": KL_MAX_W4,
                 "top1_min": TOP1_MIN,
+                **({"kv_int8_gate": kv_gate} if kv_gate is not None else {}),
             },
         )
     cite = gate_for_cell(bit_width, int(cfg.get("group_size") or 0), int(cfg.get("ctx") or 0))
@@ -632,7 +672,7 @@ def correctness_for_cell(cfg: dict[str, Any], *, consistency_passed: bool) -> di
         base,
         kl=cite["kl"],
         top1_agreement=cite["top1"],
-        gate="PASS" if (cited_pass and lmhead_pass and consistency_passed) else "FAIL",
+        gate="PASS" if (cited_pass and lmhead_pass and kv_pass and consistency_passed) else "FAIL",
         thresholds={
             "kl_max_w8": KL_MAX_W8,
             "kl_max_w4": KL_MAX_W4,
@@ -659,6 +699,7 @@ def correctness_for_cell(cfg: dict[str, Any], *, consistency_passed: bool) -> di
                 if lmhead_on
                 else {}
             ),
+            **({"kv_int8_gate": kv_gate} if kv_gate is not None else {}),
         },
     )
 
@@ -1250,6 +1291,10 @@ def run_cudagraph(
         if quant_cfg
         else False
     )
+    # ★ E6 生效（图路径）：任一 attention 模块的 int8 decode 运行计数 > 0。
+    from lemoq.kernels.attn_decode import attention_int8_runs  # noqa: PLC0415
+
+    res["kv_int8_effective"] = attention_int8_runs(model) > 0
     res["kernel_warm"] = kernel_warm
     res["moe_blocks_replaced"] = int(moe_replaced)
     res["quantize_report"] = None if qreport is None else qreport.to_dict()
@@ -1829,6 +1874,7 @@ def build_payload(
         "packed_qkv_effective": bool(res.get("packed_qkv_effective")),
         # ★ F5 的生效状态（请求记在 fusion_payload_fields 的 lm_head_w8；这里记实际替换）
         "lm_head_w8_effective": bool(res.get("lm_head_w8_effective")),
+        "kv_int8_effective": bool(res.get("kv_int8_effective")),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
         "batch": cfg.get("batch"),
@@ -2088,6 +2134,7 @@ def build_cudagraph_payload(
         "packed_qkv_effective": bool(res.get("packed_qkv_effective")),
         # ★ F5 的生效状态（请求记在 fusion_payload_fields 的 lm_head_w8；这里记实际替换）
         "lm_head_w8_effective": bool(res.get("lm_head_w8_effective")),
+        "kv_int8_effective": bool(res.get("kv_int8_effective")),
         "kv_cache_dtype": "fp16",
         "ctx": cfg.get("ctx"),
         "batch": cfg.get("batch"),
@@ -2499,6 +2546,17 @@ def main(argv: list[str] | None = None) -> int:
                 "runner 拒绝: lm_head 也量化（LEMOQ_LMHEAD_W8）时 ctx=%d 没有 EXP-p1-06 的"
                 "lm_head 门实测 —— 硬规则 2 对新量化表面同样适用。先跑 F5 的门"
                 "（tools/quant_probe.py --arms f5_lmhead）。" % args.ctx,
+                file=sys.stderr,
+            )
+            return 2
+        # ★ E6：KV INT8 是**cache 侧运行时量化表面**（独立于权重位宽——fp16 格也被作用），
+        #   有自己的门表（EXP-p5-01，轨迹口径）。表空 = 还没测过 ⇒ 拒绝。
+        from lemoq.kernels.fusion_switches import fusion_enabled as _fe_kv  # noqa: PLC0415
+
+        if _fe_kv("kv_int8") and args.ctx not in KV_INT8_GATE_CITATIONS:
+            print(
+                "runner 拒绝: KV INT8（LEMOQ_KV_INT8）时 ctx=%d 没有 EXP-p5-01 的门实测"
+                " —— 硬规则 2 对 cache 侧量化同样适用。先跑 E6 的门（轨迹口径）。" % args.ctx,
                 file=sys.stderr,
             )
             return 2

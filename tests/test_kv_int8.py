@@ -125,3 +125,57 @@ def test_guard_rejects_cpu_and_bad_shapes():
     t = torch.randn(1, 4, 2, 16, dtype=torch.float16)[:, :, :1]
     assert not t.is_contiguous()
     assert kv_int8_rows_applicable(t, t.clone()) is False
+
+
+def test_fold_attention_algebra_end_to_end():
+    """E6 读路径的**代数**验证（torch 级，CPU）：折叠口径 vs 先反量化口径。
+
+    kernel 的逐位/parity 检验在 GPU（tests/test_kv_int8_read_gpu.py）；这里钉的是
+    读路径依赖的恒等式本身——含"V scale 不得折进分母"这个刚才差点写错的点。
+    """
+    g = torch.Generator().manual_seed(11)
+    H, S, D = 2, 24, 16
+    q = torch.randn(1, H, 1, D, generator=g, dtype=torch.float32)
+    kc = torch.randint(-127, 128, (1, H, S, D), generator=g, dtype=torch.int8)
+    vc = torch.randint(-127, 128, (1, H, S, D), generator=g, dtype=torch.int8)
+    ks = torch.rand(1, H, S, generator=g, dtype=torch.float32) + 0.5
+    vs = torch.rand(1, H, S, generator=g, dtype=torch.float32) + 0.5
+    qk_scale = 1.0 / (D**0.5)
+
+    # (a) 先反量化（真值 k/v = c·scale）再标准 attention
+    k_true = kc.float() * ks[..., None]
+    v_true = vc.float() * vs[..., None]
+    p = torch.softmax(q.float() @ k_true.transpose(-1, -2) * qk_scale, dim=-1)
+    out_dequant = p @ v_true
+
+    # (b) 折叠口径（kernel 的代数）：score = (q·c)·scale·ks；acc = Σ(p·vs)·c；分母 = Σp
+    # ★ ks/vs 按**每头一行**对齐（unsqueeze(-2)）——直接乘会广播成 (1,H,H,S) 串头；
+    #   V 的加权求和同样要把 vc 对齐成 (1,H,1,S,D)（4 维 @ 4 维在 batch 维串头）
+    scores = (q.float() @ kc.float().transpose(-1, -2)) * qk_scale * ks.unsqueeze(-2)
+    p2 = torch.softmax(scores, dim=-1)
+    w = p2 * vs.unsqueeze(-2)  # (1,H,1,S)：attention 权重 × V scale（只折分子）
+    out_fold = (w.unsqueeze(2) @ vc.float().unsqueeze(2)).squeeze(2)  # vc 也对齐到 (1,H,1,S,D)
+
+    rel = (out_dequant - out_fold).abs().max() / out_dequant.abs().max()
+    assert rel < 1e-5, f"折叠代数与反量化口径偏差过大：{rel:.2e}"
+    # 反证：若把 vs 也折进分母（错误写法），输出会系统性偏离——钉住这个区别
+    wrong_l = (p2 * vs.unsqueeze(-2)).sum(dim=-1, keepdim=True)
+    out_wrong = (w.unsqueeze(2) @ vc.float()).squeeze(2) / wrong_l
+    rel_wrong = (out_dequant - out_wrong).abs().max() / out_dequant.abs().max()
+    assert rel_wrong > 1e-3, "错误口径居然也对——这条反证断言失去意义"
+
+
+def test_bulk_quantize_whole_cache_and_zero_slots():
+    from lemoq.kernels.kv_int8 import dequant_int8, kv_int8_bulk_quantize
+
+    g = torch.Generator().manual_seed(12)
+    x = torch.randn(1, 2, 8, 16, generator=g, dtype=torch.float32).to(torch.float16)
+    x[0, :, 6:, :] = 0.0  # 模拟未填充槽位（零行）
+    bufs = kv_int8_bulk_quantize(x, x, filled=None)
+    assert bufs["kc"].shape == (1, 2, 8, 16) and bufs["ks"].shape == (1, 2, 8)
+    # 已填充行：roundtrip 有界
+    rec = dequant_int8(bufs["kc"][0, :, :6], bufs["ks"][0, :, :6].unsqueeze(-1))
+    err = (rec - x[0, :, :6].float()).abs()
+    assert (err <= 0.6 * bufs["ks"][0, :, :6].float().unsqueeze(-1)).all()
+    # 零行：scale=1.0、codes=0
+    assert (bufs["ks"][0, :, 6:] == 1.0).all() and (bufs["kc"][0, :, 6:] == 0).all()

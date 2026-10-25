@@ -112,6 +112,142 @@ def _torch() -> Any:
 
 
 # ---------------------------------------------------------------------------
+# cache 布局（E6 读路径）：per-layer int8 镜像 (1,H,S,D) codes + (1,H,S) scale，
+# fp16 StaticCache 保留为正确性网；bulk 量化在初始化时做一次（eager 相位，可同步），
+# 之后每 decode 步镜像写新行（pos 从设备张量读——图安全，照 F4）。
+# ---------------------------------------------------------------------------
+
+_TRITON_CACHE_WRITE: Any = None
+
+
+def kv_int8_bulk_quantize(cache_keys: Any, cache_values: Any, filled: Any = None) -> dict[str, Any]:
+    """把 fp16 cache 按 per-token 对称 int8 量化（torch 参考数学，全设备侧、免 host 长度）。
+
+    `filled=None`（初始化路径）量化**整段** S——未填充槽位是零行 ⇒ scale=1.0/codes=0，
+    attention 不读它们，值确定无害。返回 dict：kc/ks/vc/vs——形状 (1,H,S,D) int8 与
+    (1,H,S) fp16（S = cache 容量）。
+    """
+    torch = _torch()
+    H, S, D = cache_keys.shape[1], cache_keys.shape[2], cache_keys.shape[3]
+    dev = cache_keys.device
+    out: dict[str, Any] = {}
+    for name, tensor in (("kc", cache_keys), ("vc", cache_values)):
+        codes = torch.ones((1, H, S, D), dtype=torch.int8, device=dev)
+        scales = torch.ones((1, H, S), dtype=torch.float16, device=dev)
+        if filled is not None and filled > 0:
+            region = tensor[0, :, :filled, :].float()  # (H, filled, D)
+            amax = region.abs().amax(dim=-1, keepdim=True)
+            scale = torch.where(amax > 0, amax / _QMAX, torch.ones_like(amax))
+            q = torch.round(region / scale).clamp_(-int(_QMAX), int(_QMAX))
+            codes[0, :, :filled, :] = q.to(torch.int8)
+            scales[0, :, :filled] = scale.squeeze(-1).to(torch.float16)
+        else:
+            region = tensor[0].float()  # (H, S, D) 整段
+            amax = region.abs().amax(dim=-1, keepdim=True)
+            scale = torch.where(amax > 0, amax / _QMAX, torch.ones_like(amax))
+            q = torch.round(region / scale).clamp_(-int(_QMAX), int(_QMAX))
+            codes[0] = q.to(torch.int8)
+            scales[0] = scale.squeeze(-1).to(torch.float16)
+        out[name] = codes
+        out[name.replace("c", "s")] = scales
+    return out
+
+
+def kv_int8_init_buffers(layer_keys: Any, layer_values: Any, filled: Any = None) -> dict[str, Any]:
+    """初始化一层的 int8 镜像 buffer（bulk 量化；filled=None 量化整段）。"""
+    bufs = kv_int8_bulk_quantize(layer_keys, layer_values, filled)
+    bufs["initialized"] = True
+    return bufs
+
+
+def _get_cache_write_kernel() -> Any:
+    """惰性定义（CPU 导入安全）：grid=(2H,)，把 (1,H,1,D) 的新行量化写入 cache 布局。"""
+    global _TRITON_CACHE_WRITE
+    if _TRITON_CACHE_WRITE is not None:
+        return _TRITON_CACHE_WRITE
+    import triton  # noqa: PLC0415
+    import triton.language as tl  # noqa: PLC0415
+    from triton.language.extra import libdevice  # noqa: PLC0415
+
+    @triton.jit
+    def _kv_int8_cache_write_kernel(
+        k_ptr,  # (1,H,1,D) fp16 新行
+        v_ptr,
+        kc_ptr,  # (1,H,S,D) int8
+        ks_ptr,  # (1,H,S) fp16
+        vc_ptr,
+        vs_ptr,
+        pos_ptr,  # (1,) int 设备张量（图安全，照 F4 的 pos_ptr）
+        kv_stride_h,  # codes 的 head stride = S*D
+        s_len,  # scale 的序列长度 = S
+        HEADS: tl.constexpr,
+        D: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        pos = tl.load(pos_ptr).to(tl.int32)
+        offs_d = tl.arange(0, D)
+        head = pid % HEADS
+        code_base = head * kv_stride_h + pos * D
+        scale_off = head * s_len + pos
+        if pid < HEADS:
+            x = tl.load(k_ptr + head * D + offs_d).to(tl.float32)
+            amax = tl.max(tl.abs(x), axis=0)
+            s = tl.where(amax > 0, amax / 127.0, 1.0)
+            q = libdevice.rint(x / s)
+            q = tl.minimum(tl.maximum(q, -127.0), 127.0)
+            tl.store(kc_ptr + code_base + offs_d, q.to(tl.int8))
+            tl.store(ks_ptr + scale_off, s.to(tl.float16))
+        else:
+            x = tl.load(v_ptr + head * D + offs_d).to(tl.float32)
+            amax = tl.max(tl.abs(x), axis=0)
+            s = tl.where(amax > 0, amax / 127.0, 1.0)
+            q = libdevice.rint(x / s)
+            q = tl.minimum(tl.maximum(q, -127.0), 127.0)
+            tl.store(vc_ptr + code_base + offs_d, q.to(tl.int8))
+            tl.store(vs_ptr + scale_off, s.to(tl.float16))
+
+    _TRITON_CACHE_WRITE = _kv_int8_cache_write_kernel
+    return _TRITON_CACHE_WRITE
+
+
+def kv_int8_cache_write(bufs: dict[str, Any], k_new: Any, v_new: Any, pos: Any) -> None:
+    """把新 token 的 k/v 行量化写入 int8 镜像 cache 的 [pos] 槽（每步一次，图安全）。
+
+    `pos` 是设备张量（HF 的 cache_position）。守卫与 `kv_int8_rows_applicable`
+    同源（行形状/dtype/CUDA）；buffer 形状不匹配直接 RuntimeError（静默写错槽位
+    比回退更危险——读端会读到旧值，tokens 会"看起来正常"地错）。
+    """
+    if not kv_int8_rows_applicable(k_new, v_new):
+        raise RuntimeError("kv_int8_cache_write: 行守卫不满足——调用方应先回退 fp16 读")
+    kc = bufs["kc"]
+    if (
+        kc.shape[1] != k_new.shape[1]
+        or kc.shape[3] != k_new.shape[3]
+        or kc.shape[0] != 1
+        or not kc.is_contiguous()
+    ):
+        raise RuntimeError(
+            "kv_int8_cache_write: buffer 形状/布局与行不匹配 %s vs %s"
+            % (tuple(kc.shape), tuple(k_new.shape))
+        )
+    S = kc.shape[2]
+    _get_cache_write_kernel()[(2 * k_new.shape[1],)](
+        k_new,
+        v_new,
+        kc,
+        bufs["ks"],
+        bufs["vc"],
+        bufs["vs"],
+        pos,
+        int(kc.stride(1)),
+        S,
+        HEADS=k_new.shape[1],
+        D=k_new.shape[3],
+        num_warps=1,
+    )
+
+
+# ---------------------------------------------------------------------------
 # 写路径 kernel（惰性定义：CPU 导入安全，照 kv_direct._get_kernel 模式）
 # ---------------------------------------------------------------------------
 

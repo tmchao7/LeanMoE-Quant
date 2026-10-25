@@ -423,6 +423,18 @@ def build_arms(
                 "layers": None,
             },
         )
+    # ★ E6（EXP-p5-01）：KV INT8 的门臂（轨迹口径——decode 步 logits vs fp16 轨迹）。
+    #   kind="kv_int8"：开关 env ON 重跑贪心轨迹；kl/top1 来自轨迹比较（teacher
+    #   forcing 是 prefill，对 KV 扰动不敏感）。臂不换权重 —— snapshot/noop 语义照旧。
+    add(
+        "e6_kvint8",
+        {
+            "id": "kv_int8_per_token",
+            "kind": "kv_int8",
+            "targets": [],
+            "layers": None,
+        },
+    )
     # ★ F5（EXP-p1-06）：lm_head 也量化（w8a16 g128）。`lmhead_only` 是**隔离新表面**
     #   的门臂（只量 lm_head，其余 fp16 —— 一次一变量，LMHEAD_GATE_CITATIONS 的数值
     #   来源）；`full` 是组合生产配置（targets=attention+experts+lm_head），作为采纳
@@ -1003,6 +1015,15 @@ def main(argv: list[str] | None = None) -> int:
     n_norms = int(rms_norms_replaced(model))
     n_layers = int(model.config.num_hidden_layers)
 
+    # ★ E6（EXP-p5-01）：kv_int8 臂需要 decode 走**换核后**的路径（int8 读分支在
+    #   `_decode_forward_impl` 里）——含此臂时整个 probe 换核（窗口参考与臂一致，
+    #   轨迹口径才隔离 KV 量化本身；teacher forcing 是 prefill=HF 原路，不受影响）。
+    if any(a["kind"] == "kv_int8" for a in arms):
+        from lemoq.kernels.attn_decode import replace_attention_cores  # noqa: PLC0415
+
+        n_replaced = replace_attention_cores(model, backend="triton")
+        print("E6: attention cores replaced = %d（kv_int8 臂需要）" % n_replaced, flush=True)
+
     def _prompt_ids(source: str, offset: int) -> Any:
         if source == "ones":
             # EXP-p1-01/02 的口径：1024 个 token id=1。保留它作为**退化对照**。
@@ -1111,14 +1132,17 @@ def main(argv: list[str] | None = None) -> int:
             "=== 窗口 %s: 取轨迹（fp16 贪心 %d 步）===" % (label, args.max_new_tokens), flush=True
         )
         tokens: list[int] = []
+        ref_traj_logits: list[Any] = []
         with torch.no_grad():
             out = model(ids, use_cache=True)
             past = out.past_key_values
+            ref_traj_logits.append(out.logits[:, -1:, :].float())
             tok = out.logits[:, -1:, :].argmax(dim=-1)
             for _ in range(args.max_new_tokens):
                 tokens.append(int(tok.item()))
                 out = model(tok, past_key_values=past, use_cache=True)
                 past = out.past_key_values
+                ref_traj_logits.append(out.logits[:, -1:, :].float())
                 tok = out.logits[:, -1:, :].argmax(dim=-1)
         reference_logits = teacher_forced_logits(model, ids, tokens, device=device)
         reference_hidden = _capture_hidden(model, ids, n_layers=n_layers)
@@ -1222,20 +1246,64 @@ def main(argv: list[str] | None = None) -> int:
                     entry["sigma_source"] = "W8A16 g128 rmse per attention tensor (measured)"
                 elif arm["kind"] == "noop":
                     entry["note"] = "恢复但不扰动：KL 必须**恰好** 0.0，否则恢复不干净"
+                elif arm["kind"] == "kv_int8":
+                    # ★ E6（EXP-p5-01）：KV INT8 的门口径是**轨迹 logits**——teacher
+                    #   forcing 是 prefill（q_len>1 走 HF 原路），KV 扰动不在那个口径里。
+                    #   臂 = 开关 env ON 重跑同一条贪心轨迹，逐步 logits 对 fp16 参考轨迹
+                    #   比较（每窗 33 位置 = 1 prompt + 32 步，5 窗 165 位置与权重门同构）。
+                    from benchmarks.cudagraph import compare_logits  # noqa: PLC0415
+
+                    env_name = "LEMOQ_KV_INT8"
+                    old_env = os.environ.get(env_name)
+                    os.environ[env_name] = "1"
+                    arm_traj: list[Any] = []
+                    try:
+                        with torch.no_grad():
+                            out = model(ids, use_cache=True)
+                            past = out.past_key_values
+                            arm_traj.append(out.logits[:, -1:, :].float())
+                            tok = out.logits[:, -1:, :].argmax(dim=-1)
+                            for _ in range(args.max_new_tokens):
+                                out = model(tok, past_key_values=past, use_cache=True)
+                                past = out.past_key_values
+                                arm_traj.append(out.logits[:, -1:, :].float())
+                                tok = out.logits[:, -1:, :].argmax(dim=-1)
+                        report = compare_logits(ref_traj_logits, arm_traj)
+                        entry["kl"] = float(report["kl"])
+                        entry["top1_agreement"] = float(report["top1_agreement"])
+                        entry["metric_basis"] = (
+                            "trajectory（decode 步 logits vs fp16 轨迹；teacher forcing "
+                            "是 prefill 口径，对 KV 扰动不敏感故不采用）"
+                        )
+                        entry["kv_int8_runs"] = sum(
+                            int(getattr(m, "_lemoq_kv_int8_runs", 0))
+                            for m in model.model.layers
+                            if hasattr(m, "self_attn")
+                        )
+                    finally:
+                        if old_env is None:
+                            os.environ.pop(env_name, None)
+                        else:
+                            os.environ[env_name] = old_env
+                elif arm["kind"] == "noop":
+                    entry["note"] = "恢复但不扰动：KL 必须**恰好** 0.0，否则恢复不干净"
                 else:
                     raise ValueError("unknown kind %r" % arm["kind"])
 
-                entry.update(
-                    _measure(
-                        model,
-                        ids=ids,
-                        tokens=tokens,
-                        reference_logits=reference_logits,
-                        reference_hidden=reference_hidden,
-                        device=device,
-                        n_layers=n_layers,
+                if arm["kind"] != "kv_int8":
+                    # ★ E6 的 kv_int8 臂不走 _measure：teacher forcing 是 prefill 口径，
+                    #   对 KV 扰动不敏感（会量出假 0）——它的 kl/top1 来自上面的轨迹比较。
+                    entry.update(
+                        _measure(
+                            model,
+                            ids=ids,
+                            tokens=tokens,
+                            reference_logits=reference_logits,
+                            reference_hidden=reference_hidden,
+                            device=device,
+                            n_layers=n_layers,
+                        )
                     )
-                )
             except Exception as exc:  # noqa: BLE001
                 entry["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:300])
             entry["seconds"] = round(time.perf_counter() - t0, 2)

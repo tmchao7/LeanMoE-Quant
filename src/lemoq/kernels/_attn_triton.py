@@ -100,6 +100,72 @@ def _attn_split_kernel(
 
 
 @triton.jit
+def _attn_split_kernel_int8(
+    q_ptr,  # (heads, D) fp16
+    kc_ptr,  # (heads, S, D) int8     —— int8 镜像 cache 的 K codes
+    ks_ptr,  # (heads, S) fp16        —— per-token K scale（E6：K per-token）
+    vc_ptr,  # (heads, S, D) int8
+    vs_ptr,  # (heads, S) fp16
+    filled_ptr,
+    m_ptr,
+    l_ptr,
+    acc_ptr,
+    kv_stride_h,  # codes 的 head stride（= S*D）
+    s_len,  # scale 的序列长度（= S；scale 每头连续存 S 个）
+    D: tl.constexpr,
+    NUM_SPLITS: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    QK_SCALE: tl.constexpr,
+):
+    """E6（EXP-p5-01）：int8 KV 读路径 —— **scale 折叠进分数/权重，内层零解包乘法**。
+
+    代数（与"先反量化再 attention"恒等，结合序不同 ⇒ parity 用 fp64 oracle + 1e-3）：
+        score_t = QK_SCALE · (q·c_t) · ks_t        （K per-token scale 折进 logits）
+        acc    += Σ_t (p_t · vs_t) · cv_t          （V per-token scale 折进 attention 权重）
+    真值 k_t = c_t·ks_t 只在数学上存在 —— cache 里**没有** fp16 K/V 可读。
+    循环上界/掩码语义与 `_attn_split_kernel` 逐字相同。
+    """
+    pid_s = tl.program_id(0)
+    pid_h = tl.program_id(1)
+
+    n_filled = tl.load(filled_ptr).to(tl.int32)
+    chunk = tl.cdiv(n_filled, NUM_SPLITS)
+    n_start = pid_s * chunk
+    n_end = tl.minimum(n_start + chunk, n_filled)
+
+    offs_d = tl.arange(0, D)
+    q = tl.load(q_ptr + pid_h * D + offs_d).to(tl.float32)
+
+    m_i = float("-inf")
+    l_i = 0.0
+    acc = tl.zeros((D,), dtype=tl.float32)
+
+    for n0 in range(n_start, n_end, BLOCK_N):
+        offs_n = n0 + tl.arange(0, BLOCK_N)
+        mask_n = offs_n < n_end
+        base = pid_h * kv_stride_h + offs_n[:, None] * D + offs_d[None, :]
+        ck = tl.load(kc_ptr + base, mask=mask_n[:, None], other=0).to(tl.float32)
+        ks = tl.load(ks_ptr + pid_h * s_len + offs_n, mask=mask_n, other=0.0).to(tl.float32)
+        # 真值 k_t = c_t·ks_t ⇒ q·k_t = ks_t·(q·c_t)（scale 折进 logits）
+        qk = tl.sum(ck * q[None, :], axis=1) * QK_SCALE * ks
+        qk = tl.where(mask_n, qk, float("-inf"))
+        m_new = tl.maximum(m_i, tl.max(qk, axis=0))
+        alpha = tl.math.exp2(m_i - m_new)
+        p = tl.math.exp2(qk - m_new)
+        cv = tl.load(vc_ptr + base, mask=mask_n[:, None], other=0).to(tl.float32)
+        vs = tl.load(vs_ptr + pid_h * s_len + offs_n, mask=mask_n, other=0.0).to(tl.float32)
+        # a_t·v_t = (p_t·vs_t)·c_t（V scale 只折进**分子**）；分母 l = Σp_t（真分数的
+        # softmax 配分，**不得**折 vs——否则 out = Σp·vs·c / Σp·vs 会把 vs 从输出里消掉）
+        l_i = l_i * alpha + tl.sum(p, axis=0)
+        acc = acc * alpha + tl.sum((p * vs)[:, None] * cv, axis=0)
+        m_i = m_new
+
+    tl.store(m_ptr + pid_h * NUM_SPLITS + pid_s, m_i)
+    tl.store(l_ptr + pid_h * NUM_SPLITS + pid_s, l_i)
+    tl.store(acc_ptr + (pid_h * NUM_SPLITS + pid_s) * D + offs_d, acc)
+
+
+@triton.jit
 def _attn_combine_kernel(
     m_ptr,  # (heads, NUM_SPLITS) fp32
     l_ptr,  # (heads, NUM_SPLITS) fp32
