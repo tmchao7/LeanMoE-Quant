@@ -693,6 +693,11 @@ def attn_decode_forward_int8(
     acc = torch.empty(plan["split"]["acc_shape"], dtype=torch.float32, device=dev)
     out = torch.empty(plan["combine"]["out_shape"], dtype=q.dtype, device=dev)
     qk_scale = (scale if scale is not None else 1.0 / math.sqrt(head_dim)) * LOG2E
+    # ★ head stride 必须取 **4D 的 stride(1)**（= S·D）：`kc` 已被 reshape 成 (H,S,D)，
+    #   它的 stride(1) 是 S 维步长（= D）——传它等于让 head h 读 h·D 偏移（头串数据，
+    #   head 0 恰好正确、其余头全错，2026-10-25 K 门首跑抓到）。fp16 路径传 4D 的
+    #   stride(1) 所以没踩中。
+    head_stride = int(k_codes.stride(1))
     kernels._attn_split_kernel_int8[plan["split"]["grid"]](
         qc,
         kc,
@@ -703,7 +708,7 @@ def attn_decode_forward_int8(
         m,
         l,
         acc,
-        int(kc.stride(1)),
+        head_stride,
         seq_len,
         D=head_dim,
         NUM_SPLITS=num_splits,
