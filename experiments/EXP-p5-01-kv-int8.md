@@ -7,7 +7,9 @@
 - **ID**: `EXP-p5-01-kv-int8`（矩阵条目已存在：`configs/experiments.yaml`，ctx [1024, 2048, 4096]）
 - **Date**: 2026-10-24（立项/骨架）；kernel 与测量 2026-10-25 窗
 - **Operator**: agent（GPU：租用 RTX 5090 32 GB，sm_120，实测读带宽 1560.3 GB/s）
-- **Status**: `planned`（骨架已落：记录 + 参考数学 `kv_int8.py` + CPU 测试 + K 门 GPU 骨架）
+- **Status**: `running`（★ 写路径 kernel 已落地并过 K 门：`kv_int8_write` 4/4 逐位
+  （codes/scale vs 参考数学、零行约定、roundtrip ≤0.6·scale、守卫），2026-10-25 RTX 5090；
+  `2269c11`。**剩**：读路径 score 折叠（split-KV kernel 内）→ 门（新测量）→ A/B → 翻默认）
 - **上游规格**: `docs/reference/KV_INT8_RECON_2026-10-24.md`（字节账/工业界做法/工程形状/阶梯）
 
 ## Hypothesis（矩阵原文 + 预注册细化）
