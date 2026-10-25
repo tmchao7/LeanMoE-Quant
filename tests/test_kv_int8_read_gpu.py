@@ -67,11 +67,23 @@ def _int8_cache(seed: int = 0, filled: int | None = None):
 
 
 def _fp64_dequant_attention(q, kc, ks, vc, vs, n):
-    """先反量化（fp64）再标准 attention——折叠口径的参考。"""
-    k = kc[0].double() * ks[0].double().unsqueeze(-1)
-    v = vc[0].double() * vs[0].double().unsqueeze(-1)
-    p = torch.softmax(q[0].double() @ k.transpose(-1, -2) * QK_SCALE, dim=-1)
-    return (p @ v).to(torch.float32).unsqueeze(0)
+    """先反量化（fp64）再标准 attention —— 只读 [0, n) 前缀（与 kernel 同口径）。
+
+    ★ 逐头 1D 计算、零广播：batched 写法 `(1,H,·)` 与 `(H,·)` 的混用会在头维串数据
+      （本测试三次"失败"全是测试自身的广播错误——这正是判据要进测试文件的原因）。
+    """
+    out = torch.empty(1, HEADS, 1, HEAD_DIM, dtype=torch.float64, device=q.device)
+    for h in range(int(q.shape[1])):
+        qv = q[0, h, 0].double()
+        kv = kc[0, h, :n].double()
+        sv = ks[0, h, :n].double()
+        vv = vc[0, h, :n].double()
+        ssv = vs[0, h, :n].double()
+        k_true = kv * sv.unsqueeze(-1)
+        v_true = vv * ssv.unsqueeze(-1)
+        p = torch.softmax(qv @ k_true.transpose(-1, -2) * QK_SCALE, dim=-1)
+        out[0, h, 0] = p @ v_true
+    return out
 
 
 @pytest.mark.gpu
