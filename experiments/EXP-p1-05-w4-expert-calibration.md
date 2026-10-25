@@ -24,7 +24,7 @@
 - OLMoE-1B-7B-0924，16 层，64 专家，top-8，H=2048，F=1024；单卡、batch=1 decode。
 - GPU：NVIDIA GeForce RTX 5090，32607 MiB，sm_120，driver 595.71.05，单卡。
 - **带宽本轮未重测**：本轮只做精度判定，不用带宽做任何屋顶/加速结论。此前实例实测见
-  `results/machine_probe.json` 与 [HANDOFF_2026-10-10](../docs/handoff/HANDOFF_2026-10-10.md)（1529.5 GB/s，只读 1560.3）。
+  `results/machine_probe.json`（1529.5 GB/s，只读 1560.3；详见已退役的 HANDOFF_2026-10-10，git 历史）。
 - Runtime：Python 3.12.3、torch 2.8.0+cu128、triton 3.4.0、transformers 4.57.6（取自工件 `runtime`）。
 - 代码 provenance：所有臂的 `source.code_sha256_including_untracked` = `a3918930f952…`。W8 与
   W4-RTN 工件头写 `commit=a216bf7 dirty=true`（未提交的是文档），W4-GPTQ/退路/四个验证写

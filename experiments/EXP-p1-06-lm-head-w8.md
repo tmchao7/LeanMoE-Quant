@@ -8,7 +8,7 @@
 - **Operator**: agent（GPU：租用 RTX 5090 32 GB，sm_120，实测读带宽 1560.3 GB/s）
 - **Status**: `done`（★ **采纳完成 2026-10-25**：三链 PASS + A/B VALID + 翻默认（六 True）
   + 22 格刷新干净（金丝雀 −0.058%）+ 数字回填。v6 见 §结果与
-  `docs/handoff/ADOPTION_SYNC_F5_2026-10-25.md`）
+  取数地图 ADOPTION_SYNC_F5_2026-10-25，已退役见 git 历史）
 - **接线**: `LEMOQ_LMHEAD_W8` 开关（默认关，commit `79f7b88`）；独立门表
   `LMHEAD_GATE_CITATIONS`（接线时为空 ⇒ fail-closed，门实测通过才填）
 - **上游规格**: `docs/FUSION_OPPORTUNITIES.md` F5（含 N7 口径修订）；立项批准记录在

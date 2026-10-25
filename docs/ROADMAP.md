@@ -2,7 +2,7 @@
 
 > **性质：展望文档**——不是状态页（状态看 [`RESULTS.md`](../RESULTS.md) 与 [`experiments/`](../experiments/)），
 > 不是计划书（冻结计划看 [`PLAN.md`](../PLAN.md)），不是投递材料（看 [`apply/PORTFOLIO.md`](apply/PORTFOLIO.md)）。
-> 生成 2026-10-10；**2026-10-23 更新**（EXP-p1-05 负结果、计数复核、F1 置顶）；**2026-10-24 更新**（新增 §1.4 完善度评分、§3 重排为 S1/S2/S3、计数以 672 passed / 40 个测试文件为准）；**MATURITY_REVIEW 轮更新**（A5 CI 落地、R1 显著性口径落地；**F4 K 门轮更新**：KV 直写离线 K 门就绪、R7 侦察完成，计数以 **707 passed / 44 个测试文件**为准（A6 半边/R2 快照 +8 用例）；外部标准对照见 [`handoff/MATURITY_REVIEW_2026-10-24.md`](handoff/MATURITY_REVIEW_2026-10-24.md)）。**已测数字全部引自既有记录/工件，本文不引入任何新数字**（硬规则 1）；§1.4 是**主观评估**，已逐项标注依据，不当作测量值引用。
+> 生成 2026-10-10；**2026-10-23 更新**（EXP-p1-05 负结果、计数复核、F1 置顶）；**2026-10-24 更新**（新增 §1.4 完善度评分、§3 重排为 S1/S2/S3、计数以 672 passed / 40 个测试文件为准）；**MATURITY_REVIEW 轮更新**（A5 CI 落地、R1 显著性口径落地；**F4 K 门轮更新**：KV 直写离线 K 门就绪、R7 侦察完成，计数以 **707 passed / 44 个测试文件**为准（A6 半边/R2 快照 +8 用例）；外部标准对照见已退役的 MATURITY_REVIEW_2026-10-24（git 历史））。**已测数字全部引自既有记录/工件，本文不引入任何新数字**（硬规则 1）；§1.4 是**主观评估**，已逐项标注依据，不当作测量值引用。
 > 每次冲刺收尾后回来更新 Tier A 的勾选状态。
 
 ---
@@ -128,7 +128,7 @@
 | --- | --- | --- | --- |
 | ~~S1~~ | ✅ **2026-10-24 已执行**：F2 A/B 重取 VALID（−5.05%，3/3）→ 23 格刷新（canary 0.30%）→ 翻默认（四 True）→ 数字同步 → merge main | — | — |
 | ~~S2~~ | ✅ **2026-10-24 已执行**：F4 KV 直写采纳（预注册规则 50.3 µs 选中；K 门 9/9；A/B VALID −2.94% 5/5；刷新 23/23 canary 0.336%；kernel 格 −1.8~−3.0%，kernels/步 329）。latency 类矿脉采完，config 类已判死（7 轮对决平局） | — | — |
-| **S3（10-25 开机窗，≈半天）** | **F5 lm_head w8 采纳**——门已 PASS 近无损（KL 6.1e-5/6.6e-5、top-1 165/165，行已落表 `cd3c97e`）：PPL 重测→MMLU→A/B→翻默认→`LMHEAD=1` 23 格刷新→照 [`ADOPTION_SYNC_F5`](handoff/ADOPTION_SYNC_F5_2026-10-25.md) 回填。手册：[HANDOFF_2026-10-25](handoff/HANDOFF_2026-10-25.md) §2 | 量化叙事最后一块；门行/脚本/工具/地图全备，**上手即跑** | v6 canonical；**量化+融合主线收口** |
+| **S3（10-25 开机窗，≈半天）** | **F5 lm_head w8 采纳**——门已 PASS 近无损（KL 6.1e-5/6.6e-5、top-1 165/165，行已落表 `cd3c97e`）：PPL 重测→MMLU→A/B→翻默认→`LMHEAD=1` 23 格刷新→照 ADOPTION_SYNC_F5 的取数地图（已退役，git 历史）回填。手册：[HANDOFF_2026-10-25](handoff/HANDOFF_2026-10-25.md) §2 | 量化叙事最后一块；门行/脚本/工具/地图全备，**上手即跑** | v6 canonical；**量化+融合主线收口** |
 | **S4（S3 后，需批准）** | **E6 KV INT8**（材料：[`KV_INT8_RECON_2026-10-24`](reference/KV_INT8_RECON_2026-10-24.md)）——写路径挂 F4 直写、读路径 score 折叠（内层零解包）；预注册阶梯 v1 per-token→v2 K per-channel→v3 sink 保留 | 最大已声明杠杆：@4096 ≈**−172 µs/步（−10%）**，且随 ctx 线性涨 | 1–1.5 个窗 |
 | **收尾窗（离线为主）** | RESULTS/PORTFOLIO/README 亮点化 + figures 重生成 + ISSUES 清零/转存 + HANDOFF 退役 | 投递状态（见 §3.1） | 半天 |
 
@@ -177,5 +177,4 @@ config 类判死、latency 类采完）、测量纪律全套（canary/A-B/门/de
 | [`RESULTS.md`](../RESULTS.md) | **测到了什么**（每个数字带出处） | 每次上机收尾 |
 | [`apply/PORTFOLIO.md`](apply/PORTFOLIO.md) | **怎么讲**（简历/面试） | 每次有新实测 |
 | 本文 ROADMAP | **做得怎么样、下一步做什么** | 每次冲刺收尾勾状态 |
-| [`handoff/MATURITY_REVIEW_2026-10-24.md`](handoff/MATURITY_REVIEW_2026-10-24.md) | **对照外部公开标准做得怎么样**（§1.4 是内部口径；含差距清单 R1–R10） | 有新外部基准可对照、或 R 项关闭时 |
 | `handoff/HANDOFF_*.md` | **现在手上有什么** | 每次冲刺 |

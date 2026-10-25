@@ -82,7 +82,7 @@ speedup_E2E = (T_bytes_fp16 + T_host) / (T_bytes_quant + T_host)
 ### 2.2 配对 A/B 的显著性（2026-10-24 起，`benchmarks/ab_stats.py`）
 
 同轮交错 A/B 除了 wins/MAD，还必须落盘显著性块（动机与外部依据见
-`docs/handoff/MATURITY_REVIEW_2026-10-24.md` R1）：
+MATURITY_REVIEW_2026-10-24 R1——文档已退役，见 git 历史）：
 
 - **符号检验**：精确二项双侧 p（丢并列，`n_eff = wins+losses`）；
 - **Wilcoxon 符号秩**：`n_eff ≤ 20` 用精确零分布（2^n 符号翻转的子集和 DP），

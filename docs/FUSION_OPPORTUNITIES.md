@@ -545,6 +545,5 @@ done
 | [ROADMAP.md](ROADMAP.md) | 展望与岗位映射；本文是其中"性能优化"这一支的可执行细化 |
 | [reference/NCU_EVIDENCE.md](reference/NCU_EVIDENCE.md) | kernel 级达成率的出处与口径 |
 | [reference/FUSION_RESEARCH.md](reference/FUSION_RESEARCH.md) | 联网调研：方法 + 十条避坑点（§3/§4 的外部依据扩展版；公开报告值非实测） |
-| [handoff/HANDOFF_2026-10-10.md](handoff/HANDOFF_2026-10-10.md) | 交接摘要（状态，不是任务） |
 | `scripts/rounds/run_p2j_refresh.sh` | F1 采纳流程的模板（31 格刷新的实际脚本） |
 | [AGENTS.md](../AGENTS.md) | 硬规则与四门；本文所有"验收"都以它为准 |

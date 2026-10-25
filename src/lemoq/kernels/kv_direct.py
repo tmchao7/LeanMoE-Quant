@@ -33,19 +33,6 @@ def _torch():
         return None
 
 
-def kv_direct_write_available(*, device: Any = None) -> bool:
-    """真 kernel 的可用性守卫（CPU/Mac ⇒ False，走显式回退；与 fused_route 同款）。"""
-    torch = _torch()
-    if torch is None or not torch.cuda.is_available():
-        return False
-    try:
-        import triton  # noqa: PLC0415,F401
-
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def kv_direct_write_applicable(cache_layer: Any, key_states: Any, value_states: Any) -> bool:
     """形状/布局守卫：不满足就**显式回退** `update()`，绝不静默算错。
 

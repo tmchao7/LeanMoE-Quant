@@ -1,7 +1,7 @@
 """operator_ledger — S2 算子选择的预注册规则的机械化执行器。
 
 规则（预注册，见 docs/handoff/HANDOFF_2026-10-24.md §5 与
-docs/handoff/ADOPTION_SYNC_2026-10-24.md §7）：
+ADOPTION_SYNC_2026-10-24 §7——该文档已退役，见 git 历史）：
 
     1. 取（刷新后的）`EXP-p4c-01__bit_width=w8a16_attn=kernel_ctx=1024` 的
        `bottleneck.top_kernels`；

@@ -123,4 +123,4 @@ PPL +4.19%）。按预注册反证条件停止扩展：**未做 ctx=4096、test 
 速度仍未测。数字、逐层 MSE、provenance 与工件位置见
 [EXP-p1-05 记录](../../../experiments/EXP-p1-05-w4-expert-calibration.md) §GPU 诊断结果。
 本轮不注册矩阵、不修改 gate 引用，不变更默认融合，不重跑 done cells。此前离线修复状态见
-[前序记录](offline-validation-2026-10-22.md)。
+[前序记录](offline-validation-2026-10-22.md（已退役，git 历史）)。

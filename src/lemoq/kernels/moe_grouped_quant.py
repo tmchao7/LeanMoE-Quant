@@ -599,32 +599,3 @@ def static_moe_forward_grouped_quant(
         backend=backend,
     )
     return out.reshape(*shape), logits
-
-
-def warm_quant(
-    q: QuantFusedExperts,
-    *,
-    hidden: int,
-    top_k: int,
-    dtype: Any = None,
-    device: Any = None,
-    config: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """在 capture **之前**把量化 kernel 编译好（与 `moe_grouped.warm` 同理）。"""
-    torch = _torch()
-    dev = device if device is not None else q.packed_gate_up.device
-    dt = dtype or q.scale_gate_up.dtype
-    x = torch.zeros(hidden, dtype=dt, device=dev)
-    ids = torch.zeros(top_k, dtype=torch.int64, device=dev)
-    wsum = torch.full((top_k,), 1.0 / max(top_k, 1), dtype=dt, device=dev)
-    grouped_moe_forward_quant(x, q, ids, wsum, config=config)
-    if getattr(dev, "type", None) == "cuda":
-        torch.cuda.synchronize()
-    return {
-        "hidden": hidden,
-        "top_k": top_k,
-        "bits": int(q.bits),
-        "group_size": int(q.group_size),
-        "dtype": str(dt),
-        "device": str(dev),
-    }

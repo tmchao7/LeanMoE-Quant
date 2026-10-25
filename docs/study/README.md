@@ -46,6 +46,6 @@
 
 1. 当轮原始 JSON + 对应实验记录；`status=void`/`planned`/`blocked` 不能当完成的性能实验。
 2. [`RESULTS.md`](../../RESULTS.md) 的采用数字与适用范围；同一实验的 v1/v2/v3 优先读最新采用节。
-3. [`PORTFOLIO.md`](../apply/PORTFOLIO.md) 是面试措辞索引。日期为 2026-10-10 的 [handoff](../handoff/HANDOFF_2026-10-10.md) 含旧状态，不能覆盖后续结果。
+3. [`PORTFOLIO.md`](../apply/PORTFOLIO.md) 是面试措辞索引。已退役的 2026-10-10 handoff（git 历史）含旧状态，不能覆盖后续结果。
 
 想上 5090 时，最后看 [可选真机练习](10-gpu-labs.md)。两周主线不依赖 GPU。

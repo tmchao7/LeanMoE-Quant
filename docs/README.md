@@ -9,13 +9,8 @@
 | 文档 | 是什么 | 给谁 |
 | --- | --- | --- |
 | [HANDOFF_2026-10-25.md](handoff/HANDOFF_2026-10-25.md) | **当前交接（自足版，可从零接管）**：§0 2026-10-24 轮后上下文（de-publish 闭环、F5 门 PASS、工具缺陷修复）/ §2 F5 采纳执行手册（PPL→MMLU→A/B→翻默认→刷新→回填）/ §3 中止路径 / §8 接手自检 | 下一个上机的人 / agent |
-| [ADOPTION_SYNC_2026-10-24.md](handoff/ADOPTION_SYNC_2026-10-24.md) | **刷新后数字同步映射**：每个会变的数字 → 格 id + 取值表达式 + 现用值；含"不随刷新变化"清单与**翻默认的连锁**（测试 / refusal / `packed_qkv_effective`） | 做采纳轮的人 |
-| [ADOPTION_SYNC_F5_2026-10-25.md](handoff/ADOPTION_SYNC_F5_2026-10-25.md) | **F5 采纳轮的取数地图（预写）**：`lm_head` w8 翻默认后哪些数会动（量化格 p50 −40~80 µs、`[W]` −103 MB）、逐格检查点、文档同步清单与不变清单——刷新后回填 | 做明天 F5 采纳轮的人 |
 | [ISSUES_2026-10-23.md](handoff/ISSUES_2026-10-23.md) | **关机后本地可解决的问题清单**（P0 采纳轮 / P1 协议 / P2 文档 / P3 需 GPU）+ **2026-10-24 复盘**（N1–N4 与处置、剩余项按 S1/S2/S3 归属） | Mac 上接手的人 |
-| [MATURITY_REVIEW_2026-10-24.md](handoff/MATURITY_REVIEW_2026-10-24.md) | **外部标准对照的完善度评估**：量化协议 / 融合方法学 / 测量纪律 vs GPTQ·AWQ·KernelBench·MLPerf·torch.utils.benchmark 等公开口径（领先/持平/落后逐项判定）+ 差距清单 R1–R10（映射到既有 S/A/B/C 编号） | 后续开发 agent；想知道"离外部标准还差什么"的人 |
 | [R7_RECON_2026-10-24.md](handoff/R7_RECON_2026-10-24.md) | **R7 外部锚定侦察**：vLLM（推荐，0.17.x / cu128 / bench latency 两臂跑法）与 llama.cpp（需自转 0924 base gguf）在 5090 上的可行性、成本、口径警告与决策请求 | 决定要不要做 R7 的人；获批后上机执行的人 |
-| [HANDOFF_2026-10-23.md](handoff/HANDOFF_2026-10-23.md) | 此前一轮：W4 负结果、F2 定位与合规 A/B、刷新轮作用域 | 查此前状态的人 |
-| [HANDOFF_2026-10-10.md](handoff/HANDOFF_2026-10-10.md) | 更早的实验结论与历史交接 | 查更早状态的人 |
 
 > 每次冲刺收尾后刷新（或新增带日期的一份并标注旧份过期）。过期交接一律删除——
 > 历史在 git 里，不在文档树里。
@@ -62,5 +57,4 @@
 - [`figures/`](figures/) — 三张图，由 `python -m tools.make_figures` 从工件生成
 - [`compose/spec/`](compose/spec/) — 本仓库 compose-next 流程的 feature 文档
 - [`compose/spec/review-2026-10-22.md`](compose/spec/review-2026-10-22.md) — **review/debug 二次复核**（旧 P1–P9 状态纠正、新 R1–R12；后续修复状态见离线验证记录）
-- [`compose/spec/offline-validation-2026-10-22.md`](compose/spec/offline-validation-2026-10-22.md) — **5090 前离线验证/修复**（CPU 反例、验收器与入口守卫修复、自然文本 GPU 检查脚本；待 GPU 回归项明确单列）
 - [`compose/spec/quant-w4-calibration.md`](compose/spec/quant-w4-calibration.md) — **专家 W4 校准分支**（GPTQ/校准/退路实现、预量化加载、数据隔离、成本账；**GPU 已执行 → 负结果**，见 `experiments/EXP-p1-05-w4-expert-calibration.md`）
