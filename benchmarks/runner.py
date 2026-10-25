@@ -1242,6 +1242,14 @@ def run_cudagraph(
     res["packed_qkv_effective"] = bool(packed_qkv_modules)
     res["packed_qkv_modules"] = int(packed_qkv_modules)
     res["packed_qkv_requested"] = bool(packed_qkv_requested)
+    # ★ F5 生效（图路径）：三层确认 = 开关开 + 量化格 + qreport 里 lm_head 真被替换。
+    #   2026-10-25 A/B 首轮抓到的报告 bug：字段此前只加在 eager 的 res builder 里，
+    #   图 res 读不到 ⇒ payload 恒 False（性能 Δ 真实发生、标记说没发生——两者必须一致）。
+    res["lm_head_w8_effective"] = (
+        lm_head_w8_effective(str(quant_cfg.get("bit_width") or "fp16"), qreport)
+        if quant_cfg
+        else False
+    )
     res["kernel_warm"] = kernel_warm
     res["moe_blocks_replaced"] = int(moe_replaced)
     res["quantize_report"] = None if qreport is None else qreport.to_dict()

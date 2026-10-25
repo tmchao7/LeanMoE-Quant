@@ -6,8 +6,8 @@
 - **ID**: `EXP-p1-06-lm-head-w8`
 - **Date**: 2026-10-24
 - **Operator**: agent（GPU：租用 RTX 5090 32 GB，sm_120，实测读带宽 1560.3 GB/s）
-- **Status**: `running`（★ 第一链已过，2026-10-24：门 probe 双 ctx PASS、门行已落表 `cd3c97e`；
-  PPL 重测 / MMLU / A/B / 刷新待下一 GPU 窗，见 `docs/handoff/HANDOFF_2026-10-25.md`）
+- **Status**: `running`（★ 三链全过：第一链 2026-10-24、第二/三链 2026-10-25——见 §结果；
+  剩合规 A/B（进行中）+ `LMHEAD=1` 23 格刷新 + 回填）
 - **接线**: `LEMOQ_LMHEAD_W8` 开关（默认关，commit `79f7b88`）；独立门表
   `LMHEAD_GATE_CITATIONS`（接线时为空 ⇒ fail-closed，门实测通过才填）
 - **上游规格**: `docs/FUSION_OPPORTUNITIES.md` F5（含 N7 口径修订）；立项批准记录在
@@ -94,23 +94,35 @@ total params:    6.92B
 - 假设的"预期结果 1"命中且**强于预期**（预注册写的是"W8 g128 颗粒足够细，预期仍近无损"；
   实测 top-1 一个位置都没动）。
 
-### 第二链：PPL（全集）——**首轮作废（工具缺陷），待重测**
+### 第二链：PPL（全集）——**PASS**（2026-10-25 GPU 实测，v2）
 
-首轮 `results/EXP-p1-06-lm-head-w8/ppl_f5_lmhead.json` **无效**：`tools/quant_ppl.py` 的
-rtn 臂漏传 `keep_lm_head_fp16` ⇒ `lmhead_only` 臂静默替换 0 个模块（`realized_bytes={}`、
-ΔNLL 与 fp16 **逐位相同**）、`full` 臂只量了 attention+experts。缺陷已修（commit
-`d055994`），重测列入下一窗（照 `HANDOFF_2026-10-25.md` §2）。该 JSON 保留作缺陷证据。
+首轮 `results/EXP-p1-06-lm-head-w8/ppl_f5_lmhead.json` **作废**（`tools/quant_ppl.py` 的
+rtn 臂漏传 `keep_lm_head_fp16` ⇒ `lmhead_only` 臂静默替换 0 个模块、ΔNLL 与 fp16 逐位
+相同；缺陷已修 `d055994`，该 JSON 保留作缺陷证据）。重测
+`ppl_f5_lmhead_v2.json`（全集 285,831 token，fp16 参照 = R4 的 8.4703 逐位复现）：
 
-### 第三链：MMLU —— 待测
+| 臂 | PPL | ΔPPL | ΔNLL/token | 自检（realized lm_head） |
+| --- | --- | --- | --- | --- |
+| `w8a16_lmhead_only_g128` | 8.471081 | **+0.0088%** | +8.77e-5（t=3.92） | **104,632,320 ✓** |
+| `w8a16_full_lmhead_g128`（combined） | 8.472258 | +0.0227% | +2.27e-4（t=1.96） | 104,632,320 ✓ |
+| noop ×3 | 8.470338 | 0 | **恰为 0** | — |
+
+验收 **Δ < 1% PASS**；上轮缺陷自检点（空跑臂 `realized_bytes={}`）在本轮**不复现**。
+
+### 第三链：MMLU —— **PASS**（2026-10-25 GPU 实测）
+
+`tools/task_accuracy.py --arms fp16,w8a16_lmhead --tasks mmlu`（分层子集 n=200，
+先 smoke 验通路——新臂名映射在真模型上替换成功）。
+工件 `results/EXP-p1-06-lm-head-w8/mmlu_w8a16_lmhead.json`：
+fp16 **53.50%**（与 p1-02 基线同值）→ w8a16_lmhead **53.00%** = **−0.50 点**（门 <2 点，
+PASS；样本噪声下与全 w8a16 当年的 −1.0 点不可区分）。
 
 ## Verdict
 
-**部分判定**（2026-10-24）：精度第一链（KL/top-1 门）**PASS，近无损**，`lm_head` w8a16 g128
-的精度疑虑解除——EXP-p1-02 档 5"lm_head 对 KL/top-1 最敏感"的保留理由在 W8 g128 粒度下
-不成立（165/165 位置一致）。
-**采纳判定未完成**：按 F5 规格红线，翻默认仍需 PPL（<1%）+ MMLU（<2 点）+ 合规 A/B +
-23 格刷新——全部排在下一 GPU 窗（`docs/handoff/HANDOFF_2026-10-25.md` §2）。
-开关 `LEMOQ_LMHEAD_W8` 当前**默认关**；门行落表只解锁 A/B 的 ON 臂。
+**三链全过（2026-10-25）**：KL/top-1（近无损，165/165）+ PPL（+0.0088%）+ MMLU（−0.50 点）
+——F5 规格红线的精度要求全部满足，`lm_head` w8a16 g128 的精度疑虑彻底关闭。
+**采纳判定剩两步**：合规 A/B（进行中）+ `LMHEAD=1` 23 格刷新；两者过后翻默认并按
+[`ADOPTION_SYNC_F5`](../docs/handoff/ADOPTION_SYNC_F5_2026-10-25.md) 回填。
 
 ## Applicability
 
