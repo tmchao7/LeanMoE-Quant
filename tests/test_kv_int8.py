@@ -181,17 +181,22 @@ def test_bulk_quantize_whole_cache_and_zero_slots():
     assert (bufs["ks"][0, :, 6:] == 1.0).all() and (bufs["kc"][0, :, 6:] == 0).all()
 
 
-def test_prefill_invalidates_stale_kv_int8_buffers():
-    """★ 跨会话污染守卫（2026-10-25 修）：prefill（q_len!=1 的回退）必须作废 int8 镜像。
+def test_kv_int8_bufs_staleness_is_cache_identity():
+    """★ 跨会话污染守卫（2026-10-25 定稿语义）：按 cache **对象身份**判失效，不按 prefill。
 
-    `_lemoq_kv_int8_bufs` 挂在 attention 模块上、只增不减——probe 换窗口/换 prompt 的
-    新 StaticCache 会话若复用旧 codes，读到的还是上一段序列的 KV（静默污染）。
-    钉住两条语义：prefill 作废；DynamicCache 的 decode 回退（filled is None、q_len==1）
-    **不**作废。
+    - prefill/decode 的回退路径**不**碰 buffer：同 session 重复 prefill = 同 prompt 重灌，
+      数值等价 ⇒ 复用（按 prefill 作废会让 `capture()` 二次复位后的懒初始化撞上
+      "不许在 capture 里分配"的守卫——A/B run1 全 blocked 的实测教训）；
+    - 换 cache 对象（probe 换窗/换会话）⇒ `_kv_int8_bufs_stale` 判旧 ⇒ 重建；
+    - 身份锚死了（session 被 GC）⇒ 判旧 ⇒ 重建（weakref 语义）。
     """
+    import weakref
     from types import SimpleNamespace  # noqa: PLC0415
 
-    from lemoq.kernels.attn_decode import _decode_forward_impl  # noqa: PLC0415
+    from lemoq.kernels.attn_decode import (  # noqa: PLC0415
+        _decode_forward_impl,
+        _kv_int8_bufs_stale,
+    )
 
     def _self_with(bufs):
         calls = []
@@ -205,8 +210,8 @@ def test_prefill_invalidates_stale_kv_int8_buffers():
             calls,
         )
 
-    # prefill：q_len=4 → 回退原路，且 bufs 被作废
-    mod, calls = _self_with({"kc": "stale"})
+    # ① 回退路径不碰 buffer：prefill（q_len=4）与 DynamicCache decode（filled=None）都原样保留
+    mod, calls = _self_with({"kc": "keep"})
     out = _decode_forward_impl(
         mod,
         torch.zeros(1, 4, 8),
@@ -214,9 +219,8 @@ def test_prefill_invalidates_stale_kv_int8_buffers():
         position_embeddings=(torch.zeros(1), torch.zeros(1)),
     )
     assert out == ("out", None) and calls == [1]
-    assert mod._lemoq_kv_int8_bufs is None, "prefill 后旧 int8 镜像必须作废"
+    assert mod._lemoq_kv_int8_bufs == {"kc": "keep"}, "prefill 回退不应作废镜像（capture 安全）"
 
-    # DynamicCache 的 decode（q_len=1、filled is None）回退：bufs 保持不动
     mod2, _ = _self_with({"kc": "keep"})
     _decode_forward_impl(
         mod2,
@@ -225,3 +229,24 @@ def test_prefill_invalidates_stale_kv_int8_buffers():
         position_embeddings=(torch.zeros(1), torch.zeros(1)),
     )
     assert mod2._lemoq_kv_int8_bufs == {"kc": "keep"}, "decode 回退不应作废镜像"
+
+    # ② 身份矩阵：没 buffer ⇒ 旧；没锚（legacy）⇒ 旧；同对象 ⇒ 新；换对象 ⇒ 旧；锚死 ⇒ 旧
+    #   （cache 替身用普通类：object()/SimpleNamespace 都不支持 weakref）
+    class _Cache:
+        pass
+
+    cache_a, cache_b = _Cache(), _Cache()
+    assert _kv_int8_bufs_stale(SimpleNamespace(_lemoq_kv_int8_bufs=None), cache_a)
+    assert _kv_int8_bufs_stale(SimpleNamespace(_lemoq_kv_int8_bufs={"kc": 1}), cache_a)
+    mod_live = SimpleNamespace(
+        _lemoq_kv_int8_bufs={"kc": 1}, _lemoq_kv_int8_src_cache_ref=weakref.ref(cache_a)
+    )
+    assert not _kv_int8_bufs_stale(
+        mod_live, cache_a
+    ), "同 cache 对象必须复用（runner reset/capture）"
+    assert _kv_int8_bufs_stale(mod_live, cache_b), "换 cache 对象必须重建（probe 换窗）"
+    mod_dead = SimpleNamespace(_lemoq_kv_int8_bufs={"kc": 1})
+    anchor = _Cache()
+    mod_dead._lemoq_kv_int8_src_cache_ref = weakref.ref(anchor)
+    del anchor
+    assert _kv_int8_bufs_stale(mod_dead, _Cache()), "身份锚死（session GC）必须重建"

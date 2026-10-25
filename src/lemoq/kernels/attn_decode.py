@@ -79,6 +79,7 @@ decode 时 `batch=1, q_len=1, heads=16` → 朴素实现的 grid 只有 16 个 p
 from __future__ import annotations
 
 import math
+import weakref
 from typing import Any
 
 __all__ = [
@@ -802,6 +803,24 @@ def _attention_modules(model: Any) -> list[Any]:
     return found
 
 
+def _kv_int8_bufs_stale(module: Any, past_key_values: Any) -> bool:
+    """E6 int8 镜像是否必须重建：没有 buffer，或 buffer 不是从这个 cache **对象**建的。
+
+    ★ 语义按**对象身份**（weakref），不按 prefill 事件（2026-10-25 两课）：
+      - 同一 session 的重复 prefill（runner 的 reset 循环、`capture()` 的二次复位）=
+        同 prompt 重灌，数值等价 ⇒ 复用（按 prefill 作废会让 capture 期的懒初始化
+        撞上"不许在 capture 里分配"的守卫，A/B run1 全部 blocked 的根因）；
+      - 新 session / 换窗口 = 新 cache 对象 ⇒ 重建（否则静默复用上一段序列的 codes，
+        probe 换窗会跨窗污染）。
+    ⚠ 已知边界：同一个 cache 对象换 prompt 重灌——现有调用方没有这种流；若未来出现，
+    必须换成"prefill 作废 + in-place bulk 重灌"（复用已分配 buffer，免 capture 分配）。
+    """
+    if getattr(module, "_lemoq_kv_int8_bufs", None) is None:
+        return True
+    ref = getattr(module, "_lemoq_kv_int8_src_cache_ref", None)
+    return ref is None or ref() is not past_key_values
+
+
 def _filled_len_of(past_key_values: Any) -> Any:
     """从 cache 对象上取设备端已填充长度（**不用模块级全局变量**）。
 
@@ -841,12 +860,6 @@ def _decode_forward_impl(
     filled = _filled_len_of(past_key_values)
     q_len = int(hidden_states.shape[1])
     if output_attentions or q_len != 1 or filled is None or position_embeddings is None:
-        if q_len != 1 and getattr(self, "_lemoq_kv_int8_bufs", None) is not None:
-            # ★ E6：prefill = 一段新序列开始。int8 镜像必须作废，下一个 decode 步
-            #   对新 cache 重新 bulk——否则静默复用上一会话/窗口的 codes（prompt 一换
-            #   就是污染）。同 prompt 的重复 prefill（runner 的 reset 循环）数值等价，
-            #   作废只是多付一次 bulk。prefill 恒 eager，不经过图，capture 安全。
-            self._lemoq_kv_int8_bufs = None
         return original(
             hidden_states,
             attention_mask=attention_mask,
@@ -947,8 +960,7 @@ def _decode_forward_impl(
     if _fusion_enabled("kv_int8"):
         if self._lemoq_attn_backend != "triton":
             raise RuntimeError("kv_int8 需要 attn backend=triton（oracle 只用于单测）")
-        bufs = getattr(self, "_lemoq_kv_int8_bufs", None)
-        if bufs is None:
+        if _kv_int8_bufs_stale(self, past_key_values):
             import torch as _t  # noqa: PLC0415
 
             if _t.cuda.is_current_stream_capturing():
@@ -960,6 +972,10 @@ def _decode_forward_impl(
             layer = past_key_values.layers[self.layer_idx]
             bufs = kv_int8_init_buffers(layer.keys, layer.values, filled=None)
             self._lemoq_kv_int8_bufs = bufs
+            # 身份锚：同一 cache 对象的重复 prefill 复用（capture 安全），换对象重建
+            self._lemoq_kv_int8_src_cache_ref = weakref.ref(past_key_values)
+        else:
+            bufs = self._lemoq_kv_int8_bufs
         from lemoq.kernels.kv_int8 import kv_int8_cache_write  # noqa: PLC0415
 
         kv_int8_cache_write(bufs, new_key, new_value, cache_position)
