@@ -123,8 +123,17 @@ ones 对照：8.2e-04（@1024）/ 7.4e-04（@4096），top1 均 1.0。noop 三�
 
 ### A/B（独立进程·同轮相邻）
 
-（待跑：w8a16×kernel @1024 与 @4096 各一轮，ENV_ON=LEMOQ_KV_INT8=1；预期
-@4096 −150~170 µs、@1024 −43 µs。）
+- **run1（2026-10-25）整轮作废——保留作证据**（`results/EXP-e6-ab-4096-run1/`）：on 臂
+  5/6 全部 `blocked`，`failure.message = "kv_int8 的 buffer 初始化不能发生在 capture 里"`。
+  根因是当时的失效语义（prefill 作废）与 `capture()` 的内部顺序冲突：capture() 在 warmup
+  **之后**还有第二次 `prefill()` 复位（`cudagraph.py:703`），把 warmup 阶段建好的 int8
+  buffer 作废 ⇒ capture 期懒初始化撞守卫。off 臂正常（1.7156，canonical 一致），canonical
+  payload 由脚本恢复。**修复（`8aab5c1`）**：失效语义改为 **cache 对象身份**（weakref 锚
+  `_lemoq_kv_int8_src_cache_ref`）——同对象重复 prefill（同 prompt 重灌，数值等价）复用
+  （capture 安全）；换对象（probe 换窗/换会话）重建（免跨会话污染）；CPU 测试钉身份矩阵。
+- **修复后单臂图冒烟（@4096）**：`status=done`、gate PASS、`kv_int8_effective=True`、
+  p50 **1.6031** ms（canonical off 1.7165 ⇒ −113 µs / −6.6%，单跑非判定值）、host 3.8%。
+- **正式轮**：（跑中：run2 @4096 PAIRS=5；@1024 待跑。预期 @4096 −150~170 µs、@1024 −43 µs。）
 
 ### 刷新与采纳
 
