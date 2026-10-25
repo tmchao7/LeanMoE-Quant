@@ -27,6 +27,18 @@ canary 0.336%（`results/EXP-f1-refresh/`，F4 轮）。kernel 格 −1.8~−3.0
 kernel 杠杆 **1.4528/1.3801**、最好格 **2.36×/3.85×**。A/B 显著性：n=5 全胜 sign p=0.0625，
 采纳依据=方向一致+效应量与预注册账本吻合（METRICS §2.2 口径）。
 
+★★ **2026-10-25 F5 采纳刷新 = v6（canonical）**：lm_head 也量化（`LEMOQ_LMHEAD_W8`，六 True）。
+F5 证据链：三链精度 PASS（KL 6.1e-5/6.6e-5 + top-1 165/165、全集 PPL +0.0088%、MMLU −0.50 点，
+`EXP-p1-06`）；独立进程 A/B **VALID**（off 1.5329 → on 1.4696 ms，**−4.13%**，5/5 对，canary
+0.131%；前两轮宿主机共租 host 尖峰 fail-closed 作废，归档 invalid-run{1,2}；
+`results/EXP-f5-ab-20261025/`）；刷新 **22/22 干净、canary −0.058%**（`results/EXP-f1-refresh/`，
+F5 轮）。kernel 格 **1.5116/1.7626 → 1.4706/1.7165 ms**（−41/−46 µs，地板减半口径）；
+fp16 格不动（开关不作用，`lm_head_w8_effective=False` 正确）；kernels/步 **329** 不变
+（lm_head 是替换不是省 kernel，进 fused dequant family = 33 次/步）。kernel 杠杆 **1.5055/1.4284**、
+最好格 **2.4244/3.9851**；量化步/fp16 步份额 **41.2%/25.1%** ⇒ 上限 ~1.70×/~1.34×。
+账本：**lm_head 行出榜**；剩余榜首 gate_up 29.2 / down_sum 25.8 µs（config 类，已判死）。
+A/B 显著性：n=5 全胜 sign p=0.0625，采纳依据=方向一致+三轮量级一致（METRICS §2.2 口径）。
+
 ## 1. Hypothesis（跑之前写 —— 已随矩阵在 `25f7868` 提交，本文件没有事后修改它）
 
 ```text

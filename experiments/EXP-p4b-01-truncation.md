@@ -49,6 +49,14 @@
 `kv_direct_write=False`）；p50 噪声内：fp16 3.5446/6.7805、w8a16 2.9589/6.2219、
 w8a8@4096 8.8232（**R3 de-publish 后已撤销发布**）；E7 = **1.1979/1.0898**（2026-10-24 值 1.1974/1.0912 留档）。
 
+★ **2026-10-25 F5 采纳刷新 = v6（canonical）**：lm_head 也量化（六 True）。三链 PASS + A/B VALID
+（−63.3 µs，−4.13%，5/5 对，canary 0.131%；前两轮宿主机共租尖峰 fail-closed 作废，归档
+`EXP-f5-ab-20261025-invalid-run{1,2}`）+ 刷新 22/22 干净（canary −0.058%）。新采用 p50（cudagraph）：
+fp16 **3.5628/6.8445**、w8a16 **2.9149/6.226**；E7 `speedup_cudagraph` = **1.2223（1024）/ 1.0994（4096）**
+（F4 值 1.1979/1.0898 留档）。量化步/fp16 步份额 **41.2%/25.1%** ⇒ 上限 ~1.70×/~1.34×。
+w4a16 两格 gate FAIL 如旧（evidence）；w8a8@4096 格 gate FAIL 如旧（R3 裁决，照跑只作 evidence）。
+逐格 `lm_head_w8_effective` 量化格 True / fp16 格 False（刷新谓词机械执行）。
+
 ★ **2026-10-24 采纳刷新（F1+F2 默认开）**：`FUSION_DEFAULTS` 四 True 后 23 格同轮重测（`results/EXP-f1-refresh/`，canary 0.30%、逐格 host_share ≤3.4%）。新采用 p50（cudagraph）：fp16 **3.5421/6.7841**、w8a16 **2.9582/6.2172**、w8a8@4096 **8.8189** ms（**R3 de-publish 后已撤销发布**）；E7 `speedup_cudagraph` = **1.1974（1024）/ 1.0912（4096）**（P2j 值 1.1911/1.0888 留 §P2j，跨轮不混比）。w4a16 两格 gate FAIL 如旧（8.5879/11.8202 仅 evidence）。无 env 金丝雀：kernel 格 1.5590（Δ+0.03%）、sdpa 格 2.9542（Δ−0.14%，`packed_qkv_effective=False` 正确 no-op）。
 
 ## Hypothesis（先写，跑之前冻结；来自矩阵，原文不动）

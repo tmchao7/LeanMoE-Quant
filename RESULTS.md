@@ -50,10 +50,11 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | # | 杠杆 | 实测 | 口径 | 出处 |
 | --- | --- | --- | --- | --- |
 | 1 | **执行轴**（eager → cudagraph，同一实现、**同一轮**） | **2.43×** @1024 / **1.35×** @4096 | fp16：9.8841 → 4.0670 / 9.8716 → 7.3211 ms；`host_share` 67.3% → 1.4%。★ 用归档里那一轮的两个 payload，**不**用"pre-P2i eager vs post-P2j graph"（跨轮，会造出假的 2.75×） | 归档 `results/EXP-p2j-refresh/archive/EXP-p4b-01-*`；[EXP-p4b-01](experiments/EXP-p4b-01-truncation.md) §2.8.2 |
-| 2 | **量化**（w8a16 vs fp16，图内 fused 臂） | **1.1979×** @1024 / **1.0898×** @4096 | 同一实现只换 bit-width；★ 2026-10-24 F4 采纳刷新（canary 0.336%） | 同上 §F4 刷新（采用列 3.5446 / 2.9589） |
-| 3 | **注意力实现**（HF sdpa → 自研 split-KV，图内） | **1.4528×** @1024 / **1.3801×** @4096（w8a16 格） | vs **同格 fp16**；最好格 **2.36× / 3.85×** vs fp16×sdpa（★ F4 采纳后，F1+F2+F4 默认开） | [EXP-p4c-01](experiments/EXP-p4c-01-in-graph-attention.md) §F4 刷新 |
+| 2 | **量化**（w8a16+lm_head vs fp16，图内 kernel 臂） | **1.2223×** @1024 / **1.0994×** @4096 | 同一实现只换 bit-width；★ 2026-10-25 F5 采纳刷新（22/22、canary −0.058%） | 同上 §F5 刷新（采用列 3.5628 → 2.9149 / 6.8445 → 6.226） |
+| 3 | **注意力实现**（HF sdpa → 自研 split-KV，图内） | **1.5055×** @1024 / **1.4284×** @4096（w8a16 格） | vs **同格 fp16**；最好格 **2.42× / 3.99×** vs fp16×sdpa（★ F5 采纳后，F1+F2+F4+F5 默认开） | [EXP-p4c-01](experiments/EXP-p4c-01-in-graph-attention.md) §F5 刷新 |
 | 4 | **融合 RMSNorm**（7 kernel → 1 kernel） | **1.2358×** 全步；kernel/步 **994 → 539** | 同进程交错 A/B，**15/15 轮获胜**；同一个 cudagraph 格在 P2j 前后 **4.0670 → 3.5881 ms（1.13×）**、采纳刷新后 **3.5421 ms** 是它的端到端兑现 | [EXP-p4c-02](experiments/EXP-p4c-02-elementwise-tail.md) §5.6 |
 | 5 | **KV 直写**（32 aten launch → 16 triton） | kernel 格 **−1.8~−3.0%**（w8a16×kernel **1.5586 → 1.5116 ms**） | F4 独立进程 A/B **5/5 对**（off 1.5576 → on 1.5118，**−2.94%**，canary 0.154%）；刷新轮 23/23、canary 0.336%；kernels/步 345→**329** | [EXP-p4c-01](experiments/EXP-p4c-01-in-graph-attention.md) §F4 |
+| 6 | **lm_head 量化**（0.206 GB fp16 → W8 g128） | kernel 格 **1.5116 → 1.4706 / 1.7626 → 1.7165 ms**（**−41/−46 µs**） | F5 独立进程 A/B **5/5 对**（off 1.5329 → on 1.4696，**−4.13%**，canary 0.131%；前两轮宿主机共租 host 尖峰 fail-closed 作废）；三链精度全过（KL 6.1e-5、PPL +0.0088%、MMLU −0.50 点） | [EXP-p1-06](experiments/EXP-p1-06-lm-head-w8.md)；`results/EXP-f5-ab-20261025/` |
 | 5 | **投影 kernel 修复**（每元素 gather → 每 tile 装载+广播） | 每调用 **8.14 → 5.15 µs**（**523 → 826 GB/s**） | 图内配置扫描；模型桶 0.5245 → 0.3254 ms | [EXP-p4c-01](experiments/EXP-p4c-01-in-graph-attention.md) §5.4 |
 
 ![每条杠杆各自的同轮 A/B](docs/figures/fig1_per_axis_speedups.svg)
@@ -67,28 +68,29 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 
 | 量 | 值 | 出处 |
 | --- | --- | --- |
-| E7 步级量化收益（w8a16，图内） | **1.1979×** / 1.0898×（F4 采纳刷新） | [EXP-p4b-01](experiments/EXP-p4b-01-truncation.md) §P2j |
-| 权重流占一个 graph 步的比例 | **42.6%**（1024）/ **22.3%**（4096） | 同上 §4（F4 刷新 payload：1.5111/3.5446、1.5111/6.7805） |
-| ⇒ 完美权重路径的**结构性上限** | **~1.74×** / **~1.29×** | 同上（fp16 臂同轮含 route 融合，地板不变） |
+| E7 步级量化收益（w8a16，图内） | **1.2223×** / 1.0994×（F5 采纳刷新） | [EXP-p4b-01](experiments/EXP-p4b-01-truncation.md) §F5 刷新 |
+| 权重流占一个 graph 步的比例 | **41.2%**（1024）/ **25.1%**（4096） | F5 刷新 payload：w8a16×kernel 1.4706/3.5655、1.7165/6.8396（同一公式：量化步 / fp16 sdpa 步） |
+| ⇒ 完美权重路径的**结构性上限** | **~1.70×** / **~1.34×** | 同上（F5 把 lm_head 的收益落袋后，剩余余量收窄——上限是"当前配置还能走多远"的界） |
 | 专家 GEMV 实测占一步 GPU 时间 | **1.540 ms / 3.5446 ms = 43.4%**（F4 刷新分母） | [docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md) §4.3 |
 | kernel 级量化收益（专家 GEMV，隔离测） | 96.3 → 63.5 µs = **1.52×** | 同上 §3 |
 | ⇒ 该 kernel 解释了步级收益的 | **89.6%**（16 层 × Δ0.0328 ms = 0.525 / 0.586 ms，F4 刷新步级差） | 同上 §4.3 |
 
-**读法**：量化确实兑现了，但它能兑现的天花板**不是 4×，是 1.74×** —— 因为权重只占一步的 42%。
-专家 GEMV 解释了**已测步级延迟节省的 89.6%**（F4 刷新口径）；这是收益归因，
-不表示已获得结构性上限的九成。
+**读法**：量化确实兑现了，但它的天花板**不是 4×**——权重只占一步的 ~41%（F5 后）。专家 GEMV
+解释了已测步级延迟节省的 89.6%（F4 口径）；F5 又把 lm_head 从权重流里拿掉（−63 µs/步，
+A/B 实测），量化步 / fp16 步的份额进一步下降。
 
 ### 3.1 量化"能不能用"：任务级证据（2026-10-09 新测）
 
 | 口径 | fp16 | w8a16 | 判据 | 出处 |
 | --- | --- | --- | --- | --- |
-| **MMLU 5-shot**（分层抽样 200 题子集，n=200，二项 SE 3.5 点） | **53.50%** | **52.50%** | delta **−1.0 个点** < 2 点门槛 ⇒ **PASS** | `results/task_accuracy.json` |
-| 口径 B：fp16 轨迹 teacher forcing | — | token 一致率 **99.0%** / 首 token **95.5%** | 与 KL/top-1 门同一口径 | 同上 |
-| **PPL**（wikitext-2 test 前 8192 token，不重叠窗口） | 9.1985 | 9.2047（**+0.067%**） | < 1% 门槛 ⇒ PASS | 3 份 cell 的 `correctness.ppl_*` |
+| **MMLU 5-shot**（分层抽样 200 题子集，n=200，二项 SE 3.5 点） | **53.50%** | **53.00%**（★ 当前配置 = w8a16 + lm_head w8，2026-10-25） | delta **−0.50 个点** < 2 点门槛 ⇒ **PASS** | `results/EXP-p1-06-lm-head-w8/mmlu_w8a16_lmhead.json`（全 w8a16 旧测 52.50%/−1.0 点，2026-10-09，`results/task_accuracy.json`） |
+| 口径 B：fp16 轨迹 teacher forcing | — | token 一致率 **99.0%** / 首 token **95.5%**（全 w8a16 旧测） | 与 KL/top-1 门同一口径 | 同上 |
+| **PPL**（wikitext-2 test 全集 285,831 token） | 8.4703 | 8.4711（**+0.0088%**，lm_head 单独量化）；组合臂 +0.0227% | < 1% 门槛 ⇒ PASS | `results/EXP-p1-06-lm-head-w8/ppl_f5_lmhead_v2.json`（8k 旧测 +0.067%，`results/r4-ppl-fullset-w8a16.json` 全集 +0.015%） |
 | GSM8K（8-shot 生成式） | **0/15（floor）** | — | 基座模型直答能力不足，**放弃该口径并如实记录** | `results/task_accuracy.json` |
 
 读法：三条独立证据链（分布级 KL/top-1、token 级 PPL、任务级 MMLU）指向同一结论 ——
-**w8a16 在这个 MoE 上是"能用的"**；而它的延迟收益只有 1.19×，瓶颈不在精度而在权重占一步 42%。
+**当前量化配置（experts + attention + lm_head 全 W8A16 g128）在这个 MoE 上是"能用的"**；
+lm_head 直接决定 logits 却仍然近无损（KL 6.1e-5、top-1 165/165 全对）。
 
 ![kernel 级证据：必要字节 vs 实测时间](docs/figures/fig3_kernel_attainment.svg)
 
@@ -104,6 +106,7 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | **权重 ÷4 拿不到延迟 ÷4** | [docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md) §4.2：字节 ÷3.88，时间只 ÷2.24，达成率 71% → 44% | 瓶颈从 DRAM 挪到了 kernel 内解包 —— 这才是"字节预算"的真实边界 |
 | **`EXP-p0-03`（HF 路径 + cudagraph）** | 记录里是 `blocked` **by design**：动态 cache 不可 capture | 说明"能不能进图"是这条路径的硬约束 |
 | **W4 专家量化过不了精度门——换 GPTQ 也不行** | [EXP-p1-05](experiments/EXP-p1-05-w4-expert-calibration.md)：W4 RTN top-1 **0.9030** / PPL **+4.39%**；W4 GPTQ **0.9152** / **+7.15%**；≤25% 整层 W8 退路 **0.9333** / **+4.19%**（字节 −36.92%）——三条都 FAIL | 4-bit 的墙不在 kernel：`GATE_CITATIONS` 的 W4A16 FAIL 不是"修 kernel"能解决的；按预注册反证条件停止扩展，4-bit 延迟收益**不发布** |
+| **MXFP4（block-scale 4-bit）比 int4-RTN 更差** | [EXP-p3-02](experiments/EXP-p3-02-mxfp4-block-scale.md)：KL **0.0739** vs int4-RTN 0.0447、top-1 **0.879**、5 窗 0/5 过线 | 预注册预测（E8M0 幂 2 组尺度更粗）方向量级双命中；工程链（kernel+量化器+K1）保留，格式本身否证；4-bit 最后一条路是 NVFP4 式两级尺度（默认放弃） |
 
 还有一条**内部的负结果**：`EXP-p4c-02` 的模块级归因被它自己预注册的 K1 判据否掉了
 （eager/graph top-8 kernel 重叠只有 5/8）—— 记录里写的是"这条归因 **VOID**"，而不是把它当结论引用。
@@ -114,7 +117,7 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | --- | --- |
 | 自研 kernel 族（全部过 K1 parity 门 1e-3） | **4**：grouped MoE GEMV（fp16 + 8/4-bit）、dense 融合反量化 GEMM、split-KV decode attention、融合 RMSNorm |
 | Python（不含虚拟环境） | **35,400 行 / 103 文件**（`src` + `tools` + `benchmarks` + `tests` + `scripts`，不含 `__pycache__`；2026-10-23 实测） |
-| 测试 | **44 个 `test_*.py`**；Mac CPU **707 passed / 0 failed / 33 deselected**（S2 交接轮实测；deselected = `-m "not gpu"` 主动排除）；GPU 标记用例单独跑（交接轮 31 passed / 1 skipped）；同一套四门由 GitHub Actions 持续验证（A5） |
+| 测试 | **49 个 `test_*.py`**；Mac CPU **729 passed / 0 failed / 43 deselected**（F5 采纳轮实测；deselected = `-m "not gpu"` 主动排除）；GPU 标记用例单独跑；同一套四门由 GitHub Actions 持续验证（A5） |
 | 实验矩阵 | 21 条声明 / **64 格展开**（`benchmarks.harness.expand(arch=sm_120)` 实算）；**16 条已执行**；Mac 树 `EXP-*__*/result.json` **59 份（48 done / 10 planned / 1 blocked——p0-03 by-design）**，GPU 盘另有 p2j 归档与历史工件；操作性验收以 `DRY=1 F2=1` 清单 = 23 格为准（2026-10-24 对账，ISSUES N5） |
 | 度量纪律 | 实测带宽而非规格值；KL/top-1 门先于性能；schema 强制"门失败 ⇒ latency 为 null"；首尾同格金丝雀；同租户记录不 kill；覆盖前先归档 |
 
@@ -123,8 +126,9 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | 缺口 | 状态 |
 | --- | --- |
 | **ncu 性能计数器** | **宿主策略阻断**（`RmProfilingAdminOnly: 1` + 容器无 `CAP_SYS_ADMIN`），连 `gpu__time_duration.sum` 都被拒。已交出替代口径（解析字节 / 隔离计时）与可复核的工具；缺的是 stall/occupancy 归因。见 [docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md) §1 |
-| FP8 / MXFP4（sm_120 的 block-scale） | 矩阵已声明（`EXP-p3-01/02`），**未跑**（假设已补前置条件：需先切 `tl.dot` 路径） |
-| E5 专家敏感度 / E6 KV INT8 / E8 跨带宽（V100） | 矩阵已声明，**未跑** |
+| FP8 / MXFP4（sm_120 的 block-scale） | FP8 跳过（与 int8 同字节，无收益）；**MXFP4 已跑，负结果**（EXP-p3-02，见 §4） |
+| E5 专家敏感度 / E8 跨带宽（V100） | 矩阵已声明，**未跑** |
+| **E6 KV INT8** | ✅ **已批准立项 + 工程前置已落**（2026-10-24/25）：预注册记录 [EXP-p5-01](experiments/EXP-p5-01-kv-int8.md) + 参考数学/守卫 + 写路径 kernel（逐位舍入链）；**待**：K 门激活、读路径 score 折叠、门、A/B（材料 [KV_INT8_RECON](docs/reference/KV_INT8_RECON_2026-10-24.md)） |
 | **occupancy / register 下限估计** | ✅ **已跑（G3，2026-10-10，`status=done`）**：三族自研 kernel 的**解析上界**（`kind=estimate`/`bound=upper`，非 ncu 实测）——fused RMSNorm（n_regs=38）blocks/SM **≤12**（threads 限）；grouped gate_up（n_regs=40）**≤12**、down_sum **≤6**（regs 限）；occupancy 上界均 100%。工件 `results/occupancy.json`。stall/occupancy **实测**归因仍缺（ncu 阻断，见 [NCU_PLAN](docs/reference/NCU_PLAN.md)） |
 | **batch 曲线** | ✅ **已测（G2，2026-10-10 单轮有效）**：金丝雀 **−3.448%** ≤5%（此前两轮 VOID 的冷态根因已由 `9729dde` 修复）。fp16、ctx=1024、同轮 4 点（n=5、丢 1 轮）：batch 1/2/4/8 → step p50 **87.20 / 85.88 / 86.82 / 86.29 ms**，tok/s **11.47 / 23.29 / 46.07 / 92.71**（工件 `results/batch_sweep.json`，单列表）。仅 fp16 单臂 ⇒ **量化衰减对比仍是缺口**；本项目仍是有意的 batch=1 单流课题 |
 | **任务级精度（GSM8K）** | 生成式口径在基座模型上贴地板（fp16 8-shot 0/15）⇒ **放弃并如实记录**；MMLU 已测并过门（§3.1） |
@@ -135,8 +139,10 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 ## 7. 一句话总结
 
 > 在一个 82.6 ms → 1.6 ms 字节下限的带宽受限 decode 上，本项目用**执行方式、量化、
-> 注意力实现、融合 norm、投影 kernel** 五条各自独立的 A/B 把差距收窄，并**实测出**
-> "权重只占一步 42% ⇒ 量化上限 1.74×"这个结构性边界；其中九成收益已定位到具体 kernel。
-> 量化这条杠杆**只兑现到 8-bit**：4-bit 专家量化（RTN 与 GPTQ）连同 ≤25% 整层 W8 退路都过不了
-> 精度门（EXP-p1-05），所以 4-bit 延迟收益不发布。
-> 四个自研 Triton kernel 全部有 parity 门，负结果与阻断同样留在库里。
+> 注意力实现、融合 norm、KV 直写、lm_head 量化**六条各自独立的 A/B 把差距收窄，并**实测出**
+> "权重只占一步 ~41% ⇒ 当前配置的量化上限 ~1.70×"这个结构性边界；其中九成步级收益已定位到
+> 具体 kernel。量化这条杠杆**只兑现到 8-bit**：4-bit 专家量化（RTN 与 GPTQ）、MXFP4 块尺度
+> 连同 ≤25% 整层 W8 退路都过不了精度门（EXP-p1-05 / EXP-p3-02），w8a8@4096 因 10 窗复测
+> 不稳健被 de-publish——所以 4-bit 延迟收益不发布、8-bit 激活量化不上墙。
+> 最佳格 **2.42×/3.99×**（w8a16+lm_head × 自研 attention × CUDA Graph vs fp16×sdpa）。
+> 自研 Triton kernel 全部有 parity 门，负结果与阻断同样留在库里。

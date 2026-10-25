@@ -12,14 +12,19 @@
 
 | 量 | 预期方向 | 来源（刷新 payload 字段） | 新值 |
 | --- | --- | --- | --- |
-| 全部 16 个量化图格 p50 | 每步 **−40~80 µs**（lm_head GEMV 字节减半：206→103 MB） | `results/EXP-p4b-01-truncation__*/…/result.json` → `latency.per_token_p50_ms` | （回填） |
-| fp16 图格 p50 | **不动**（开关对 fp16 无效，`lm_head_w8_effective=False`） | 同上 | （回填，应≈v5 噪声内） |
-| `[W]` 字节账 | lm_head 206→103 MB ⇒ 全量化格 `[W]` −103 MB | `weight_bytes_actual`、`quantize_report.realized_bytes_by_target.lm_head` | （回填） |
-| 权重占比 / 上限 | 分母变小 ⇒ 份额微降、上限微降 | `bottleneck.top_kernels` 归一 | （回填） |
-| E7 `speedup_cudagraph` | 微升（fp16 分母不变、量化分子变小） | p4b payload | （回填） |
-| kernel 杠杆（p4c-01） | 微升 | p4c payload kernel/sdpa 比 | （回填） |
-| 最好格倍数 | 微升 | 同上 | （回填） |
-| kernels/步 | **不变**（lm_head 是替换不是省 kernel；QuantLinear fused 臂 1 次 GEMV） | `bottleneck.kernels_per_step` | （回填，核对用） |
+| 全部 16 个量化图格 p50 | 每步 **−40~80 µs**（lm_head GEMV 字节减半：206→103 MB） | `results/EXP-p4b-01-truncation__*/…/result.json` → `latency.per_token_p50_ms` | p4b w8a16 **2.9149/6.226**；p4c w8a16 sdpa **2.9142/6.2191**、kernel **1.4706/1.7165** |
+| fp16 图格 p50 | **不动**（开关对 fp16 无效，`lm_head_w8_effective=False`） | 同上 | p4b **3.5628/6.8445**、p4c sdpa **3.5655/6.8396**、kernel **2.2142/2.452**、p2-02 **3.5683**、p2-04 **2.6492/2.9704**、p2-05 **2.2131/2.4529**、p0-04 **4.7221/7.9417**——全部与 v5 噪声内 ✓ |
+| `[W]` 字节账 | lm_head 206→103 MB ⇒ 全量化格 `[W]` −103 MB | `weight_bytes_actual`、`quantize_report.realized_bytes_by_target.lm_head` | lm_head realized **104,632,320 B** ✓（dequant family 33 次/步 = 32 投影 + 1 lm_head） |
+| 权重占比 / 上限 | 分母变小 ⇒ 份额微降、上限微降 | 同一公式：量化步 / fp16 sdpa 步 | **41.2%（1024）/ 25.1%（4096）⇒ 上限 ~1.70× / ~1.34×** |
+| E7 `speedup_cudagraph` | 微升（fp16 分母不变、量化分子变小） | p4b payload | **1.2223 / 1.0994** |
+| kernel 杠杆（p4c-01） | 微升 | 同格 fp16 kernel / w8a16 kernel | **1.5055 / 1.4284** |
+| 最好格倍数 | 微升 | fp16 sdpa / w8a16 kernel | **2.4244 / 3.9851** |
+| kernels/步 | **不变**（lm_head 是替换不是省 kernel；QuantLinear fused 臂 1 次 GEMV） | `bottleneck.kernels_per_step` | **329** ✓（核对通过） |
+
+**刷新轮判定**：22/22 干净（0 失败/自检警告）、金丝雀漂移 **−0.058%**、`round_canary` exit 0；
+逐格 `lm_head_w8_effective`：量化格 True / fp16 格 False（刷新脚本谓词机械执行）。
+w8a8@4096 格以 gate-FAIL evidence 形态重跑（R3 裁决）✓。算子账本重算：**lm_head 行出榜**；
+剩余榜首 gate_up 29.2 / down_sum 25.8 µs（config 类，已判死）。
 
 ## 2. 逐格检查点（自检不过不回填）
 

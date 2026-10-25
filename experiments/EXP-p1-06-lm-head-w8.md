@@ -6,8 +6,9 @@
 - **ID**: `EXP-p1-06-lm-head-w8`
 - **Date**: 2026-10-24
 - **Operator**: agent（GPU：租用 RTX 5090 32 GB，sm_120，实测读带宽 1560.3 GB/s）
-- **Status**: `running`（★ 三链全过：第一链 2026-10-24、第二/三链 2026-10-25——见 §结果；
-  剩合规 A/B（进行中）+ `LMHEAD=1` 23 格刷新 + 回填）
+- **Status**: `done`（★ **采纳完成 2026-10-25**：三链 PASS + A/B VALID + 翻默认（六 True）
+  + 22 格刷新干净（金丝雀 −0.058%）+ 数字回填。v6 见 §结果与
+  `docs/handoff/ADOPTION_SYNC_F5_2026-10-25.md`）
 - **接线**: `LEMOQ_LMHEAD_W8` 开关（默认关，commit `79f7b88`）；独立门表
   `LMHEAD_GATE_CITATIONS`（接线时为空 ⇒ fail-closed，门实测通过才填）
 - **上游规格**: `docs/FUSION_OPPORTUNITIES.md` F5（含 N7 口径修订）；立项批准记录在
@@ -117,12 +118,28 @@ rtn 臂漏传 `keep_lm_head_fp16` ⇒ `lmhead_only` 臂静默替换 0 个模块�
 fp16 **53.50%**（与 p1-02 基线同值）→ w8a16_lmhead **53.00%** = **−0.50 点**（门 <2 点，
 PASS；样本噪声下与全 w8a16 当年的 −1.0 点不可区分）。
 
+### 采纳：A/B + 翻默认 + 刷新（2026-10-25）
+
+- **A/B**（`run_ab_fresh_process.sh`，独立进程 5 对，canonical 格 w8a16×kernel @1024）：
+  **前两轮 fail-closed 作废**（宿主机共租 host 尖峰：off04 6.2%、on07 6.3% > 5%；
+  归档 `EXP-f5-ab-20261025-invalid-run{1,2}`），第三轮 **VALID**：off 1.5329 → on 1.4696 ms，
+  **−63.3 µs（−4.13%）**、5/5 对胜、金丝雀 0.131%、逐格 host ≤5%（`results/EXP-f5-ab-20261025/`）。
+  三轮 Δ（−69.5/−56.2/−63.3 µs）方向量级一致——效应稳健。
+- **翻默认**：`FUSION_DEFAULTS["lm_head_w8"]=True`（`b816fc7`，六 True）；
+  无 env 金丝雀验证 canonical 格 p50 **1.4706**、`lm_head_w8_effective=True`。
+- **刷新 22 格**（LMHEAD=1，`results/EXP-f1-refresh/` F5 轮）：**22/22 干净、0 失败/警告、
+  金丝雀漂移 −0.058%**；逐格 `lm_head_w8_effective` 量化格 True / fp16 格 False；
+  w8a8@4096 格以 gate-FAIL evidence 形态重跑（R3 裁决）✓。
+- **账本**：lm_head 行出榜；剩余榜首 gate_up 29.2 / down_sum 25.8 µs（config 类，已判死）。
+
 ## Verdict
 
-**三链全过（2026-10-25）**：KL/top-1（近无损，165/165）+ PPL（+0.0088%）+ MMLU（−0.50 点）
-——F5 规格红线的精度要求全部满足，`lm_head` w8a16 g128 的精度疑虑彻底关闭。
-**采纳判定剩两步**：合规 A/B（进行中）+ `LMHEAD=1` 23 格刷新；两者过后翻默认并按
-[`ADOPTION_SYNC_F5`](../docs/handoff/ADOPTION_SYNC_F5_2026-10-25.md) 回填。
+**假设成立，F5 采纳（2026-10-25）**。三链精度全过（KL 6.1e-5/6.6e-5 + top-1 165/165；
+PPL +0.0088%；MMLU −0.50 点），A/B VALID（−63.3 µs，−4.13%，5/5 对），翻默认后 22 格刷新
+干净。**收益来自把地板本身减半**（0.1319 → 0.066 ms）而非捕获缺口——N7 口径的预测兑现：
+实测 −63.3 µs/步落在预注册的 40–80 µs 区间内，且两 ctx 刷新格的差（−41/−46 µs）噪声内一致。
+`lm_head` W8 g128 是量化叙事的最后一块：**experts + attention + lm_head 全部 W8A16 g128，
+router/embedding/KV 刻意保留**（KV INT8 = E6，已批待做）。
 
 ## Applicability
 

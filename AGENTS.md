@@ -27,11 +27,20 @@ settled — do not re-derive them and do not re-run their cells:
   10-window artifact (derived verdict **FAIL**), so those cells run as evidence only: the
   published 8.8232 ms cudagraph is **withdrawn**. See `EXP-p1-04` v3 and `EXP-p4b-01` §R3.
 
+- **★ F5 `lm_head` w8 is ADOPTED (2026-10-25) — the last piece of the weight-quantization story.**
+  Three precision chains PASS (KL 6.1e-5/6.6e-5 + top-1 165/165; full-set PPL +0.0088%;
+  MMLU −0.50 pt), A/B **VALID** (−63.3 µs = −4.13%, 5/5 pairs, canary 0.131% — two earlier
+  rounds fail-closed VOID on host-node contention, archived `invalid-run{1,2}`), default
+  flipped (six True), refresh **22/22 clean** (canary −0.058%). Canonical `w8a16 × kernel`
+  **1.5116/1.7626 → 1.4706/1.7165 ms**; ledger: lm_head row gone. Gate row lives in the
+  separate `LMHEAD_GATE_CITATIONS` (`EXP-p1-06`).
+
 - **`EXP-p4c-01` — supported (the other big non-weight block was the ATTENTION IMPLEMENTATION).**
   Swapping HF sdpa for this repo's split-KV core *inside the graph* cuts the step 1.36–2.44×.
-  **Canonical numbers are now v5** (2026-10-24 F4 adoption, F1+F2+F4 on): quantized
-  **1.1948 (sdpa) / 1.4528 (kernel)** @1024 and **1.0898 / 1.3801** @4096, best cell
-  `w8a16 × kernel` = **2.36× / 3.85×** vs fp16 × sdpa (v4 was 1.1948/1.4392, 2.27×/3.73×).
+  **Canonical numbers are now v6** (2026-10-25 F5 adoption, all six switches on): quantized
+  **1.2235 (sdpa) / 2.4244 (kernel)** @1024 and **1.0998 / 3.9851** @4096, best cell
+  `w8a16 × kernel` = **2.42× / 3.99×** vs fp16 × sdpa; kernel leverage **1.5055/1.4284**;
+  weight share **41.2%/25.1%** ⇒ ceiling ~1.70×/~1.34× (v5 was 1.1948/1.4528, 2.36×/3.85×).
   Mechanism: the removed cost (attention core, then the norm chain) is bit-width-independent —
   a constant that helps the smaller (quantized) total relatively more.
   Canary in the v3 round: −0.067%; one cell was contaminated (`host_share` 51%) and re-run
@@ -168,8 +177,8 @@ in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`
 | Attention path: eager, kernel, in-graph | done — ★ 2026-10-24 F4 refresh: eager 2.5642/2.9275（sdpa 格不动），kernel **2.1946/2.4326 ms**（F4 前 2.2406/2.4779） | `experiments/EXP-p2-03-decode-attention.md`, `experiments/EXP-p2-04-eager-attention.md`, `experiments/EXP-p2-05-attn-kernel.md` |
 | Grouped MoE GEMV (fp16) | done — ★ 2026-10-24 adoption refresh: 4.0829 → 3.6828 → **3.5340 ms** | `experiments/EXP-p2-02-moe-grouped-gemm.md` |
 | E2 dequant fusion, 6 cells, 8-bit **and** 4-bit | done — **`refuted`**; P2j refresh **VOID** for all 6 cells (eager/host-bound) ⇒ pre-P2i values kept, verdict unchanged | `experiments/EXP-p2-01-dequant-fusion.md` |
-| P3 wiring + E7, 16/16 cells | done — **judged**; refreshed 2026-10-08 (P2j): graph cells under the fused norm, eager cells **pre-P2i** (refresh VOID — host contention); `w8a8@4096` gate now reads PASS (borderline) | `experiments/EXP-p4b-01-truncation.md` |
-| In-graph attention × quantization, 8 cells | done — **supported**; **canonical = v5** (2026-10-24 F4 adoption): quantized **1.1948/1.4528** @1024, **1.0898/1.3801** @4096, best cell **2.36× / 3.85×** vs fp16 × sdpa（w8a16×kernel **1.5116/1.7626 ms**, kernels/步 **329**） | `experiments/EXP-p4c-01-in-graph-attention.md` |
+| P3 wiring + E7, 16/16 cells | done — **judged**; **v6** (2026-10-25 F5 adoption): E7 **1.2223/1.0994**（w8a16 cg **2.9149/6.226**、fp16 cg **3.5628/6.8445**）; eager cells pre-P2i (refresh VOID — host contention, P2k); `w8a8@4096` **de-published** (R3, evidence only) | `experiments/EXP-p4b-01-truncation.md` |
+| In-graph attention × quantization, 8 cells | done — **supported**; **canonical = v6** (2026-10-25 F5 adoption): quantized **1.2235/2.4244** @1024, **1.0998/3.9851** @4096, best cell **2.42× / 3.99×** vs fp16 × sdpa（w8a16×kernel **1.4706/1.7165 ms**, kernels/步 **329**） | `experiments/EXP-p4c-01-in-graph-attention.md` |
 | E4 routing overhead | done — **supported**: 44.2% of GPU busy, and **quantization-invariant** (4.478/4.512/4.526/4.555 ms for fp16/w8a16/w8a8/w4a16) | `experiments/EXP-p4-01-moe-routing-overhead.md` |
 | The elementwise/copy tail (0.90 ms, "~330 kernels") | done — classified: it is **~13 named families × 16–83 calls/step**, not a flat tail; module-level attribution VOID (its own K1 failed) | `experiments/EXP-p4c-02-elementwise-tail.md` |
 | W4 expert calibration (4-bit) | **done 2026-10-23 — negative result** (RTN / GPTQ / ≤25% whole-layer W8 fallback all fail the gate; no latency published) | `experiments/EXP-p1-05-w4-expert-calibration.md` |
@@ -204,7 +213,7 @@ that the science was not done — read the record first.
 | W4 | ✅ **done 2026-10-23** (`EXP-p1-05`, GPU diagnostic — **negative**): W8 control PASS; W4 RTN / W4 GPTQ / ≤25% whole-layer W8 fallback all FAIL ⇒ pre-registered refutation clause stops the expansion; no matrix registration, no `GATE_CITATIONS` change | 4-bit was the last unclosed bit-width in the quantization-ceiling story | record + artifacts rsynced to `lemoq-artifacts/EXP-p1-05-2026-10-23/` (outside git) | done |
 | **S1** | ✅ **done 2026-10-24** (Block A): A1 F2 A/B re-take **VALID** (off 1.9384 → on 1.8406 ms, −5.05%, 3/3 pairs, canary −0.12%) → A2 refresh **23/23 OK** (canary 0.30%, host ≤3.4%) → A3 `FUSION_DEFAULTS` four True (`938de63`; no-env canaries: kernel 1.5590 Δ+0.03% `packed_qkv_effective=True`, sdpa 2.9542 Δ−0.14% effective=False) → A4 numbers synced per `ADOPTION_SYNC_2026-10-24.md` → merge `main`. Headline: w8a16×kernel **1.5586/1.8140 ms** (kernels/step 539→345), E7 **1.1974/1.0912** | — | all acceptance criteria met | done |
 | **S2** | ✅ **done 2026-10-24**: F4 KV direct write adopted (pre-registered rule picked it at 50.3 µs capturable; GPU K-gate 9/9 bitwise; A/B **VALID** off 1.5576 → on 1.5118 ms, −2.94%, 5/5 pairs, canary 0.154%; refresh 23/23, canary 0.336%; `FUSION_DEFAULTS` five True; kernels/步 345→329). Ledger re-run: latency-class vein mined out — next leader is gate_up 28.5 µs (config class) | — | all acceptance criteria met (tokens_equal + K1 + canary) | done |
-| **S3** | `lm_head` w8 (≈60 µs, N7 口径：地板 0.1319→0.066 ms) **or** E6/E8 breadth | the last piece of the quantization lever, or the cheapest Tier B closure | **new gate row from a new measurement** (new experiment) before any latency is published | **F5 半边已批准（2026-10-24）**：走 `LEMOQ_LMHEAD_W8` 开关 + 独立 `LMHEAD_GATE_CITATIONS`（KL/top-1 + PPL<1% + MMLU<2 点三链）+ A/B + 刷新；E6/E8 仍待批 |
+| **S3** | ✅ **done 2026-10-25（F5 lm_head w8 采纳）**：三链 PASS（KL 6.1e-5/6.6e-5+top1 165/165；全集 PPL +0.0088%；MMLU −0.50 点）→ A/B VALID（−63.3 µs，−4.13%，5/5；前两轮宿主机共租尖峰 fail-closed 作废）→ 翻默认（六 True，`b816fc7`）→ 刷新 22/22（canary −0.058%）→ 回填（`ADOPTION_SYNC_F5`）。canonical **1.4706/1.7165 ms**；门行在独立 `LMHEAD_GATE_CITATIONS`（`EXP-p1-06`）。E6/E8 见 S4/ROADMAP | the last piece of the quantization lever | **new gate row from a new measurement** ✓（独立门表，EXP-p1-06 工件） | done |
 | **S4** | ✅ **立项获批 + 骨架已落（2026-10-24 夜）**：E6 KV INT8（`EXP-p5-01-kv-int8.md` 预注册 + `kv_int8.py` 参考数学/守卫 + CPU 6 测试 + K 门 GPU 骨架）——**kernel 在 10-25 窗实现**（`kv_int8_write`，逐位复现参考舍入链）；材料 [`KV_INT8_RECON_2026-10-24`](docs/reference/KV_INT8_RECON_2026-10-24.md) | 最大已声明杠杆（@4096 ≈ −172 µs/步，−10%） | kernel 逐位过 K 门 + roundtrip ≤0.6·scale → 门（新测量）→ A/B → 翻默认 | done（批准+骨架）；kernel/测量待窗 |
 | **R3** | ✅ **done 2026-10-24 — de-publish 裁决（是）**：`w8a8@4096` 门行重指向 10 窗复测工件（KL 0.026159 ⇒ 推导 FAIL，top-1 0.963636 与 5 窗同值），已发布的 8.8232 ms 撤销；该格照跑、latency 只进 `gate_failed_evidence`（w4a16 同款语义）；引用来源集中在 `GATE_CITATION_SOURCES` | 10 窗重测显示 5 窗 PASS 不稳健（w7 重尾 0.2247），用户批准撤销 | `benchmarks/runner.py` 门表 + `experiments/EXP-p1-04` v3 + `EXP-p4b-01` §R3 | done |
 
