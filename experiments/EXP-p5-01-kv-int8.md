@@ -7,11 +7,13 @@
 - **ID**: `EXP-p5-01-kv-int8`（矩阵条目已存在：`configs/experiments.yaml`，ctx [1024, 2048, 4096]）
 - **Date**: 2026-10-24（立项/骨架）；kernel 与测量 2026-10-25 窗
 - **Operator**: agent（GPU：租用 RTX 5090 32 GB，sm_120，实测读带宽 1560.3 GB/s）
-- **Status**: `running`（★ kernel 工程 + **门已过** 2026-10-25：K 门 8/8（见结果节）；
-  门两 ctx PASS——v3 forced 轨迹口径 KL 0.001276/0.000622、top-1 0.9818/0.9879，
-  已落表 `KV_INT8_GATE_CITATIONS`（`552d2ac`）。方法学两课全记录在案：首轮假 0
-  （DynamicCache 回退）与 v2 自由贪心复利口径（不是门）——工件分代保留。
-  **剩**：A/B（两 ctx）→ Δ>MAD ⇒ 翻默认 → KV8=1 刷新 → 回填）
+- **Status**: `done`（★ **2026-10-25 全链闭环并采纳**：K 门 8/8 → 门两 ctx PASS
+  （v3 forced 轨迹 KL 0.001276/0.000622、top-1 0.9818/0.9879，落表 `552d2ac`）→
+  A/B 两 ctx VALID 5/5（@4096 **−112.4 µs/−6.54%**、@1024 −11.5 µs/−0.78%）→
+  翻默认 `d4d02fb`（第七开关）→ KV8=1 刷新 23/23（canary −0.427%）→ v7 canonical
+  **1.4602/1.6075 ms**、最好格 **2.44×/4.25×**。方法学三课全档：首轮假 0
+  （DynamicCache 回退）、v2 自由贪心复利口径、A/B run1 capture 期初始化
+  （身份语义修复 `8aab5c1`））
 - **上游规格**: `docs/reference/KV_INT8_RECON_2026-10-24.md`（字节账/工业界做法/工程形状/阶梯）
 
 ## Hypothesis（矩阵原文 + 预注册细化）
@@ -149,14 +151,53 @@ ones 对照：8.2e-04（@1024）/ 7.4e-04（@4096），top1 均 1.0。noop 三�
 - **翻默认**（`d4d02fb`，第七开关全 True）+ 无 env 金丝雀：p50 **1.6053**、
   `kv_int8_effective=True`、gate PASS、host 4.0%——与 A/B on 臂 1.6056 双向核对一致。
 
-### 刷新与采纳
+### 刷新与采纳（2026-10-25，全部完成）
 
-（待跑：A/B VALID 且 Δ>MAD ⇒ 翻默认 → KV8=1 刷新 23 格 → 回填。）
+- **翻默认**：`FUSION_DEFAULTS["kv_int8"] = True`（`d4d02fb`，第七开关全 True）。
+  oracle-backend 的两条 CPU 测试显式 env=0（N6 纪律）。
+- **无 env 金丝雀**：p50 **1.6053**、`kv_int8_effective=True`、gate PASS、host 4.0%——
+  与 A/B on 臂 1.6056 双向核对一致。
+- **KV8=1 刷新 23/23 格**（`run_f1_refresh.sh` F2=1 KV=1 LMHEAD=1 KV8=1）：金丝雀
+  **−0.427%**、round_canary exit 0、failed.txt 空、逐格自检 `kv_int8_effective`
+  （kernel 格 True / 其余 False）全对。v7 canonical：
+
+| 格（图内） | v6 | **v7** | Δ |
+| --- | --- | --- | --- |
+| w8a16×kernel @1024 | 1.4706 | **1.4602** | −10.4 µs |
+| w8a16×kernel @4096 | 1.7165 | **1.6075** | **−109.0 µs** |
+| fp16×kernel @1024 | 2.1946（F4 轮） | 2.2028 | +0.4%（≈金丝雀噪声级；@1024 KV 份额小，±写镜像相抵） |
+| fp16×kernel @4096 | 2.4326（F4 轮） | **2.3484** | −84.2 µs |
+| sdpa 格（全部） | — | 不动 | E6 不作用（kv_int8_effective=False ✓） |
+
+- **派生量（v7）**：E7（p4b）**1.2253/1.1025**；attention 杠杆 **1.5086/1.4609**；
+  最好格 **2.4421/4.2506**（@4096 破 4×）；权重流份额 **40.9%/23.5%** ⇒ 上限
+  **~1.69×/~1.31×**。账本：attn_split@4096 家族 0.3650 → **0.2402 ms**（gap 转负
+  −103.9 µs——int8 读已快过 **fp16 口径**的字节地板，这是 E6 的签名；下一任 leader
+  仍是 gate_up/down_sum config 类，F7 已预注册）。
+- **两条如实记录的口径工件**（不改测量工具，留给后续）：
+  1. payload 的 `kv_read_bytes` 仍按 fp16 512 MiB 记账（E6 未进字节模型）⇒ 账本
+     attn_split 的"地板"按 int8 字节 268.4 MB 重算是 172 µs（gap +68 µs）；
+  2. `vram.kv_gib = −5.544`：分配器检查点法在 E6 下出负值（方法工件）。且当前实现
+     **保留 fp16 cache 作写侧正确性网**（int8 只是读源）⇒ VRAM 实际 +int8 镜像
+     ≈ +0.27 GiB，"KV 显存减半"是去掉 fp16 网的未来变体，不是本轮事实。
 
 ## Verdict
 
-（待 A/B；门链已齐：K 门 8/8 + 门两 ctx PASS。）
+**supported（采纳，2026-10-25）**。预注册假设"KV 量化省的是带宽不是显存；@4K 约省 9%
+总流量"兑现为 @4096 **−109 µs（−6.4%）**（>5% 反证线）；@1024 −11.5 µs（0.78%）——
+杠杆随 ctx 放大的定性预测成立，小 ctx 兑现率低（27% vs 65%）是 scale 折叠开销 +
+每步 16 次镜像写的诚实账。精度：K 门 8/8、门两 ctx PASS（forced 轨迹 KL 0.0013/0.0006、
+top-1 0.982/0.988）。三条 A/B 判据（5/5 对、Δ>MAD、金丝雀）两 ctx 全过。
 
 ## Applicability
 
-（待收尾时写。）
+- **硬件/实现绑定**：sm_120（RTX 5090）、triton 3.4.0、torch 2.8.0+cu128、CUDA Graph。
+  V100（sm_70）没有这条路（无图捕获的等价前提与带宽量级都不同）——换卡必须重测。
+- **模型形状绑定**：GQA 拒绝（`num_key_value_groups != 1` 显式 NotImplementedError）；
+  head_dim=128、fp16 q/k/v 是守卫 `kv_int8_rows_applicable` 的边界。
+- **口径**：收益是 **batch=1 单流 decode** 的；门是 forced 轨迹口径（165 位置），
+  自由生成会因 borderline 翻 token 分岔（v2 工件）——这是行为证据不是精度崩塌，
+  与权重门 w8a8 复测的"参考轨迹自己也在动"同型。
+- **边界**：量化粒度 per-token 对称（v2 阶梯 K per-channel 未启用——v1 已过门不需要）；
+  fp16 cache 仍维护（VRAM 不降反升 ~0.27 GiB）；`kv_read_bytes`/`kv_gib` 两条口径
+  工件见结果节。

@@ -16,16 +16,16 @@
 <text x="545.0" y="406.0" font-size="11.0" fill="#57606a" font-weight="400" text-anchor="middle">measured speedup (×, same-round A/B)</text>
 <text x="194.0" y="136.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">Execution</text>
 <text x="194.0" y="151.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">(eager → CUDA Graph)</text>
-<rect x="210.0" y="121.5" width="542.8" height="16.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
-<text x="744.8" y="134.0" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">2.43×  ctx=1024   (9.88 → 4.07 ms, pre-P2j round)</text>
+<rect x="210.0" y="121.5" width="445.8" height="16.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
+<text x="647.8" y="134.0" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">2.00×  ctx=1024   (8.12 → 4.07 ms, pre-P2j round)</text>
 <rect x="210.0" y="143.5" width="301.1" height="16.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
 <text x="519.1" y="156.0" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.35×  ctx=4096   (9.87 → 7.32 ms, pre-P2j round)</text>
 <text x="194.0" y="201.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">Quantization</text>
 <text x="194.0" y="216.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">(w8a16 vs fp16, in-graph)</text>
-<rect x="210.0" y="186.5" width="266.0" height="16.0" fill="#12b886" opacity="1.00" rx="3.0"/>
-<text x="484.0" y="199.0" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.19×  ctx=1024   (3.59 → 3.01 ms)</text>
-<rect x="210.0" y="208.5" width="243.2" height="16.0" fill="#12b886" opacity="1.00" rx="3.0"/>
-<text x="461.2" y="221.0" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.09×  ctx=4096   (6.83 → 6.27 ms)</text>
+<rect x="210.0" y="186.5" width="273.6" height="16.0" fill="#12b886" opacity="1.00" rx="3.0"/>
+<text x="491.6" y="199.0" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.23×  ctx=1024   (3.57 → 2.91 ms)</text>
+<rect x="210.0" y="208.5" width="246.2" height="16.0" fill="#12b886" opacity="1.00" rx="3.0"/>
+<text x="464.2" y="221.0" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.10×  ctx=4096   (6.85 → 6.21 ms)</text>
 <text x="194.0" y="266.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">Attention impl</text>
 <text x="194.0" y="281.5" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">(HF sdpa → split-KV)</text>
 <rect x="210.0" y="251.5" width="319.6" height="16.0" fill="#f59f00" opacity="1.00" rx="3.0"/>

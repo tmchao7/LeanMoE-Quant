@@ -13,22 +13,22 @@
       "note": "字节下限 [T] ÷ 实测可达带宽"
     },
     "fp16_cudagraph_1024": {
-      "value": 3.5881,
+      "value": 3.568,
       "source": "results/EXP-p4b-01-truncation__bit_width=fp16_execution=cudagraph_ctx=1024/result.json → latency.per_token_p50_ms",
       "note": null
     },
     "fp16_cudagraph_4096": {
-      "value": 6.8269,
+      "value": 6.8513,
       "source": "results/EXP-p4b-01-truncation__bit_width=fp16_execution=cudagraph_ctx=4096/result.json → latency.per_token_p50_ms",
       "note": null
     },
     "w8a16_cudagraph_1024": {
-      "value": 3.0124,
+      "value": 2.912,
       "source": "results/EXP-p4b-01-truncation__bit_width=w8a16_execution=cudagraph_ctx=1024/result.json → latency.per_token_p50_ms",
       "note": null
     },
     "w8a16_cudagraph_4096": {
-      "value": 6.2702,
+      "value": 6.2141,
       "source": "results/EXP-p4b-01-truncation__bit_width=w8a16_execution=cudagraph_ctx=4096/result.json → latency.per_token_p50_ms",
       "note": null
     },
@@ -48,7 +48,7 @@
       "note": null
     },
     "fp16_eager_1024": {
-      "value": 9.8841,
+      "value": 8.1179,
       "source": "results/EXP-p4b-01-truncation__bit_width=fp16_execution=eager_ctx=1024/result.json → latency.per_token_p50_ms",
       "note": "E7 同一轮的 eager 臂（P2j 刷新 VOID，保留 pre-P2i 规范值）"
     },

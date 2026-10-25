@@ -50,11 +50,12 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 | # | 杠杆 | 实测 | 口径 | 出处 |
 | --- | --- | --- | --- | --- |
 | 1 | **执行轴**（eager → cudagraph，同一实现、**同一轮**） | **2.43×** @1024 / **1.35×** @4096 | fp16：9.8841 → 4.0670 / 9.8716 → 7.3211 ms；`host_share` 67.3% → 1.4%。★ 用归档里那一轮的两个 payload，**不**用"pre-P2i eager vs post-P2j graph"（跨轮，会造出假的 2.75×） | 归档 `results/EXP-p2j-refresh/archive/EXP-p4b-01-*`；[EXP-p4b-01](experiments/EXP-p4b-01-truncation.md) §2.8.2 |
-| 2 | **量化**（w8a16+lm_head vs fp16，图内 kernel 臂） | **1.2223×** @1024 / **1.0994×** @4096 | 同一实现只换 bit-width；★ 2026-10-25 F5 采纳刷新（22/22、canary −0.058%） | 同上 §F5 刷新（采用列 3.5628 → 2.9149 / 6.8445 → 6.226） |
-| 3 | **注意力实现**（HF sdpa → 自研 split-KV，图内） | **1.5055×** @1024 / **1.4284×** @4096（w8a16 格） | vs **同格 fp16**；最好格 **2.42× / 3.99×** vs fp16×sdpa（★ F5 采纳后，F1+F2+F4+F5 默认开） | [EXP-p4c-01](experiments/EXP-p4c-01-in-graph-attention.md) §F5 刷新 |
+| 2 | **量化**（w8a16+lm_head vs fp16，图内 kernel 臂） | **1.2227×** @1024 / **1.0968×** @4096 | 同一实现只换 bit-width；★ 2026-10-25 E6 采纳刷新（23/23、canary −0.427%；E6 不作用 sdpa 格，本行只有轮噪声级移动） | 同上 §E6 刷新（采用列 3.5660 → 2.9165 / 6.8329 → 6.2298） |
+| 3 | **注意力实现**（HF sdpa → 自研 split-KV，图内） | **1.5086×** @1024 / **1.4609×** @4096（w8a16 格） | vs **同格 fp16**；最好格 **2.44× / 4.25×** vs fp16×sdpa（★ E6 采纳后，F1+F2+F4+F5+E6 默认开） | [EXP-p4c-01](experiments/EXP-p4c-01-in-graph-attention.md) §E6 刷新 |
 | 4 | **融合 RMSNorm**（7 kernel → 1 kernel） | **1.2358×** 全步；kernel/步 **994 → 539** | 同进程交错 A/B，**15/15 轮获胜**；同一个 cudagraph 格在 P2j 前后 **4.0670 → 3.5881 ms（1.13×）**、采纳刷新后 **3.5421 ms** 是它的端到端兑现 | [EXP-p4c-02](experiments/EXP-p4c-02-elementwise-tail.md) §5.6 |
 | 5 | **KV 直写**（32 aten launch → 16 triton） | kernel 格 **−1.8~−3.0%**（w8a16×kernel **1.5586 → 1.5116 ms**） | F4 独立进程 A/B **5/5 对**（off 1.5576 → on 1.5118，**−2.94%**，canary 0.154%）；刷新轮 23/23、canary 0.336%；kernels/步 345→**329** | [EXP-p4c-01](experiments/EXP-p4c-01-in-graph-attention.md) §F4 |
 | 6 | **lm_head 量化**（0.206 GB fp16 → W8 g128） | kernel 格 **1.5116 → 1.4706 / 1.7626 → 1.7165 ms**（**−41/−46 µs**） | F5 独立进程 A/B **5/5 对**（off 1.5329 → on 1.4696，**−4.13%**，canary 0.131%；前两轮宿主机共租 host 尖峰 fail-closed 作废）；三链精度全过（KL 6.1e-5、PPL +0.0088%、MMLU −0.50 点） | [EXP-p1-06](experiments/EXP-p1-06-lm-head-w8.md)；`results/EXP-f5-ab-20261025/` |
+| 7 | **KV INT8 读路径**（per-token 对称 int8 + scale 折叠，E6） | kernel 格 **1.4706 → 1.4602 / 1.7165 → 1.6075 ms**（**−10.4/−109.0 µs**） | E6 独立进程 A/B 两 ctx 各 **5/5 对**（@4096 **−6.54%**，@1024 −0.78%；run1 因 capture 期初始化作废已档）；门两 ctx PASS（KL 0.0013/0.0006，forced 轨迹口径）；kernels/步 329→**345**（+16 镜像写）；收益兑现字节地板的 **65%/27%** | [EXP-p5-01](experiments/EXP-p5-01-kv-int8.md)；`results/EXP-e6-ab-4096-run2/` |
 | 5 | **投影 kernel 修复**（每元素 gather → 每 tile 装载+广播） | 每调用 **8.14 → 5.15 µs**（**523 → 826 GB/s**） | 图内配置扫描；模型桶 0.5245 → 0.3254 ms | [EXP-p4c-01](experiments/EXP-p4c-01-in-graph-attention.md) §5.4 |
 
 ![每条杠杆各自的同轮 A/B](docs/figures/fig1_per_axis_speedups.svg)
@@ -68,9 +69,9 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 
 | 量 | 值 | 出处 |
 | --- | --- | --- |
-| E7 步级量化收益（w8a16，图内） | **1.2223×** / 1.0994×（F5 采纳刷新） | [EXP-p4b-01](experiments/EXP-p4b-01-truncation.md) §F5 刷新 |
-| 权重流占一个 graph 步的比例 | **41.2%**（1024）/ **25.1%**（4096） | F5 刷新 payload：w8a16×kernel 1.4706/3.5655、1.7165/6.8396（同一公式：量化步 / fp16 sdpa 步） |
-| ⇒ 完美权重路径的**结构性上限** | **~1.70×** / **~1.34×** | 同上（F5 把 lm_head 的收益落袋后，剩余余量收窄——上限是"当前配置还能走多远"的界） |
+| E7 步级量化收益（w8a16，图内） | **1.2253×** / 1.1025×（E6 采纳刷新；E6 不作用 sdpa 格，变化为轮噪声+E7 自身格刷新） | [EXP-p4b-01](experiments/EXP-p4b-01-truncation.md) |
+| 权重流占一个 graph 步的比例 | **40.9%**（1024）/ **23.5%**（4096） | E6 刷新 payload：w8a16×kernel 1.4602/3.5660、1.6075/6.8329（同一公式：量化步 / fp16 sdpa 步） |
+| ⇒ 完美权重路径的**结构性上限** | **~1.69×** / **~1.31×** | 同上（E6 把 KV 读流量减半后，量化步分母进一步缩小——上限是"当前配置还能走多远"的界） |
 | 专家 GEMV 实测占一步 GPU 时间 | **1.540 ms / 3.5446 ms = 43.4%**（F4 刷新分母） | [docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md) §4.3 |
 | kernel 级量化收益（专家 GEMV，隔离测） | 96.3 → 63.5 µs = **1.52×** | 同上 §3 |
 | ⇒ 该 kernel 解释了步级收益的 | **89.6%**（16 层 × Δ0.0328 ms = 0.525 / 0.586 ms，F4 刷新步级差） | 同上 §4.3 |
@@ -139,10 +140,12 @@ lm_head 直接决定 logits 却仍然近无损（KL 6.1e-5、top-1 165/165 全�
 ## 7. 一句话总结
 
 > 在一个 82.6 ms → 1.6 ms 字节下限的带宽受限 decode 上，本项目用**执行方式、量化、
-> 注意力实现、融合 norm、KV 直写、lm_head 量化**六条各自独立的 A/B 把差距收窄，并**实测出**
-> "权重只占一步 ~41% ⇒ 当前配置的量化上限 ~1.70×"这个结构性边界；其中九成步级收益已定位到
-> 具体 kernel。量化这条杠杆**只兑现到 8-bit**：4-bit 专家量化（RTN 与 GPTQ）、MXFP4 块尺度
-> 连同 ≤25% 整层 W8 退路都过不了精度门（EXP-p1-05 / EXP-p3-02），w8a8@4096 因 10 窗复测
-> 不稳健被 de-publish——所以 4-bit 延迟收益不发布、8-bit 激活量化不上墙。
-> 最佳格 **2.42×/3.99×**（w8a16+lm_head × 自研 attention × CUDA Graph vs fp16×sdpa）。
-> 自研 Triton kernel 全部有 parity 门，负结果与阻断同样留在库里。
+> 注意力实现、融合 norm、KV 直写、lm_head 量化、KV INT8**七条各自独立的 A/B 把差距收窄，
+> 并**实测出**"权重只占一步 ~41% ⇒ 当前配置的量化上限 ~1.69×"这个结构性边界；其中九成
+> 步级收益已定位到具体 kernel。量化这条杠杆**只兑现到 8-bit**：4-bit 专家量化（RTN 与
+> GPTQ）、MXFP4 块尺度连同 ≤25% 整层 W8 退路都过不了精度门（EXP-p1-05 / EXP-p3-02），
+> w8a8@4096 因 10 窗复测不稳健被 de-publish——所以 4-bit 延迟收益不发布、8-bit 激活量化
+> 不上墙。KV INT8（cache 侧、per-token 对称 + scale 折叠）是权重之外唯一过门的量化表面
+> （@4096 −109 µs/−6.4%）。
+> 最佳格 **2.44×/4.25×**（w8a16+lm_head+KV-int8 × 自研 attention × CUDA Graph vs
+> fp16×sdpa）。自研 Triton kernel 全部有 parity 门，负结果与阻断同样留在库里。

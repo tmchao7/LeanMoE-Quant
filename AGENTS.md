@@ -2,10 +2,28 @@
 
 Compact guide for agent sessions working in LeanMoE-Quant. Read this before editing.
 
-## 0. Sixty-second state (2026-10-08)
+## 0. Sixty-second state (2026-10-25 晚)
 
-Phases 0, 1 (accuracy gate), 2 (kernels) and 4b (E7) are **executed**. Two headline results are
-settled — do not re-derive them and do not re-run their cells:
+**★ E6（KV INT8）已全链闭环并采纳（v7 canonical）**——量化与融合两条叙事的**最后一块已落**：
+
+- **K 门 8/8**（写路径逐位 + 读路径 parity 1e-3）；**门两 ctx PASS**（v3 forced 轨迹口径：
+  KL 0.001276/0.000622、top-1 0.9818/0.9879——比 w8a16 权重门 0.001361 还干净）；
+  **A/B 两 ctx 各 5/5 VALID**（@4096 **−112.4 µs/−6.54%**、@1024 −11.5 µs/−0.78%，
+  兑现字节地板 65%/27%）；翻默认（七 True）+ 无 env 金丝雀 1.6053 + 刷新 23/23
+  （canary −0.427%）。记录 `experiments/EXP-p5-01-kv-int8.md`（方法学三课全档：
+  首轮假 0 / v2 自由贪心复利 / A/B run1 capture 期初始化）。
+- **v7 canonical**：w8a16×kernel **1.4602/1.6075 ms**；最好格 **2.4421/4.2506**
+  （@4096 破 4×）；E7 1.2253/1.1025；份额 40.9%/23.5% ⇒ 上限 ~1.69×/~1.31×；
+  kernels/步 345（+16 = int8 镜像写）。两条口径工件如实记录（`kv_read_bytes` 仍按
+  fp16 记账；`vram.kv_gib` 检查点法出负值）——见 EXP-p5-01 结果节。
+- **算子侧剩余空间已预注册成 F7**（o_proj 16 次独立 dequant-GEMV，~36 µs gap，
+  `docs/FUSION_OPPORTUNITIES.md` §F7，未实施）；config 类（gate_up/down_sum）已判死。
+- **项目状态 = 收尾**：量化（权重 w8/w8a8/w4/MXFP4 + KV int8）与融合（七开关）
+  两条线系统性探完，剩余为收尾文档（PORTFOLIO/README/HANDOFF 终态）与
+  未批项（E5/E8、P2c/P2k、R5/R7）。
+
+Phases 0, 1 (accuracy gate), 2 (kernels) and 4b (E7) are **executed**. Headline settled results
+— do not re-derive them and do not re-run their cells:
 
 - **E2 (`EXP-p2-01`) — `refuted`.** Fusing the dequant into the GEMV is *not* the 1.3–2× the
   matrix predicted: in the eager cells the fused arm is **5% slower** (`host_share` 71.7%,
@@ -174,11 +192,11 @@ in `PLAN.md`; **execution status lives here and in the records, not in `PLAN.md`
 | cudagraph feasibility with the HF MoE path | `blocked` **by design** (hf + dynamic cache cannot capture) | `experiments/EXP-p0-03-baseline-cudagraph.md` |
 | Accuracy gate — the only source of `GATE_CITATIONS` | done — **v3** (2026-10-24, R3 10-window re-adjudication): `w8a8@4096` **de-published** (10-window KL mean 0.0262 > 0.01 ⇒ 5-window PASS not robust; row now cites the 10-window artifact, verdict FAIL); all other rows unchanged | `experiments/EXP-p1-04-prompt-set-gate.md` |
 | Precision side: error attribution, mixed bits, W8/W4 sweep | done (the old `EXP-p1-01` protocol was superseded by `p1-04`) | `experiments/EXP-p1-02-quant-error-attribution.md`, `experiments/EXP-p1-03-quant-mixed-bits.md`, `experiments/EXP-p1-01-w8-w4-accuracy.md` |
-| Attention path: eager, kernel, in-graph | done — ★ 2026-10-24 F4 refresh: eager 2.5642/2.9275（sdpa 格不动），kernel **2.1946/2.4326 ms**（F4 前 2.2406/2.4779） | `experiments/EXP-p2-03-decode-attention.md`, `experiments/EXP-p2-04-eager-attention.md`, `experiments/EXP-p2-05-attn-kernel.md` |
+| Attention path: eager, kernel, in-graph | done — ★ 2026-10-25 E6 refresh: kernel **2.2028/2.3484 ms**（@1024 ≈噪声级，@4096 −84 µs——KV int8 读路径；F4 轮 2.1946/2.4326 留档）；sdpa 格不动 | `experiments/EXP-p2-03-decode-attention.md`, `experiments/EXP-p2-04-eager-attention.md`, `experiments/EXP-p2-05-attn-kernel.md` |
 | Grouped MoE GEMV (fp16) | done — ★ 2026-10-24 adoption refresh: 4.0829 → 3.6828 → **3.5340 ms** | `experiments/EXP-p2-02-moe-grouped-gemm.md` |
 | E2 dequant fusion, 6 cells, 8-bit **and** 4-bit | done — **`refuted`**; P2j refresh **VOID** for all 6 cells (eager/host-bound) ⇒ pre-P2i values kept, verdict unchanged | `experiments/EXP-p2-01-dequant-fusion.md` |
 | P3 wiring + E7, 16/16 cells | done — **judged**; **v6** (2026-10-25 F5 adoption): E7 **1.2223/1.0994**（w8a16 cg **2.9149/6.226**、fp16 cg **3.5628/6.8445**）; eager cells pre-P2i (refresh VOID — host contention, P2k); `w8a8@4096` **de-published** (R3, evidence only) | `experiments/EXP-p4b-01-truncation.md` |
-| In-graph attention × quantization, 8 cells | done — **supported**; **canonical = v6** (2026-10-25 F5 adoption): quantized **1.2235/2.4244** @1024, **1.0998/3.9851** @4096, best cell **2.42× / 3.99×** vs fp16 × sdpa（w8a16×kernel **1.4706/1.7165 ms**, kernels/步 **329**） | `experiments/EXP-p4c-01-in-graph-attention.md` |
+| In-graph attention × quantization, 8 cells | done — **supported**; **canonical = v7** (2026-10-25 E6 adoption): quantized **1.2227/2.4421** @1024, **1.0968/4.2506** @4096, best cell **2.44× / 4.25×** vs fp16 × sdpa（w8a16×kernel **1.4602/1.6075 ms**, kernels/步 **345**） | `experiments/EXP-p4c-01-in-graph-attention.md` |
 | E4 routing overhead | done — **supported**: 44.2% of GPU busy, and **quantization-invariant** (4.478/4.512/4.526/4.555 ms for fp16/w8a16/w8a8/w4a16) | `experiments/EXP-p4-01-moe-routing-overhead.md` |
 | The elementwise/copy tail (0.90 ms, "~330 kernels") | done — classified: it is **~13 named families × 16–83 calls/step**, not a flat tail; module-level attribution VOID (its own K1 failed) | `experiments/EXP-p4c-02-elementwise-tail.md` |
 | W4 expert calibration (4-bit) | **done 2026-10-23 — negative result** (RTN / GPTQ / ≤25% whole-layer W8 fallback all fail the gate; no latency published) | `experiments/EXP-p1-05-w4-expert-calibration.md` |
@@ -214,7 +232,7 @@ that the science was not done — read the record first.
 | **S1** | ✅ **done 2026-10-24** (Block A): A1 F2 A/B re-take **VALID** (off 1.9384 → on 1.8406 ms, −5.05%, 3/3 pairs, canary −0.12%) → A2 refresh **23/23 OK** (canary 0.30%, host ≤3.4%) → A3 `FUSION_DEFAULTS` four True (`938de63`; no-env canaries: kernel 1.5590 Δ+0.03% `packed_qkv_effective=True`, sdpa 2.9542 Δ−0.14% effective=False) → A4 numbers synced per `ADOPTION_SYNC_2026-10-24.md` → merge `main`. Headline: w8a16×kernel **1.5586/1.8140 ms** (kernels/step 539→345), E7 **1.1974/1.0912** | — | all acceptance criteria met | done |
 | **S2** | ✅ **done 2026-10-24**: F4 KV direct write adopted (pre-registered rule picked it at 50.3 µs capturable; GPU K-gate 9/9 bitwise; A/B **VALID** off 1.5576 → on 1.5118 ms, −2.94%, 5/5 pairs, canary 0.154%; refresh 23/23, canary 0.336%; `FUSION_DEFAULTS` five True; kernels/步 345→329). Ledger re-run: latency-class vein mined out — next leader is gate_up 28.5 µs (config class) | — | all acceptance criteria met (tokens_equal + K1 + canary) | done |
 | **S3** | ✅ **done 2026-10-25（F5 lm_head w8 采纳）**：三链 PASS（KL 6.1e-5/6.6e-5+top1 165/165；全集 PPL +0.0088%；MMLU −0.50 点）→ A/B VALID（−63.3 µs，−4.13%，5/5；前两轮宿主机共租尖峰 fail-closed 作废）→ 翻默认（六 True，`b816fc7`）→ 刷新 22/22（canary −0.058%）→ 回填（`ADOPTION_SYNC_F5`）。canonical **1.4706/1.7165 ms**；门行在独立 `LMHEAD_GATE_CITATIONS`（`EXP-p1-06`）。E6/E8 见 S4/ROADMAP | the last piece of the quantization lever | **new gate row from a new measurement** ✓（独立门表，EXP-p1-06 工件） | done |
-| **S4** | ✅ **kernel 工程完成（2026-10-25 晚）**：写路径 `kv_int8_write` K 门 4/4 逐位 + 读路径 int8 split-KV parity 4/4（vs fp64 oracle 1e-3，含部分填充/多 split）+ cache 写散布/bulk = **8/8**（`2269c11`/`0f1a025`/`8a844d6`）；接线全落（`LEMOQ_KV_INT8` 第七开关默认关 + `KV_INT8_GATE_CITATIONS` 空表 fail-closed + probe `e6_kvint8` 轨迹口径臂）。★★ **门测量首轮无效（假 0）**：probe 轨迹用 DynamicCache ⇒ 换核 decode 回退原路 int8 从未执行——**续作见 [`HANDOFF_2026-10-25`](docs/handoff/HANDOFF_2026-10-25.md) §9**（StaticCache 轨迹修复 → 门 → A/B → 翻默认） | 最大已声明杠杆（@4096 ≈ −172 µs/步，−10%） | kernel 逐位过 K 门 ✓ → 门（轨迹口径，待）→ A/B（待）→ 翻默认（待） | kernel done；门/A/B 待窗 |
+| **S4** | ✅ **done 2026-10-25（E6 KV INT8 全链闭环并采纳，v7 canonical）**：K 门 8/8 → 门两 ctx PASS（v3 **forced 轨迹**口径 KL 0.001276/0.000622、top-1 0.9818/0.9879，落表 `KV_INT8_GATE_CITATIONS` `552d2ac`）→ A/B 两 ctx 各 5/5 VALID（@4096 **−112.4 µs/−6.54%**、@1024 −11.5 µs/−0.78%）→ 翻默认（七 True `d4d02fb`）→ KV8=1 刷新 23/23（canary −0.427%）→ v7 回填。方法学三课全档（假 0 / 自由贪心复利 / capture 期初始化→weakref 身份语义 `8aab5c1`）；两条口径工件如实记录（kv_read_bytes/kv_gib）。E6 记录 = `experiments/EXP-p5-01-kv-int8.md` | 最大已声明杠杆落袋：@4096 −109 µs/步（−6.4%，兑现地板 65%） | 门（forced 轨迹新测量）✓ → A/B ✓ → 翻默认 ✓ → 刷新 ✓ | done |
 | **R3** | ✅ **done 2026-10-24 — de-publish 裁决（是）**：`w8a8@4096` 门行重指向 10 窗复测工件（KL 0.026159 ⇒ 推导 FAIL，top-1 0.963636 与 5 窗同值），已发布的 8.8232 ms 撤销；该格照跑、latency 只进 `gate_failed_evidence`（w4a16 同款语义）；引用来源集中在 `GATE_CITATION_SOURCES` | 10 窗重测显示 5 窗 PASS 不稳健（w7 重尾 0.2247），用户批准撤销 | `benchmarks/runner.py` 门表 + `experiments/EXP-p1-04` v3 + `EXP-p4b-01` §R3 | done |
 
 ## 5. Wrap-up (docs/config only — **done 2026-10-07**)
