@@ -346,8 +346,11 @@ def test_quantized_config_without_gate_citation_is_refused(capsys):
 
 
 def test_quant_spec_includes_lm_head_only_when_switch_on(monkeypatch):
-    """F5：`LEMOQ_LMHEAD_W8=1` 才把 lm_head 加进量化 targets（默认关 = 原行为）。"""
-    monkeypatch.delenv("LEMOQ_LMHEAD_W8", raising=False)
+    """F5：`LEMOQ_LMHEAD_W8` 决定 lm_head 是否进量化 targets（env 覆盖默认）。
+
+    ★ F5 采纳后默认 True——off 语义用 env=0 显式表达（N6：钉机制不钉默认值）。
+    """
+    monkeypatch.setenv("LEMOQ_LMHEAD_W8", "0")
     off = quant_spec_for_cfg({"bit_width": "w8a16", "group_size": 128})
     assert "lm_head" not in off.targets and off.keep_lm_head_fp16 is True
     monkeypatch.setenv("LEMOQ_LMHEAD_W8", "1")
@@ -417,7 +420,7 @@ def test_correctness_conjoins_lm_head_gate_when_effective(monkeypatch):
     import benchmarks.runner as R
 
     cfg = {"bit_width": "w8a16", "group_size": 128, "ctx": 1024}
-    monkeypatch.delenv("LEMOQ_LMHEAD_W8", raising=False)
+    monkeypatch.setenv("LEMOQ_LMHEAD_W8", "0")  # off 语义显式给 0（F5 采纳后默认 True）
     assert R.correctness_for_cell(cfg, consistency_passed=True)["gate"] == "PASS"
 
     monkeypatch.setenv("LEMOQ_LMHEAD_W8", "1")
@@ -974,12 +977,15 @@ def test_weight_bytes_actual_counts_quantized_buffers():
     assert without_buffers < plain, "量化吃掉了 linears 的参数（它们进了 buffer）"
 
 
-def test_quant_spec_excludes_router_from_targets():
-    """★ targets 必须是 `(attention, experts)`：p1-04 的门就是不含 router 测的。
+def test_quant_spec_excludes_router_from_targets(monkeypatch):
+    """★ targets 的**基础**形态不含 router：p1-04 的门就是不含 router 测的。
 
     `SchemeSpec.from_flags` 的默认值多一个 router，而只量化 router 就能让 W8 的 KL
     动 14-74%（EXP-p1-01 实测）—— 用默认值等于换了一个没过门的配置。
+    ★ F5 采纳后 `lm_head_w8` 默认 True —— 本测试钉的是 router 排除，用 env=0
+    显式回到基础 targets（N6 教训：钉机制，不写死默认值）。
     """
+    monkeypatch.setenv("LEMOQ_LMHEAD_W8", "0")
     spec = quant_spec_for_cfg({"bit_width": "w8a16", "group_size": 128})
     assert spec is not None
     assert spec.targets == ("attention", "experts")
@@ -1003,7 +1009,7 @@ def test_quantize_for_cfg_honours_lm_head_switch(monkeypatch):
     """
     import benchmarks.runner as R
 
-    monkeypatch.delenv("LEMOQ_LMHEAD_W8", raising=False)
+    monkeypatch.setenv("LEMOQ_LMHEAD_W8", "0")  # F5 采纳后默认 True——off 语义显式给 0
     off_report = quantize_for_cfg(_fresh_olmoe(), {"bit_width": "w8a16", "group_size": 32})
     assert off_report.replaced.get("lm_head", 0) == 0
     assert R.lm_head_w8_effective("w8a16", off_report) is False
@@ -1015,11 +1021,13 @@ def test_quantize_for_cfg_honours_lm_head_switch(monkeypatch):
     assert "lm_head" in on_report.realized_by_target, "字节账没跟上 lm_head 的量化"
 
 
-def test_quantize_for_cfg_replaces_and_model_still_forwards(tiny_olmoe):
+def test_quantize_for_cfg_replaces_and_model_still_forwards(tiny_olmoe, monkeypatch):
     import torch
 
     from lemoq.quant.linear import QuantLinear
 
+    # F5 采纳后默认 True——本测试钉基础量化路径，显式 env=0（N6：不写死默认值）
+    monkeypatch.setenv("LEMOQ_LMHEAD_W8", "0")
     report = quantize_for_cfg(tiny_olmoe, {"bit_width": "w8a16", "group_size": 32})
     assert report is not None, "量化 hook 应当返回 QuantizeReport"
     assert report.replaced.get("attention", 0) > 0 and report.replaced.get("experts", 0) > 0
