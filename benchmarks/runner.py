@@ -365,7 +365,29 @@ LMHEAD_GATE_CITATIONS: dict[int, dict[str, Any]] = {
 #   fp16 格同样被它作用）。接线时为空（fail-closed：开关开 + 无门实测 ⇒ 加载前拒绝）。
 #   数值只能来自 `results/EXP-p5-01-kv-int8/` 的门工件（轨迹口径：decode 步 logits 的
 #   KL/top-1 对 fp16 轨迹——teacher forcing 是 prefill，KV 扰动不在那个口径里）。
-KV_INT8_GATE_CITATIONS: dict[int, dict[str, Any]] = {}
+#   ★ 2026-10-25 门实测落表（v3，**forced 轨迹**口径：臂喂 fp16 参考轨迹的 token 流，
+#   位置可比、与权重门的 teacher forcing 同构；StaticCache 会话。首轮假 0 与 v2 自由
+#   贪心的复利口径（KL~7）都是方法学教训，见 EXP-p5-01 记录）：
+#     @1024 KL 0.001276 / top-1 0.981818（3/165 翻）；@4096 KL 0.000622 / top-1 0.987879
+#     （2/165 翻）——两 ctx PASS（门 0.01 / 0.95），且每窗单独过（max 0.00423）。
+#   ★ 本表只解锁 A/B 的 ON 臂——采纳（翻默认）仍以 A/B VALID（Δ>MAD）+ 刷新为准
+#   （EXP-p5-01 预注册；E6 无 PPL/MMLU 链，轨迹门就是预注册的精度判据）。
+KV_INT8_GATE_CITATIONS: dict[int, dict[str, Any]] = {
+    1024: {
+        "kl": 0.0012765,
+        "top1": 0.9818182,
+        "rmsnorm": "fused",
+        "source": "EXP-p5-01-kv-int8/gate_e6_kvint8_v3.json",
+        "arm": "kv_int8_per_token",
+    },
+    4096: {
+        "kl": 0.0006219,
+        "top1": 0.9878788,
+        "rmsnorm": "fused",
+        "source": "EXP-p5-01-kv-int8/gate_e6_kvint8_ctx4096_v3.json",
+        "arm": "kv_int8_per_token",
+    },
+}
 
 
 def lm_head_w8_effective(bit_width: str, qreport: Any = None) -> bool:

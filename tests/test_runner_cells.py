@@ -415,6 +415,37 @@ def test_lmhead_gate_citations_match_the_artifacts():
         assert (RESULTS / cited["source"]).exists(), "引用的工件路径不存在"
 
 
+def test_kv_int8_gate_citations_match_the_artifacts():
+    """`KV_INT8_GATE_CITATIONS` 与 EXP-p5-01 的 v3（forced 轨迹）工件逐字对齐。
+
+    照 LMHEAD 钉法：工件不在（fresh clone）时跳过。★ 额外钉 forced 口径的自证——
+    每窗 `kv_int8_runs` 必须 > 0（首轮假 0 的教训：DynamicCache 回退时 KL 恰 0.0）。
+    """
+    import benchmarks.runner as R
+
+    artifacts = {
+        1024: RESULTS / "EXP-p5-01-kv-int8" / "gate_e6_kvint8_v3.json",
+        4096: RESULTS / "EXP-p5-01-kv-int8" / "gate_e6_kvint8_ctx4096_v3.json",
+    }
+    missing = [ctx for ctx, p in artifacts.items() if not p.exists()]
+    if missing:
+        pytest.skip("EXP-p5-01 工件不在本机（results/ 是 gitignored）：缺 ctx=%s" % missing)
+    for ctx, cited in R.KV_INT8_GATE_CITATIONS.items():
+        arm = json.loads(artifacts[ctx].read_text(encoding="utf-8"))["arms"][cited["arm"]]
+        agg = arm["aggregate"]
+        assert abs(agg["kl_mean"] - cited["kl"]) < 5e-7, "ctx=%d 引用 kl != 实测" % ctx
+        assert abs(agg["top1_mean"] - cited["top1"]) < 5e-7, "ctx=%d 引用 top-1 != 实测" % ctx
+        assert gate_from_metrics("w8a16", agg["kl_mean"], agg["top1_mean"]) == "PASS"
+        assert (RESULTS / cited["source"]).exists(), "引用的工件路径不存在"
+        # ★ 假 0 复发自检：每个 wikitext 窗口 int8 decode 都真的执行过（512 = 16 层×32 步）
+        for label, entry in arm["windows"].items():
+            if label.startswith("ones"):
+                continue
+            assert (
+                int(entry.get("kv_int8_runs", 0)) > 0
+            ), "ctx=%d 窗口 %s kv_int8_runs=0——int8 从未执行（假 0 复发）" % (ctx, label)
+
+
 def test_correctness_conjoins_lm_head_gate_when_effective(monkeypatch):
     """F5 生效时 correctness 的门 = 基础门 ∧ lm_head 门；缺 lm_head 门 = FAIL（最后一道闸）。"""
     import benchmarks.runner as R
