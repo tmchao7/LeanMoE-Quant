@@ -728,10 +728,65 @@ def fig3(inputs: dict[str, Any]) -> str:
     return svg.render()
 
 
+def fig4(inputs: dict[str, Any]) -> str:
+    """Seven adopted decode-path levers — same-round A/B step-time reduction.
+
+    ★ 数值口径：每条都是**独立进程·同轮相邻** A/B 的步时降幅（RESULTS.md §2 的行转录，
+    每行的工件引用在 RESULTS.md；E6 @1024 的 −0.78% 因条形太短只在脚注提及）。
+    """
+    levers = [
+        ("fused RoPE", 8.39, "A/B", "fused_rope_ab", "norm"),
+        ("KV INT8 read path (E6, ctx=4096)", 6.54, "5/5 pairs", "EXP-e6-ab-4096-run2", "quant"),
+        ("packed q/k/v GEMM (F2)", 4.81, "3/3 pairs", "EXP-p4c-01 §F2", "attn"),
+        ("lm_head W8 quant (F5)", 4.13, "5/5 pairs", "EXP-f5-ab-20261025", "quant"),
+        ("fused routing top-k (F1)", 3.00, "A/B", "routing_ab", "norm"),
+        ("KV direct write (F4)", 2.94, "5/5 pairs", "EXP-p4c-01 §F4", "attn"),
+        ("skip mask-fill (F1)", 1.33, "A/B", "skip_mask_fill_ab", "norm"),
+    ]
+    svg = Svg(
+        980,
+        420,
+        "Seven adopted levers — same-round A/B step-time reduction",
+        [
+            "Independent processes, adjacent arms, same round; canary drift ≤5%, host_share ≤5% per arm.",
+            "Sources: RESULTS.md §2 (every row cites its artifact). KV INT8 at ctx=1024: −0.78% (5/5).",
+        ],
+    )
+    left, row_h, gap = 250, 30, 10
+    y0 = 96
+    x0, x_max_px, v_max = left + 6, 600.0, 9.0
+
+    def x_of(v: float) -> float:
+        return x0 + (v / v_max) * (x_max_px - x0)
+
+    # 网格线（0/3/6/9%）
+    for gv in (0.0, 3.0, 6.0, 9.0):
+        gx = x_of(gv)
+        svg.line(gx, y0 - 8, gx, y0 + len(levers) * (row_h + gap) - gap + 6)
+        svg.text(
+            gx,
+            y0 + len(levers) * (row_h + gap) + 16,
+            "%.0f%%" % gv,
+            size=10,
+            color=MUTED,
+            anchor="middle",
+        )
+    for i, (name, val, pairs, src, color_key) in enumerate(levers):
+        y = y0 + i * (row_h + gap)
+        svg.text(left, y + row_h * 0.68, name, size=11.5, anchor="end")
+        svg.rect(x0, y, x_of(val) - x0, row_h, COLORS[color_key], radius=3)
+        svg.text(x_of(val) + 8, y + row_h * 0.68, "−%.2f%%" % val, size=11.5, weight="600")
+        # ★ 注释放**固定列**（x=650，不跟随条尾浮动）：条尾 x 最大 ~577、值标签最长
+        #   到 ~640，注记列最长串 650+~190 仍在画布内（跟随式曾被渲染器裁边）。
+        svg.text(650, y + row_h * 0.68, "%s · %s" % (pairs, src), size=9.5, color=MUTED)
+    return svg.render()
+
+
 FIGURES = {
     "fig1_per_axis_speedups.svg": fig1,
     "fig2_to_the_wall.svg": fig2,
     "fig3_kernel_attainment.svg": fig3,
+    "fig4_lever_ab.svg": fig4,
 }
 
 

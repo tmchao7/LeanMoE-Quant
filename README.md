@@ -1,160 +1,122 @@
-# README — LeanMoE-Quant
+# LeanMoE-Quant
 
-> **batch=1 单流 MoE 解码：字节预算（byte budget）驱动的量化与 kernel 优化**
+**Byte-budget-driven quantization + Triton kernel optimization for MoE decode at batch=1.**
+单卡 RTX 5090 上，把 OLMoE-1B-7B（64 专家/top-8）的单请求 decode 从 82.6 ms/token 压到
+**1.46 / 1.61 ms**（ctx 1024/4096），最好格对原生基线 **2.44× / 4.25×**——并实测出这条路的
+结构性上限。每一个数字都有工件、门禁与同轮 A/B 支撑，负结果同样入库。
 
-**一页纸结果（所有数字带出处）见 [RESULTS.md](RESULTS.md)；图在
-[docs/figures/](docs/figures/)。**
+> **EN** — This repo asks *how far quantization can actually take batch-1 MoE decode*, then
+> measures the answer instead of assuming it: six custom Triton kernel families, seven
+> independently A/B-tested levers (all adopted), a measured structural ceiling (~1.69× at
+> ctx=1024, because weights are only ~41% of a decode step), and first-class negative results
+> (every 4-bit route failed the accuracy gate and is published as such).
+>
+> **中文** — 本项目回答"量化在 batch=1 的 MoE decode 上到底能走多远"，并且**测出**答案：
+> 6 个自研 Triton kernel 族、七条各自独立同轮 A/B 的杠杆（全部采纳）、实测的结构性上限
+> （权重只占一步 ~41% ⇒ 完美权重路径也只有 ~1.69×）、以及一等的负结果（4-bit 全系被精度门
+> 挡住并如实发布）。**所有数字只在过正确性门后发布**（硬规则 2）。
 
-状态（2026-10-25 终）：**阶段 0 / 1（精度门）/ 2（kernel）/ 4b（E7）已执行；量化与融合两条线
-系统性探完并全部采纳**——七开关默认开（F1 三项/F2 packed qkv/F4 KV 直写/F5 lm_head w8/
-**E6 KV INT8**）。canonical：**w8a16×kernel 1.4602 / 1.6075 ms**（ctx 1024/4096），
-最好格 **2.44× / 4.25×** vs fp16×sdpa（@4096 破 4×）；头号结论：
-
-- **量化的结构性上限是实测出来的**：权重只占 graph 步的 **40.9% / 23.5%** ⇒ 完美权重路径
-  上限也只有 **~1.69× / ~1.31×**（E6 把 KV 读减半后余量进一步收窄）。4-bit 全系
-  （W4 RTN/GPTQ、MXFP4、≤25% 混合退路）**gate FAIL**，负结果入库不发布；
-- **E6 KV INT8（2026-10-25 采纳）**：cache 侧 per-token 对称 int8 + split-KV kernel 内
-  scale 折叠（读路径零解包），@4096 **−112.4 µs（−6.54%，5/5 对 A/B）**，独立轨迹门
-  KL 0.0006/0.0013 两 ctx PASS——权重之外唯一过门的量化表面；
-- **E7 已判定**：截断效应成立，但**只有融合臂兑现**——`speedup_cudagraph` **1.2253**
-  （ctx=1024）/ **1.1025**（4096）（v7），`host_share` 77.5% → 1.6%；
-- **E2 被否证**：融合反量化不是矩阵预期的 1.3–2×——eager 格里反而慢 4.4%
-  （`host_share` 72.2%、**19,029 kernel/步**，那条路径是 host/launch 受限的）；
-- **E4 已判定**：路由/打包是 hf/gather 基线里最大的桶（**4.478 ms = GPU busy 的 44.2%**），
-  且**量化不变**（fp16 → w4a16 只差 1.7%）——它就是计划预测的那个上限；
-- **`EXP-p4c-01` 支持**：图内把 HF sdpa 换成自研 split-KV，量化格 **1.5086× / 1.4609×**
-  （v7）；**`EXP-p4c-02`**：自研融合 RMSNorm 全步 **1.2358×**，kernel/步 **994 → 539**，
-  七开关采纳后到 **345**。
-
-进度、工件与"还没做什么"见 [AGENTS.md](AGENTS.md) 的 §0/§3；权威记录是
-`experiments/<EXP-ID>.md`。**未做**：E5 专家敏感度、E8 跨带宽（V100）、dense 曲线、
-量化 × batch 衰减（FP8/MXFP4 与 W4 已判负，E6 KV INT8 已采纳）。（★ 2026-10-10：
-G2 batch 曲线与 G3 occupancy 已测，见 [RESULTS.md](RESULTS.md) §6。）
-**ncu 性能计数器在本机被宿主策略阻断**
-（`RmProfilingAdminOnly: 1` + 容器无 `CAP_SYS_ADMIN`），已交出替代的 kernel 级证据：
-[docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md)。
-
-绝不把本机 Mac 的测试当成 GPU 实测；`results/` 是机器本地工件（gitignored），不进 git。
+`LLM inference | quantization (W8 / KV-INT8) | Triton kernels | CUDA Graph | MoE | batch=1 decode`
 
 ---
 
-## 30 秒版（点进来先看这里）
+## Key results 关键结果
 
-**MoE 大模型单卡推理优化**（模型：OLMoE-1B-7B · 显卡：RTX 5090 × 1 · 自研 Triton kernel）
+| | value 数值 | scope 口径 | source 出处 |
+| --- | --- | --- | --- |
+| Decode step (canonical) 解码步 | **1.4602 / 1.6075 ms** (ctx 1024/4096) = 685 / 622 tok/s | w8a16 + lm_head w8 + KV-INT8 × split-KV × CUDA Graph | [RESULTS.md](RESULTS.md) §2 |
+| Best cell vs native 最好格 | **2.44× / 4.25×** vs fp16×sdpa | same round 同轮 | [RESULTS.md](RESULTS.md) §2 |
+| Byte floor 字节下限 | 1.60 ms（52× from the 82.6 ms eager start） | measured read BW 1560.3 GB/s，非规格值 | [RESULTS.md](RESULTS.md) §1 |
+| Quantization ceiling 量化上限 | **~1.69× / ~1.31×**（weights = 40.9% / 23.5% of a step 权重占步份额） | **measured**，not derived 不是推演 | [RESULTS.md](RESULTS.md) §3 |
+| Accuracy 精度 | KL 0.0014 · PPL +0.0088%（全集）· MMLU −0.50 pt；KV-INT8 KL 0.0006/0.0013 | three chains + per-surface gates 三链+分表面门 | [RESULTS.md](RESULTS.md) §3.1 |
+| Negative results 负结果 | 4-bit 全系 FAIL（W4 RTN/GPTQ、MXFP4、混合退路）；w8a8@4096 de-published；融合反量化被否证 | evidence-only, no latency published 只进证据不发布延迟 | [RESULTS.md](RESULTS.md) §5 |
 
-`大模型推理优化 | 算子融合 | 量化(W8A16) | Triton | CUDA Graph | 高性能计算 | MoE`
+![Seven adopted levers — same-round A/B step-time reduction](docs/figures/fig4_lever_ab.svg)
 
-- 自研 **4 个 Triton kernel**（grouped MoE GEMV / 融合反量化 GEMM / split-KV decode attention /
-  融合 RMSNorm），全部通过 `1e-3` 数值 parity 门。
-- **融合 RMSNorm：HF 的 7 个 kernel 合成 1 个**，全步 **1.24×**、kernel 数 **994→539**，
-  同进程交错 A/B **15/15 轮获胜**；torch 原生 `F.rms_norm` 对照反而慢 5%。
-- **无 gather 的 MoE decode kernel**（expert id 只做指针算术，保持 CUDA Graph 可捕获）：
-  消除 **3.22 GB/token** 的 gather 复制，per-token **5.26→4.07 ms（1.29×）**。
-- **W8A16 量化端到端 1.19×**，并**实测出上限只有 1.74×**（权重仅占一步 42%），
-  把 **90%** 收益归因到单个 kernel（专家 GEMV **1.52×**）；
-  精度三链闭合：KL **0.00136**、PPL **+0.067%**、MMLU 200 题 **−1.0 个点**。
-- **4-bit 被精度门挡住（负结果）**：W4 RTN / GPTQ / ≤25% 整层 W8 退路在 5090 上都过不了门
-  （top-1 0.903 / 0.915 / 0.933），所以 4-bit 的延迟收益**不发布**——量化这条杠杆只兑现到 8-bit。
-- **已测未采纳（下一步）**：三项融合（RoPE / routing / mask-fill）A/B 已测、代码已写、默认关，
-  账面 **≈0.24 ms（12.5%）** 未兑现，见 [FUSION_OPPORTUNITIES](docs/FUSION_OPPORTUNITIES.md) §F1。
+![Per-axis speedups](docs/figures/fig1_per_axis_speedups.svg)
 
-每个数字的出处：**[RESULTS.md](RESULTS.md)**（一页纸，逐条带工件路径）；图：
-**[docs/figures/](docs/figures/)**；面试必问三题的标准答法与岗位映射：
-**[docs/apply/PORTFOLIO.md](docs/apply/PORTFOLIO.md)**。
+![To the bandwidth wall](docs/figures/fig2_to_the_wall.svg)
+
+![Kernel bandwidth attainment](docs/figures/fig3_kernel_attainment.svg)
+
+> Figures are regenerated from artifacts by `python -m tools.make_figures` — never hand-edited.
+> 图由工件重生成，从不手改（`docs/figures/inputs.json` 记录每个数的来源）。
 
 ---
 
-## 这个项目在问什么
+## The seven levers 七条杠杆（all adopted 全部采纳）
 
-**立论**：batch=1 解码是纯带宽受限（memory-bound）——每生成一个 token，必须把参与计算的
-权重完整流一遍。因此优化的唯一主线是**减少每 token 的字节数**；量化是主杠杆，
-反量化与 GEMM 的融合决定这个杠杆是否真兑现。
+| # | lever 杠杆 | same-round A/B 步时降幅 | note 备注 |
+| --- | --- | --- | --- |
+| 1 | CUDA Graph (eager → graph) | 2.43× / 1.35× | host_share 67% → 1.4% |
+| 2 | Weight W8A16 (+lm_head W8) | 1.22× / 1.10×（步级） | near-lossless 近无损 |
+| 3 | split-KV attention (vs HF sdpa) | 1.51× / 1.46×（w8a16 格） | Flash-Decoding 三段式 |
+| 4 | Fused RMSNorm | 1.24×，kernels/步 994→539 | `F.rms_norm` 反而慢 5% |
+| 5 | Packed q/k/v + KV direct write | −4.8% / −2.9% | 48→16 调用/步 |
+| 6 | lm_head W8 | −4.1%（−63 µs/步） | 三链精度 PASS |
+| 7 | **KV-INT8**（scale folding in-kernel） | **−6.5% @4096**（−109 µs/步） | 2026-10-25 采纳 |
 
-要验证的四条推论：
+Kernels per step: **994 → 345**. ★ 不得跨轮相乘当"总加速"（[RESULTS.md](RESULTS.md) §2 红线）。
 
-1. 量化在 batch=1 收益最大，随 batch 增大被算力开销侵蚀；
-2. 反量化必须与 GEMM 融合，否则中间张量的写+读会吃掉大部分收益；
-3. MoE 上存在量化收益上限：专家权重字节可降到 1/4，但**路由与打包开销不随量化下降**；
-4. **量化对 token 延迟的收益被 host/launch 开销截断**——字节降到 1/4 不等于 token 快 4 倍，
-   除非同时消除 launch 开销（CUDA Graph）。
-   > 这四条现在各走到哪一步（哪条已答、哪条未答），见 [AGENTS.md](AGENTS.md) §0/§3。
+## What it asks 项目在问什么
 
-完整计划见 **[PLAN.md](PLAN.md)**（立项理由、硬件、阶段划分、实验矩阵、风险）。
+**EN**: batch-1 decode is purely bandwidth-bound — every token streams the active weights once.
+So the only lever is *bytes per token*, and the project measures where that lever stops:
+quantization pays only to 8-bit on this model (all 4-bit routes fail the accuracy gate);
+the remaining step time is routing/elementwise/launch overhead, which is what the fusion
+levers attack; and the **ceiling** is measured, not assumed — even a perfect weight path
+yields only ~1.69× because weights are just ~41% of a step.
 
-### 关于"端侧"
+**中文**：batch=1 decode 是纯带宽受限——每个 token 都要把激活权重流一遍，所以唯一的主线是
+**每 token 字节数**。四条预注册推论（量化收益随 batch 衰减 / 反量化必须融进 GEMM / MoE 有
+量化上限 / launch 开销截断收益）各自被实验回答；4-bit 被精度门挡住、融合反量化在 eager 上
+被否证——边界与负结果同样是本项目的一半产出。完整计划见 [PLAN.md](PLAN.md)。
 
-本项目的**立论**能迁移到端侧（端侧是统一内存 UMA，只有一个内存池，decode 是**更纯粹**的
-字节受限问题，所以"减少每 token 字节"这个杠杆在端侧更值钱）；但**数字不能**——kernel 是
-CUDA、卡是桌面旗舰。详见 [PLAN.md](PLAN.md) §0.1。
+## Reproduction discipline 复现纪律
 
-## 与其它两个项目的关系（三者互补，不重复）
+- **Correctness before performance 先门后测**：KL / top-1 gate per quantization surface
+  （权重 / lm_head / KV 各一张门表，fail-closed）；不过门的格 latency 置 null。
+- **One variable per round 一轮一变量**；same-round adjacent A/B with per-pair wins + MAD；
+  canary drift >5% ⇒ the whole round is VOID（fail-closed，作废轮留档不发布）。
+- **No spec bandwidth 禁用规格带宽**：roofline 分母用实测可达带宽（1560.3 GB/s）。
+- 负结果同样记录；`results/` 为机器本地工件（gitignored），权威记录是
+  [experiments/](experiments/) 下的 markdown。
 
-| 项目 | 层级 | 回答的问题 |
-|---|---|---|
-| [MegaKernel-vLLM](../MegaKernel-vLLM/README.md) | 系统 / kernel | 整模型融合 vs CUDA Graph 的收益边界在哪 |
-| [MoE-Flow](../MoE-Flow/PROJECT.md) | 系统 / 调度 | 专家放哪、缓存谁、何时预取（Host/Device 混合） |
-| **LeanMoE-Quant**（本仓库） | 算法 / kernel | 每个权重用几 bit、反量化怎么融进 GEMM |
+## Hardware & scope 硬件与适用范围
 
-组合叙事：**表示（量化）→ 放置（专家管理）→ 执行（融合）**。
+- 租用 RTX 5090 32 GB（sm_120，有 cp.async/TMA/FP8/MXFP4、无 wgmma）为唯一测量卡；
+  学校 V100（sm_70）为跨带宽第二数据点（未跑）。所有结论**不跨卡迁移**。
+- **batch=1 单流**课题：零 req/s、无 serving 集成（不接 vLLM/SGLang——定位选择，见
+  [AGENTS.md](AGENTS.md) §2 规则 10）；batch>1 的吞吐曲线只测过 fp16 单臂。
+- 立论可迁移到端侧（UMA 下 decode 是更纯粹的字节问题），但数字不迁移。
 
-**三者需要互斥的硬件**：`MoE-Flow` 需要"模型装不下 + 窄的主机↔设备链路"（BF16-only，
-V100 上跑不了）；本项目需要"模型装得下 + 带宽越高越好"。互斥意味着不抢资源。
-
-## 主硬件
-
-- **主开发机：租用 RTX 5090 32 GB（sm_120）**，≈¥3/h，按量计费，单卡课题；
-- **第二数据点：学校 V100 32 GB（sm_70，免费）**，用于跨带宽对照；
-- **选卡铁律：带宽 > 显存**（OLMoE fp16 只有 13.84 GB，24 GB 已足够）。
-
-5090 有 `cp.async` / TMA / FP8 / MXFP4 block-scale，但 **40/50 系消费卡都没有 `wgmma`**
-（特性矩阵从本地 LLVM 谓词核实，见 [docs/reference/SPECS.md](docs/reference/SPECS.md) §2.1）。
-所有结论必须声明适用区间。
-
-## 目录
-
-```text
-LeanMoE-Quant/
-├── PLAN.md                  # 计划书（唯一权威计划）
-├── RESULTS.md               # ★ 一页纸结果（每个数字带出处）
-├── AGENTS.md                # 协作/agent 规则（含项目硬规则）
-├── ENVIRONMENT.md           # 机器、环境、网络/镜像/代理、模型获取
-├── EXPERIMENTS.md           # 实验记录格式与指标定义（强制）
-├── docs/
-│   ├── README.md             # 文档地图（docs/ 下每份文档给谁看）
-│   ├── handoff/              # 交接：当前唯一权威摘要
-│   ├── reference/            # 查证：SPECS / MODELS / METRICS / NCU_* / MOE_CUDAGRAPH / RUNBOOK
-│   ├── apply/                # 投递：PORTFOLIO（简历 bullet + 面试三题）
-│   └── figures/              # ★ 三张图（由 tools/make_figures.py 从工件生成）
-├── configs/
-│   ├── models.yaml          # 模型清单（唯一来源）
-│   ├── experiments.yaml     # 声明式实验矩阵（harness 读它展开）
-│   └── constraints.txt      # 冻结点版本
-├── scripts/                 # preflight / proxy / bootstrap / fetch_models / check_links
-├── experiments/TEMPLATE.md  # 每个实验复制此模板
-├── results/                 # JSON/日志落盘（gitignored）
-├── src/lemoq/               # quant/ 量化实现、kernels/ 反量化 kernel
-├── benchmarks/              # timing / vram / hostgap / bytes / harness / report
-├── tools/                    # 设备探测、可达带宽标定、ncu 证据、画图
-└── tests/                   # 正确性门槛（先于性能）
-```
-
-## 快速开始
-
-环境与基线准备见 [ENVIRONMENT.md](ENVIRONMENT.md)，服务器上机序列见
-[docs/reference/SERVER_RUNBOOK.md](docs/reference/SERVER_RUNBOOK.md)。核心命令：
+## Quick start 快速开始
 
 ```bash
 uv venv -p 3.12 .venv && uv pip install -e ".[dev]"
-uv run pytest -m "not gpu"          # 在 Mac 上也能跑（无 GPU 的测试）
-bash scripts/preflight.sh           # 网络路由 + GPU 存在性
-uv run python -m tools.probe_machine --json results/machine_probe.json
+uv run pytest -m "not gpu"      # 733 tests on CPU/Mac
+uv run python -m tools.make_figures   # regenerate all figures from artifacts
+# GPU box: see ENVIRONMENT.md + docs/reference/SERVER_RUNBOOK.md
 ```
 
-## 复现纪律（摘要，完整版见 EXPERIMENTS.md）
+## Repo map 目录
 
-- **先正确性、后性能**：与 fp16 参考的 KL 散度 / top-1 一致率不达标，不允许报性能数字；
-- **不得用"逐 token 严格相等"**作门槛——bf16 greedy 在 logit 平局处是非确定性的；
-- **一次一个变量**；跨阶段数字不可混比；
-- **实测可达带宽**用于算理论下限，不用规格值；
-- **必须报 host/kernel 拆分**——只报加速比无法解释（见 [docs/reference/METRICS.md](docs/reference/METRICS.md) §2.1）；
-- 负结果同样记录——本项目的一半价值在"量化在 MoE 上到底能走多远"的边界。
+```text
+PLAN.md / RESULTS.md / AGENTS.md / EXPERIMENTS.md   # 计划 / 一页纸结果 / 规则 / 记录格式
+experiments/<EXP-ID>.md      # ★ authoritative per-experiment records 权威记录
+src/lemoq/kernels/           # 6 Triton kernel families（grouped MoE GEMV、fused dequant、
+                             #   split-KV attention、fused RMSNorm、packed qkv、KV-INT8 读写）
+benchmarks/runner.py         # harness：五条加载前拒绝 + 门表 + payload schema
+tools/                       # probe/ledger/figures/quant-gate 工具链
+docs/figures/                # 4 figures from artifacts（docs/README.md 有完整文档地图）
+docs/apply/                  # PORTFOLIO（简历/面试语料）+ 外部对标评估
+```
+
+Related projects 姊妹项目：MegaKernel-vLLM（整模型融合）、MoE-Flow（专家放置与调度）——
+表示（量化）→ 放置 → 执行，三者互补。
+
+---
+
+> Status 状态（2026-10-25）：量化（权重 W8 + KV-INT8）与融合（七开关）两条线**系统性探完并全部
+> 采纳**；剩余为未批项（E5/E8 跨带宽、专家级混合精度 4-bit、F7 o_proj 融合——均已有预注册或
+> 侦察材料）。进度与红线见 [AGENTS.md](AGENTS.md) §0/§3；一页纸结果见 [RESULTS.md](RESULTS.md)。

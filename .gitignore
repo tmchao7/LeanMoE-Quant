@@ -48,3 +48,6 @@ auth.json
 # WorkBuddy 残余（已弃用，防复发）
 .workbuddy/
 .zcode/
+
+# 本地保留的项目亮点素材（不入库；用户后续自行整理进作品集）
+HIGHLIGHTS.md

@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="420" viewBox="0 0 980 420" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect width="980" height="420" fill="#ffffff"/>
+<text x="24.0" y="34.0" font-size="17.0" fill="#1f2328" font-weight="600" text-anchor="start">Seven adopted levers — same-round A/B step-time reduction</text>
+<text x="24.0" y="56.0" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="start">Independent processes, adjacent arms, same round; canary drift ≤5%, host_share ≤5% per arm.</text>
+<text x="24.0" y="71.0" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="start">Sources: RESULTS.md §2 (every row cites its artifact). KV INT8 at ctx=1024: −0.78% (5/5).</text>
+<line x1="256.0" y1="88.0" x2="256.0" y2="372.0" stroke="#d8dee4" stroke-width="1.0"/>
+<text x="256.0" y="392.0" font-size="10.0" fill="#57606a" font-weight="400" text-anchor="middle">0%</text>
+<line x1="370.7" y1="88.0" x2="370.7" y2="372.0" stroke="#d8dee4" stroke-width="1.0"/>
+<text x="370.7" y="392.0" font-size="10.0" fill="#57606a" font-weight="400" text-anchor="middle">3%</text>
+<line x1="485.3" y1="88.0" x2="485.3" y2="372.0" stroke="#d8dee4" stroke-width="1.0"/>
+<text x="485.3" y="392.0" font-size="10.0" fill="#57606a" font-weight="400" text-anchor="middle">6%</text>
+<line x1="600.0" y1="88.0" x2="600.0" y2="372.0" stroke="#d8dee4" stroke-width="1.0"/>
+<text x="600.0" y="392.0" font-size="10.0" fill="#57606a" font-weight="400" text-anchor="middle">9%</text>
+<text x="250.0" y="116.4" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fused RoPE</text>
+<rect x="256.0" y="96.0" width="320.7" height="30.0" fill="#e8590c" opacity="1.00" rx="3.0"/>
+<text x="584.7" y="116.4" font-size="11.5" fill="#1f2328" font-weight="600" text-anchor="start">−8.39%</text>
+<text x="650.0" y="116.4" font-size="9.5" fill="#57606a" font-weight="400" text-anchor="start">A/B · fused_rope_ab</text>
+<text x="250.0" y="156.4" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">KV INT8 read path (E6, ctx=4096)</text>
+<rect x="256.0" y="136.0" width="250.0" height="30.0" fill="#12b886" opacity="1.00" rx="3.0"/>
+<text x="514.0" y="156.4" font-size="11.5" fill="#1f2328" font-weight="600" text-anchor="start">−6.54%</text>
+<text x="650.0" y="156.4" font-size="9.5" fill="#57606a" font-weight="400" text-anchor="start">5/5 pairs · EXP-e6-ab-4096-run2</text>
+<text x="250.0" y="196.4" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">packed q/k/v GEMM (F2)</text>
+<rect x="256.0" y="176.0" width="183.8" height="30.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
+<text x="447.8" y="196.4" font-size="11.5" fill="#1f2328" font-weight="600" text-anchor="start">−4.81%</text>
+<text x="650.0" y="196.4" font-size="9.5" fill="#57606a" font-weight="400" text-anchor="start">3/3 pairs · EXP-p4c-01 §F2</text>
+<text x="250.0" y="236.4" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">lm_head W8 quant (F5)</text>
+<rect x="256.0" y="216.0" width="157.9" height="30.0" fill="#12b886" opacity="1.00" rx="3.0"/>
+<text x="421.9" y="236.4" font-size="11.5" fill="#1f2328" font-weight="600" text-anchor="start">−4.13%</text>
+<text x="650.0" y="236.4" font-size="9.5" fill="#57606a" font-weight="400" text-anchor="start">5/5 pairs · EXP-f5-ab-20261025</text>
+<text x="250.0" y="276.4" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fused routing top-k (F1)</text>
+<rect x="256.0" y="256.0" width="114.7" height="30.0" fill="#e8590c" opacity="1.00" rx="3.0"/>
+<text x="378.7" y="276.4" font-size="11.5" fill="#1f2328" font-weight="600" text-anchor="start">−3.00%</text>
+<text x="650.0" y="276.4" font-size="9.5" fill="#57606a" font-weight="400" text-anchor="start">A/B · routing_ab</text>
+<text x="250.0" y="316.4" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">KV direct write (F4)</text>
+<rect x="256.0" y="296.0" width="112.4" height="30.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
+<text x="376.4" y="316.4" font-size="11.5" fill="#1f2328" font-weight="600" text-anchor="start">−2.94%</text>
+<text x="650.0" y="316.4" font-size="9.5" fill="#57606a" font-weight="400" text-anchor="start">5/5 pairs · EXP-p4c-01 §F4</text>
+<text x="250.0" y="356.4" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">skip mask-fill (F1)</text>
+<rect x="256.0" y="336.0" width="50.8" height="30.0" fill="#e8590c" opacity="1.00" rx="3.0"/>
+<text x="314.8" y="356.4" font-size="11.5" fill="#1f2328" font-weight="600" text-anchor="start">−1.33%</text>
+<text x="650.0" y="356.4" font-size="9.5" fill="#57606a" font-weight="400" text-anchor="start">A/B · skip_mask_fill_ab</text>
+</svg>
