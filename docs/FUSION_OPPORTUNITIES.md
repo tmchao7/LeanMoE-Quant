@@ -375,6 +375,55 @@ F3 残差 gap 24.1 µs **低于 30 µs 入榜线**（不再是被选退路）；
 
 ---
 
+### F7 — `o_proj` 的 16 次独立 dequant-GEMV（est 0.036 ms，**预注册 2026-10-25，未实施**）
+
+#### 现象（账本口径，v6 canonical w8a16×kernel 两格）
+
+`o_proj` 在 `dequant_gemm` family（33 次/步 = packed_qkv 16 + **o_proj 16** + lm_head 1，
+实测合计 0.2897 ms）里没有独立行。把它拆出来算：
+
+- 字节账：w8 g128 每层 2048×2048 ≈ 4.20 MB（codes+scales）× 16 层 ≈ **67.2 MB/步**
+  ⇒ 地板 67.2 MB ÷ 1560.3 GB/s ≈ **43.5 µs/步**；
+- 实测：F2 节的隔离扫描给过"**单投影调用只有 54%**"（N=2048 正是 o_proj 形状；
+  54% × 1560.3 ≈ 842 GB/s ⇒ 4.20 MB ÷ 842 ≈ 5.0 µs/次 × 16 ≈ **80 µs/步**）；
+- **gap ≈ 36 µs/步**（≈ 2.4% of 1.4706 ms）——量级与 F4 采纳收益（−2.94%）同档。
+
+根因与 F2 打包前同源：N=2048 的 launch 里在飞 warp 不足（F2 的 N=6144 打包把达成率
+从 54% 提到 87.3%），但 **o_proj 没有可打包对象**——它的输入是 attn_output，
+与 q/k/v（输入 hidden_states）不同源，四合一不可行。
+
+#### 三条路（按工程代价升序；B1 只预注册，实施另需窗口）
+
+1. **config 重扫（config 类）**：`tools/bench_dequant_gemm_graph --out-dim 2048` 对
+   o_proj 形状重扫 36 点网格——F2 的 N=6144 重扫只赢了 +0.21%（判"config 不动"），
+   N=2048 的先验同样悲观，但一次扫描就能关闭它；
+2. **attention combine 合并（结构类，主假设）**：把 o_proj 的 GEMV 折进
+   `_attn_split` 的 combine kernel（grid=(heads,)）：每头算
+   `attn_h(128) @ W_o[h·128:(h+1)·128, :](128×2048)` 的秩-128 切片，输出是 16 份
+   2048 维部分和。★ 红线：跨 program 归约**禁止 atomic**（非确定性会杀"同路径
+   KL=0"门）⇒ 要么 combine 改两段（第二段确定性归约 16×2048），要么单 program
+   常驻流 8.4 MB（占用率风险）；
+3. **对侧 residual epilogue（F3 变体，小头）**：attention 侧的 16 次 residual add
+   （residual_add family 的一半 ≈ 12 µs）折进 o_proj 的写出——可与 1/2 叠加。
+
+#### 验收（照项目纪律，不放宽）
+
+- K1：合并 kernel 对"combine→o_proj 两段"的 fp64 oracle parity ≤ `PARITY_GATE` 1e-3
+  （结合序不同，不写逐位断言）；
+- A/B：`run_ab_fresh_process.sh`，w8a16×kernel @1024 与 @4096 各一轮，Δ ≈ −30~40 µs
+  且 > MAD、逐对胜多数、首尾金丝雀 ≤5%、`host_share` ≤5%；
+- 采纳：翻默认 → `run_f1_refresh.sh` 刷新 → 回填（照 F4/F5 体例）。
+
+#### 风险
+
+- **非确定性归约**是最大坑（路 2，见红线）；
+- combine kernel 的 (m, l, acc) 合并逻辑与权重流叠加后，寄存器压力可能反噬
+  split-KV 主路径的 occupancy——K 门 + 隔离微基准都要过；
+- 36 µs 若 config 重扫（路 1）意外兑现大半，路 2 的剩余空间就不值工程量
+  （先跑路 1 是它的第一个判据）。
+
+---
+
 ## 3. 学术 / 工业界的融合方法（与本文机会的对应）
 
 | 方法 | 核心思想 | 对应 |
