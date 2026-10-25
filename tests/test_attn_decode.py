@@ -324,12 +324,15 @@ def _decode_step(model, cache, token, position, max_cache_len=16):
         ).logits
 
 
-def test_replaced_attention_matches_hf_at_q_len_1():
+def test_replaced_attention_matches_hf_at_q_len_1(monkeypatch):
     """★ 集成的核心测试：替换后**只换 core**，其余前后处理必须与 HF 等价。
 
     用 fp32 + oracle backend（Mac 上无 triton），所以量到的差异只来自
     "core 的数学"与"有没有把 HF 的前后处理写错"。
+    ★ E6 采纳（2026-10-25）后 kv_int8 默认 True，而 oracle 后端不带 int8 读路径——
+      本测试量的是 fp16 core 数学，显式 env=0（N6：钉机制不钉默认值）。
     """
+    monkeypatch.setenv("LEMOQ_KV_INT8", "0")
     model = _tiny_model()
     cache, token, _ = _prefill(model)
     position = 8
@@ -386,8 +389,12 @@ def test_decode_without_filled_len_falls_back_to_hf():
     assert attention_cores_replaced(model) == 2
 
 
-def test_replaced_attention_respects_the_length_tensor():
-    """长度是**设备张量**：改它就能改答案 —— 集成层不许把长度烘进 shape。"""
+def test_replaced_attention_respects_the_length_tensor(monkeypatch):
+    """长度是**设备张量**：改它就能改答案 —— 集成层不许把长度烘进 shape。
+
+    ★ 同上：oracle 后端 + kv_int8 显式 env=0（E6 采纳后默认 True）。
+    """
+    monkeypatch.setenv("LEMOQ_KV_INT8", "0")
     model = _tiny_model()
     cache, token, _ = _prefill(model)
     attn = model.model.layers[0].self_attn

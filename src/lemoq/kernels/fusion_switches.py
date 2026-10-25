@@ -12,9 +12,9 @@ payload — exactly like `config.rmsnorm` after P2i.
     kv_direct_write LEMOQ_KV_DIRECT_WRITE    True      F4 KV direct write (adopted 2026-10-24)
     lm_head_w8      LEMOQ_LMHEAD_W8          True      F5 lm_head W8 量化（adopted 2026-10-25：
                                                        三链 PASS + A/B VALID −4.13% 5/5）
-    kv_int8         LEMOQ_KV_INT8            False     E6 KV INT8 读路径（2026-10-25 接线，
-                                                       EXP-p5-01：写 kernel 已过 K 门；读路径
-                                                       parity/门/A/B 过后翻 True）
+    kv_int8         LEMOQ_KV_INT8            True      E6 KV INT8 读路径（adopted 2026-10-25：
+                                                       K 门 8/8 + 门两 ctx PASS + A/B 两 ctx
+                                                       VALID −6.54%/−0.78%，5/5 对各轮）
 
 2026-10-24: F1+F2 adopted — all four True after the valid refresh round
 (canary 0.30%, 23/23 cells, per-cell host_share ≤ 3.4%). Historical note: adoption
@@ -53,7 +53,7 @@ FUSION_DEFAULTS: dict[str, bool] = {
     "packed_qkv": True,
     "kv_direct_write": True,
     "lm_head_w8": True,
-    "kv_int8": False,
+    "kv_int8": True,
 }
 
 
