@@ -3,20 +3,25 @@
 > 用途：**投递与面试**。写简历时从这里挑句子，面试前用 §3 的三问自检。
 > 规矩不变：本文不引入任何新数字，每个数字都指向本仓库里的记录或工件；
 > 没测的东西一律写"未测"（与 [`RESULTS.md`](../../RESULTS.md) §6 同一口径）。
-> 生成时间：2026-10-09；**更新：2026-10-11**（新增 §2a 数据总表与 §2b 第 5 条候选）。
+> 生成时间：2026-10-09；更新：2026-10-11 / **2026-10-25 终稿**（v7 canonical：
+> 七条杠杆全部采纳，F1–F5+E6 默认开，最好格 2.44×/4.25×）。
 
 ---
 
 ## 1. 三十秒版（自我介绍时怎么说）
 
 > 我在单张 RTX 5090 上做一个 **MoE 大模型 decode 的推理优化**课题：OLMoE-1B-7B（64 专家 / top-8）
-> 的单请求 decode 起手是 **82.64 ms/token**，而它的字节下限是 **1.60 ms**（实测只读带宽 1560.3 GB/s；旧实例 1561.9），
-> 差 **52 倍**。我做了 **4 个自研 Triton kernel**（grouped MoE GEMV、融合反量化 GEMV、
-> split-KV decode attention、融合 RMSNorm），并用**五条各自独立、同一轮内 A/B** 的杠杆把差距收窄；
-> 其中最有价值的一条是**实测出量化的结构性上限只有 1.74×**（因为权重只占一步的 42%），
-> 并把其中九成收益定位到具体 kernel。所有结论都有产物：门禁、金丝雀、负结果都在库里。
+> 的单请求 decode 起手是 **82.64 ms/token**，而它的字节下限是 **1.60 ms**（实测只读带宽 1560.3 GB/s），
+> 差 **52 倍**。我做了 **6 个自研 Triton kernel 族**（grouped MoE GEMV、融合反量化 GEMM、
+> split-KV decode attention、融合 RMSNorm、packed q/k/v、KV-INT8 量化读写），并用**七条各自独立、
+> 同轮 A/B 的杠杆**（执行轴 / 量化 / attention 实现 / 融合 norm / KV 直写 / lm_head 量化 /
+> KV INT8）把差距收窄到 **1.46 / 1.61 ms**（ctx 1024/4096，最好格 **2.44× / 4.25×** vs
+> fp16×sdpa）；其中最有价值的一条是**实测出量化的结构性上限只有 ~1.69×**（权重只占一步的
+> ~41%），并把九成收益定位到具体 kernel。所有结论都有产物：门禁、金丝雀、负结果都在库里。
 
-**三个数字记忆点**：`82.6 → 3.59 ms`（同一实现链上的实测改进）、`1.74×`（量化上限，实测）、`52×`（起手离带宽墙的距离）。
+**三个数字记忆点**：`82.6 ms`（host 主导的 eager 起点）→ 当前 canonical **1.46/1.61 ms**
+（ctx 1024/4096，同轮最好格 **2.44×/4.25×** vs fp16×sdpa——各自实测的两端点，
+不做跨轮相乘）、`~1.69×`（量化上限，实测）、`52×`（起手离带宽墙的距离）。
 
 ---
 
@@ -68,33 +73,41 @@
 
 | # | 数字 | 口径 | 出处 | 简历 |
 |---|---|---|---|---|
-| 1 | 起手 **82.6436 ms**/token → 字节下限 **1.5982 ms**（**≈52×**） | fp16 eager，ctx=1024，实测只读带宽 1560.3 GB/s（旧实例 1561.9） | `RESULTS.md` §1；`experiments/EXP-p0-02*` | ✅ 带限定（host 主导的起点，不是精确基线） |
+| 1 | 起手 **82.6436 ms**/token → 字节下限 **1.5982 ms**（**≈52×**） | fp16 eager，ctx=1024，实测只读带宽 1560.3 GB/s | `RESULTS.md` §1；`experiments/EXP-p0-02*` | ✅ 带限定（host 主导的起点，不是精确基线） |
 | 2 | 执行轴 **2.43×**@1024 / **1.35×**@4096 | 同实现同轮 eager→cudagraph；host 67.3%→1.4% | `EXP-p4b-01` §2.8.2（归档 payload） | ✅ |
-| 3 | 量化 **1.1979×**@1024 / **1.0898×**@4096 | w8a16 vs fp16，图内，F4 刷新 canary 0.336% | `EXP-p4b-01` §F4 | ✅ |
-| 4 | **结构性上限 1.74×**（权重仅占步 **42%**；@4096 1.30×/23%） | 实测，非推演 | `EXP-p4b-01` §4 | ✅ 项目最值钱的数字 |
-| 5 | 注意力实现 **1.4528×**@1024 / **1.3801×**@4096；最好格 **2.36×/3.85×** | 图内 w8a16 sdpa→split-KV，vs 同格 fp16（F4 采纳后） | `EXP-p4c-01` §F4 | ✅ |
+| 3 | 量化 **1.2227×**@1024 / **1.0968×**@4096 | w8a16+lm_head vs fp16，图内，E6 刷新 canary −0.427% | `EXP-p4b-01` §E6 | ✅ |
+| 4 | **结构性上限 ~1.69×**（权重仅占步 **40.9%**；@4096 1.31×/23.5%） | 实测，非推演 | `RESULTS.md` §3（E6 刷新 payload） | ✅ 项目最值钱的数字 |
+| 5 | 注意力实现 **1.5086×**@1024 / **1.4609×**@4096；最好格 **2.44×/4.25×** | 图内 w8a16 sdpa→split-KV，vs 同格 fp16（E6 采纳后） | `EXP-p4c-01` §E6 | ✅ |
 | 6 | 融合 RMSNorm **1.2358×**；kernel/步 **994→539**；**15/15** 轮赢 | 同进程交错 A/B；`F.rms_norm` 对照 **0/15、慢 5%** | `EXP-p4c-02` §5.5/§5.6 | ✅ |
 | 7 | 投影 kernel **8.14→5.15 µs/call**（**523→826 GB/s**） | 图内配置扫描；桶 0.5245→0.3254 ms | `EXP-p4c-01` §5.4 | ✅ |
 | 8 | 专家 GEMV **96.3→63.5 µs（1.52×）**，解释步级收益 **89.6%** | 隔离测；占步 43.4%（F4 刷新分母） | `docs/reference/NCU_EVIDENCE.md` §3/§4.3 | ✅ |
 | 9 | 无 gather kernel **5.2637→4.0715 ms（1.293×）**，省 **3.22 GB/token** | 同轮 A/B | `EXP-p2-02` 记录 | ✅ |
+| 10 | **五连融合全部采纳**（F1 三项+F2 packed qkv+F4 KV 直写+F5 lm_head w8）：kernel 格累计 **1.87→1.47 ms**（@1024，跨 v3→v6 轮，只列不乘）；kernels/步 **539→329** | 各自独立 A/B：F2 −4.81% 3/3、F4 −2.94% 5/5、F5 −4.13% 5/5；刷新 22–23/23 | `docs/FUSION_OPPORTUNITIES.md`；`EXP-p4c-01` §F4/F5 | ✅ |
+| 11 | **KV INT8（E6）**：@4096 **−112.4 µs（−6.54%）**、@1024 −11.5 µs，A/B 各 5/5；门 KL 0.0013/0.0006 | per-token 对称 int8 + attention kernel 内 scale 折叠（读路径零解包）；kernels/步 +16 镜像写仍净赚 | `EXP-p5-01` | ✅ 最新一笔 |
 
-### 精度三链（w8a16 全过门）
+### 精度三链（当前生产配置 w8a16+lm_head w8 全过门；KV INT8 另有自己的门）
 
 | 数字 | 口径 | 出处 | 简历 |
 |---|---|---|---|
 | KL **0.001361** / top-1 **0.9758**（门 <0.01 / ≥0.95） | 165 位置，fp16 参考 | `EXP-p1-04` v2 | ✅ |
-| PPL **9.1985 → 9.2047（+0.067%）**（门 <1%） | wikitext-2 前 8192 token | `results/PPL_STATUS.json` | ✅ |
-| MMLU 5-shot **53.50% → 52.50%（−1.0 点）**（门 <2 点） | n=200 分层子集 | `results/task_accuracy.json` | ✅ 带 n=200 |
+| lm_head w8 门：KL **6.1e-5/6.6e-5**、top-1 **165/165**（近无损） | 隔离门臂（只量 lm_head） | `EXP-p1-06` | ✅ |
+| KV INT8 门：KL **0.0013/0.0006**、top-1 **0.982/0.988**（forced 轨迹口径） | cache 侧量化，独立第三张门表 | `EXP-p5-01` | ✅ |
+| PPL **8.4703 → 8.4711（+0.0088%）**（门 <1%） | wikitext-2 **全集** 285,831 token | `results/EXP-p1-06-lm-head-w8/ppl_f5_lmhead_v2.json` | ✅ |
+| MMLU 5-shot **53.50% → 53.00%（−0.50 点）**（门 <2 点） | n=200 分层子集（当前配置） | `results/EXP-p1-06-lm-head-w8/mmlu_w8a16_lmhead.json` | ✅ 带 n=200 |
 | GSM8K fp16 **0/15** | 8-shot 生成式，基座 floor | `results/task_accuracy.json` | ❌ 不写（放弃的口径） |
 
-### ★ 本轮新增：profile 驱动的三连融合候选（**A/B 实测、env 默认关、未采纳**）
+### ★ 融合候选 → 已全部采纳（2026-10-24/25 各自 A/B 过门后翻默认）
 
-| 候选 | 同轮 A/B | 金丝雀 | 正确性 | 出处 | 简历 |
-|---|---|---|---|---|---|
-| **fused RoPE**（160→32 kernel/步，rope 链 ≈0.216 ms≈11.5% busy） | wall **1.9655→1.8007 ms = +8.39%**；busy **1.872→1.679（−0.194 ms）** | +3.661% ≤5% | 4 run token 逐位同；GPU K1 parity 过 | `results/fused_rope_ab.json`；`docs/compose/spec/fused-rope.md`（第 1 轮金丝雀 5.923% VOID 留档 `*.void1.*`） | ✅ 写"A/B 实测 +8.4%"，注明候选未采纳 |
-| **routing softmax+topk 融合** | **1.9521→1.8935 ms = +3.0%**（busy +4.2%） | 2.215% ≤5% | token 逐位同 | `results/routing_ab.json`；spec `routing-fusion` | ✅ 同上 |
-| **skip mask-fill**（graph 臂省 2 fill/步） | **2.0111→1.9844 ms = +1.33%**（busy 不变，省的是 host ≈27 µs） | −1.905% ≤5% | token 逐位同 | `results/skip_mask_fill_ab.json`；spec `skip-mask-fill` | ⚠️ 数字小，写方法不写数字 |
-| in-graph kernel 分解工具 | wall 1.94 ms / busy 1.876 / **539 kernel/步** 的 top-25 归因表 | — | — | `results/graph_profile.json` | ✅ 方法论卖点 |
+| 候选 | 同轮 A/B | 状态 | 出处 | 简历 |
+|---|---|---|---|---|
+| **fused RoPE**（160→32 kernel/步） | wall **+8.39%**（busy −0.194 ms） | ✅ **已采纳**（F1，2026-10-24） | `results/fused_rope_ab.json` | ✅ |
+| **routing softmax+topk 融合** | **+3.0%**（busy +4.2%） | ✅ **已采纳**（F1） | `results/routing_ab.json` | ✅ |
+| **skip mask-fill** | **+1.33%** | ✅ **已采纳**（F1；host 侧收益） | `results/skip_mask_fill_ab.json` | ⚠️ 数字小，写方法不写数字 |
+| **packed q/k/v 三合一**（N=6144，48→16 调用/步） | **−4.81%（3/3 对）**；合规轮 off 1.9536→on 1.8597 | ✅ **已采纳**（F2，2026-10-24） | `EXP-p4c-01` §F2 | ✅ |
+| **KV 直写**（32 aten→16 triton） | **−2.94%（5/5 对）** | ✅ **已采纳**（F4，2026-10-24） | `EXP-p4c-01` §F4 | ✅ |
+| **lm_head W8** | **−4.13%（5/5 对）**；三链精度全过 | ✅ **已采纳**（F5，2026-10-25） | `EXP-p1-06` | ✅ |
+| **KV INT8 读路径**（scale 折叠零解包） | **−6.54%（5/5 对，@4096）**；门两 ctx PASS | ✅ **已采纳**（E6，2026-10-25） | `EXP-p5-01` | ✅ 最新一笔 |
+| in-graph kernel 分解工具 | wall 1.94 ms / busy 1.876 / **539 kernel/步** 的 top-25 归因表 | 方法论（现 345/步） | `results/graph_profile.json` | ✅ 方法论卖点 |
 
 ### 其余可引用（G2/G3 与工程量）
 
@@ -102,16 +115,18 @@
 |---|---|---|
 | batch 1→8：step p50 **87.20→86.29 ms 近平坦**，tok/s **11.47→92.71（8.08×）**，canary −3.448% | `results/batch_sweep.json` | ✅ 带"fp16 单臂、同轮"限定 |
 | occupancy 上界：三族 kernel blocks/SM ≤12/≤12/≤6，**上界 100%**（解析值非 ncu） | `results/occupancy.json` | ⚠️ 必须注明"解析上界" |
-| 测试 **707 passed / 33 deselected**（Mac CPU，`-m "not gpu"`，S2 交接轮在 `opt/packed-qkv`；44 个测试文件） | 本地 pytest + GitHub Actions（A5） | ✅ 写"600+ 单测" |
-| 自研 Triton kernel 族：**4 已采纳 + fused-RoPE 候选（第 5 个）** | `src/lemoq/kernels/` | ✅ "4–5 个自研 kernel" |
+| 测试 **733 passed**（Mac CPU，`-m "not gpu"`，2026-10-25 E6 收官轮；含 schema 守卫与门表钉死测试） | 本地 pytest + GitHub Actions | ✅ 写"700+ 单测" |
+| 自研 Triton kernel 族：**6 个已采纳**（grouped MoE GEMV、融合反量化、split-KV attention、融合 RMSNorm、packed q/k/v、KV-INT8 读写） | `src/lemoq/kernels/` | ✅ |
 | 实验矩阵 64 格 / Mac 侧 59 份 result.json（48 done；GPU 盘另存归档）/ 三轮 VOID 不发数 | `configs/experiments.yaml`、`results/` | ✅ 方法论 |
 
 ### ❌ 永远不写
 
-- **`82.6 → 3.59 ms` 之类的跨轮"总加速"**（五条不同轮杠杆相乘，违反硬规则 3）；
-- 量化 × batch 衰减、FP8/MXFP4、ncu stall/occupancy **实测**（全未测）；
+- **跨轮"总加速"的乘法**（七条不同轮杠杆相乘，违反硬规则 3；"最好格 2.44×/4.25×"是
+  同一轮的格间比，允许）；
+- 量化 × batch 衰减、FP8/MXFP4 **延迟**（MXFP4 是负结果，只有精度数据）、ncu
+  stall/occupancy **实测**（全未测；occupancy 是解析上界）；
 - 任何 req/s 或"服务吞吐"（零条数据，batch=1 单流课题）；
-- 把三个候选写成"已上线/已采纳"（env 默认关，采纳需重测已录格）。
+- **4-bit 任何性能数字**（W4 专家量化/MXFP4 全部 gate FAIL，de-publish 先例在库）。
 
 ---
 
@@ -121,30 +136,38 @@
 > 2026-10-10 实测并填入下方「可以再加的两条」。**不要**把预估数字写进简历：面试官一追问
 > "这个数怎么来的"就崩，而这个项目最值钱的恰恰是"每个数都能追到工件"。
 
-**中文（4 条，约 170 字）**
+**中文（5 条）**
 
 > **MoE 大模型单卡推理优化**（OLMoE-1B-7B，RTX 5090，自研 Triton kernel）
-> - 自研 **4 个 Triton kernel**（grouped MoE GEMV / 融合反量化 GEMM / split-KV decode attention /
->   融合 RMSNorm），全部通过 `1e-3` 数值 parity 门。
-> - **融合 RMSNorm：HF 的 7 个 kernel 合成 1 个**，全步 **1.24×**、kernel 数 **994→539**，
->   同进程交错 A/B **15/15 轮获胜**；torch 原生 `F.rms_norm` 对照反而慢 5%。
-> - **无 gather 的 MoE decode kernel**（expert id 只做指针算术，保持 CUDA Graph 可捕获）：
->   消除 **3.22 GB/token** 的 gather 复制，per-token **5.26→4.07 ms（1.29×）**。
-> - **W8A16 量化端到端 1.19×**，并**实测出上限只有 1.74×**（权重仅占一步 42%），
->   把 **90%** 收益归因到单个 kernel（专家 GEMV **1.52×**）；
->   精度三链闭合：KL **0.00136**、PPL **+0.067%**、MMLU 200 题 **−1.0 个点**。
+> - 自研 **6 个 Triton kernel 族**（grouped MoE GEMV / 融合反量化 GEMM / split-KV decode
+>   attention / 融合 RMSNorm / packed q·k·v / KV-INT8 量化读写），全部通过 `1e-3`
+>   数值 parity 门与正确性门（门未过不报性能数字）。
+> - **七条各自独立同轮 A/B 的杠杆**（执行轴/量化/attention 实现/融合 norm/KV 直写/
+>   lm_head 量化/KV INT8）全部采纳：decode 从 **82.6 ms** 的 host 主导 eager 起点到
+>   canonical **1.46/1.61 ms**（ctx 1024/4096，两端点各自实测），最好格 vs 原生基线
+>   **2.44×/4.25×**（同轮）；kernel/步 **994→345**。
+> - **KV INT8**：per-token 对称量化 + attention kernel 内 scale 折叠（读路径零解包），
+>   @4096 **−6.5%**（5/5 对 A/B）；独立轨迹门 KL 0.0006 近无损。
+> - **实测出量化的结构性上限 ~1.69×**（权重只占一步 ~41%，反推自刷新 payload），
+>   把 90% 步级收益归因到单个 kernel（专家 GEMV 1.52×）——"知道边界在哪"与"拿到收益"
+>   并重；4-bit 全系（RTN/GPTQ/MXFP4/混合退路）gate FAIL 如实入库不发布。
+> - 精度三链闭合：KL **0.0014**、全集 PPL **+0.009%**、MMLU 200 题 **−0.5 点**。
 
-**English (4 lines)**
+**English (5 lines)**
 
-> - Built **4 custom Triton kernels** (grouped-MoE GEMV, fused-dequant GEMM, split-KV decode
->   attention, fused RMSNorm), all gated by `1e-3` numerical parity checks.
-> - **Fused 7 HF RMSNorm kernels into 1**: **1.24×** decode-step speedup, kernel count
->   **994→539**, won **15/15** interleaved A/B rounds (torch's native `F.rms_norm` was 5% slower).
-> - **Gather-free MoE decode kernel** (expert id as pointer arithmetic, CUDA-Graph safe):
->   removed **3.22 GB/token** of copying, **5.26→4.07 ms/token (1.29×)**.
-> - **W8A16 quantization: 1.19×** end-to-end; measured the **ceiling of 1.74×** (weights = 42% of a
->   step) and attributed **90%** of the gain to one kernel; accuracy closed with KL **0.00136**,
->   PPL **+0.067%**, MMLU **−1.0 pt** (200-q subset).
+> - Built **6 custom Triton kernel families** (grouped-MoE GEMV, fused-dequant GEMM, split-KV
+>   decode attention, fused RMSNorm, packed q/k/v, KV-INT8 quantized read/write), all gated by
+>   `1e-3` parity and correctness gates.
+> - **Seven independently A/B-tested levers, all adopted**: from a **82.6 ms** host-bound eager
+>   start to **1.46/1.61 ms/token** canonical (ctx 1024/4096, both endpoints measured); best cell
+>   **2.44×/4.25×** vs the native baseline (same round); kernels/step **994 → 345**.
+> - **KV-INT8 cache quantization** with scale folding inside the split-KV kernel (zero-dequant
+>   read path): **−6.5%** step time @4096 (5/5-pair A/B); trajectory gate KL 0.0006.
+> - **Measured the structural ceiling of weight quantization (~1.69×)** — weights are only
+>   ~41% of a decode step — and attributed 90% of the step-level gain to one kernel; all 4-bit
+>   routes failed the accuracy gate and were recorded as negative results.
+> - Accuracy closed end-to-end: KL **0.0014**, full-set PPL **+0.009%**, MMLU **−0.5 pt**
+>   (200-question subset).
 
 **上机后可以再加的两条（2026-10-10 已测，按需选用）**
 
@@ -153,12 +176,12 @@
 - `occupancy 上界（G3，解析上界非 ncu 实测）：fused RMSNorm blocks/SM ≤12（threads 限，
   n_regs=38）、grouped gate_up ≤12、down_sum ≤6（regs 限），occupancy 上界 100%`
 
-**第 5 条候选（2026-10-11 已测：profile 驱动的三连融合，可替换或叠加使用）**
+**第 5 条候选（2026-10-11 测、**2026-10-24 已采纳为默认**：profile 驱动的三连融合）**
 
-> 中文：**自研 in-graph kernel 分解 → 三连融合候选**：定位 RoPE 链 **160 kernel/步
+> 中文：**自研 in-graph kernel 分解 → 三连融合**：定位 RoPE 链 **160 kernel/步
 > ≈11.5% busy**（neg/cat/mul/add 散在四个 family），融合后同轮 A/B **端到端 +8.4%**
 > （busy −0.194 ms）；另得路由融合 **+3.0%**、去 mask-fill **+1.3%**。三项全部过
-> **金丝雀 ≤5% + 跨臂 token 逐位一致**双验收，env 开关默认关、已录路径零回归。
+> **金丝雀 ≤5% + 跨臂 token 逐位一致**双验收，已于 2026-10-24 翻默认（F1）。
 
 > EN: **Profile-driven fusion**: built an in-graph kernel-decomposition tool; traced the
 > **160-kernel/step RoPE chain (~11.5% busy)**, fused it for **+8.4%** end-to-end

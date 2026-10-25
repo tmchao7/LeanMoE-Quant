@@ -5,26 +5,32 @@
 **一页纸结果（所有数字带出处）见 [RESULTS.md](RESULTS.md)；图在
 [docs/figures/](docs/figures/)。**
 
-状态（2026-10-23）：**阶段 0 / 1（精度门）/ 2（kernel）/ 4b（E7）已执行**；W4 专家量化已判负；头号结论：
+状态（2026-10-25 终）：**阶段 0 / 1（精度门）/ 2（kernel）/ 4b（E7）已执行；量化与融合两条线
+系统性探完并全部采纳**——七开关默认开（F1 三项/F2 packed qkv/F4 KV 直写/F5 lm_head w8/
+**E6 KV INT8**）。canonical：**w8a16×kernel 1.4602 / 1.6075 ms**（ctx 1024/4096），
+最好格 **2.44× / 4.25×** vs fp16×sdpa（@4096 破 4×）；头号结论：
 
-- **E2 被否证**：融合反量化不是矩阵预期的 1.3–2×——在预注册的 eager 格里它反而比独立 kernel
-  **慢 4.4%**（`host_share` 72.2%、**19,029 kernel/步**，那条路径是 host/launch 受限的）；
-- **E7 已判定**：截断效应成立，但**只有融合臂兑现**——同一个 `w8a16` **fused** 实现
-  `speedup_eager` 0.78 → `speedup_cudagraph` **1.1979**（ctx=1024）/ **1.0898**（4096）
-  （★ 2026-10-24 F4 采纳刷新，F1+F2+F4 默认开），
-  `host_share` 77.5% → 1.6%。天花板是**实测**出来的：权重只占 graph 步的 42% / 23%，
-  完美权重路径的上限也只有 ~1.74× / ~1.30×。★ 2026-10-08 起**规范实现是融合 RMSNorm**
-  （`--rmsnorm fused`），绝对延迟已按新实现重测；
+- **量化的结构性上限是实测出来的**：权重只占 graph 步的 **40.9% / 23.5%** ⇒ 完美权重路径
+  上限也只有 **~1.69× / ~1.31×**（E6 把 KV 读减半后余量进一步收窄）。4-bit 全系
+  （W4 RTN/GPTQ、MXFP4、≤25% 混合退路）**gate FAIL**，负结果入库不发布；
+- **E6 KV INT8（2026-10-25 采纳）**：cache 侧 per-token 对称 int8 + split-KV kernel 内
+  scale 折叠（读路径零解包），@4096 **−112.4 µs（−6.54%，5/5 对 A/B）**，独立轨迹门
+  KL 0.0006/0.0013 两 ctx PASS——权重之外唯一过门的量化表面；
+- **E7 已判定**：截断效应成立，但**只有融合臂兑现**——`speedup_cudagraph` **1.2253**
+  （ctx=1024）/ **1.1025**（4096）（v7），`host_share` 77.5% → 1.6%；
+- **E2 被否证**：融合反量化不是矩阵预期的 1.3–2×——eager 格里反而慢 4.4%
+  （`host_share` 72.2%、**19,029 kernel/步**，那条路径是 host/launch 受限的）；
 - **E4 已判定**：路由/打包是 hf/gather 基线里最大的桶（**4.478 ms = GPU busy 的 44.2%**），
   且**量化不变**（fp16 → w4a16 只差 1.7%）——它就是计划预测的那个上限；
-- **`EXP-p4c-01` 支持**：图内把 HF sdpa 换成自研 split-KV，量化格 **1.4528× / 1.3801×**，
-  最好格 **2.36× / 3.85×** vs fp16×sdpa（F4 采纳后）；**`EXP-p4c-02`**：自研融合 RMSNorm 全步
-  **1.2358×**，kernel/步 **994 → 539**。
+- **`EXP-p4c-01` 支持**：图内把 HF sdpa 换成自研 split-KV，量化格 **1.5086× / 1.4609×**
+  （v7）；**`EXP-p4c-02`**：自研融合 RMSNorm 全步 **1.2358×**，kernel/步 **994 → 539**，
+  七开关采纳后到 **345**。
 
 进度、工件与"还没做什么"见 [AGENTS.md](AGENTS.md) 的 §0/§3；权威记录是
-`experiments/<EXP-ID>.md`。**未做**：E5 专家敏感度、E6 KV INT8、E8 跨带宽（V100）、
-FP8/MXFP4、dense 曲线。（★ 2026-10-10：G2 batch 曲线与 G3 occupancy 已测，见
-[RESULTS.md](RESULTS.md) §6。）**ncu 性能计数器在本机被宿主策略阻断**
+`experiments/<EXP-ID>.md`。**未做**：E5 专家敏感度、E8 跨带宽（V100）、dense 曲线、
+量化 × batch 衰减（FP8/MXFP4 与 W4 已判负，E6 KV INT8 已采纳）。（★ 2026-10-10：
+G2 batch 曲线与 G3 occupancy 已测，见 [RESULTS.md](RESULTS.md) §6。）
+**ncu 性能计数器在本机被宿主策略阻断**
 （`RmProfilingAdminOnly: 1` + 容器无 `CAP_SYS_ADMIN`），已交出替代的 kernel 级证据：
 [docs/reference/NCU_EVIDENCE.md](docs/reference/NCU_EVIDENCE.md)。
 
