@@ -839,9 +839,13 @@ def aggregate_windows(
 
 
 def _static_session_trajectory(
-    model: Any, ids: Any, *, max_new_tokens: int
+    model: Any,
+    ids: Any,
+    *,
+    max_new_tokens: int,
+    forced_tokens: list[int] | None = None,
 ) -> tuple[list[Any], list[int]]:
-    """E6 轨迹口径：StaticCache 会话贪心 decode（与 runner 图格同机制）。
+    """E6 轨迹口径：StaticCache 会话 decode（与 runner 图格同机制）。
 
     ★ 为什么不能用 DynamicCache（首轮门假 0 的根因）：换核 decode 前向在
     `filled is None`（DynamicCache 没有 `_lemoq_filled_len`）时**显式回退 HF 原路**，
@@ -849,8 +853,13 @@ def _static_session_trajectory(
     `_lemoq_filled_len` 挂在 cache 对象上，每步 `_set_step_inputs` 在图外 fill。
     参考臂（env 关）与实验臂（env 开）必须走**同一条**会话路径——差一个变量（KV 位宽）。
 
+    `forced_tokens=None` 自由贪心（预注册"重跑同一条贪心轨迹"的**证据**跑法：
+    实测 borderline token 一翻，后续位置全是苹果比橘子，KL 复利到 ~7 —— v2 工件）；
+    臂的**门**跑法传参考轨迹的 token 流（forced，照 check_fusion_candidate.collect
+    的机制喂 `session.current_token_id`）——位置可比，与权重门的 teacher forcing 同构。
+
     返回 `(traj_logits, tokens)`：traj = [prefill 位置, decode 步 1..N]（1+N 条，
-    与权重门的 33 位置/窗同构）；tokens = [t1..tN]（喂进各步的贪心 token，含 seed）。
+    与权重门的 33 位置/窗同构）；tokens = 喂进各步的 token（贪心=生成序列；forced=输入流）。
     """
     import gc  # noqa: PLC0415
 
@@ -858,6 +867,8 @@ def _static_session_trajectory(
 
     from benchmarks.cudagraph import StaticCacheDecodeSession  # noqa: PLC0415
 
+    if forced_tokens is not None and len(forced_tokens) != max_new_tokens:
+        raise ValueError("forced token 流长度必须等于 max_new_tokens")
     if not ids.is_cuda:
         ids = ids.to("cuda")
     session = StaticCacheDecodeSession(
@@ -866,12 +877,19 @@ def _static_session_trajectory(
     try:
         out0 = session.prefill()  # 幂等重跑（__init__ 已 prefill 过一次），取 prefill 位置 logits
         traj: list[Any] = [out0.logits[:, -1:, :].float()]
-        tokens = [int(session.seed_token_id)]
-        for step in range(max_new_tokens):
-            logits = session.decode_eager()
-            traj.append(logits[:, -1:, :].float())
-            if step < max_new_tokens - 1:
-                tokens.append(int(session.current_token_id))
+        if forced_tokens is not None:
+            tokens = list(forced_tokens)
+            for step in range(max_new_tokens):
+                session.current_token_id = int(forced_tokens[step])
+                logits = session.decode_eager()
+                traj.append(logits[:, -1:, :].float())
+        else:
+            tokens = [int(session.seed_token_id)]
+            for step in range(max_new_tokens):
+                logits = session.decode_eager()
+                traj.append(logits[:, -1:, :].float())
+                if step < max_new_tokens - 1:
+                    tokens.append(int(session.current_token_id))
     finally:
         del session
         gc.collect()
@@ -1299,10 +1317,12 @@ def main(argv: list[str] | None = None) -> int:
                 elif arm["kind"] == "kv_int8":
                     # ★ E6（EXP-p5-01）：KV INT8 的门口径是**轨迹 logits**——teacher
                     #   forcing 是 prefill（q_len>1 走 HF 原路），KV 扰动不在那个口径里。
-                    #   臂 = 开关 env ON、与参考同一条 StaticCache 会话路径重跑贪心轨迹，
-                    #   逐步 logits 对 fp16 参考轨迹比较（每窗 33 位置 = 1 prompt + 32 步，
-                    #   5 窗 165 位置与权重门同构）。DynamicCache 会让 decode 回退原路——
-                    #   那正是首轮假 0 的根因，禁止再走。
+                    #   臂 = 开关 env ON、与参考同一条 StaticCache 会话路径、**喂参考的
+                    #   token 流**（forced，预注册"重跑同一条贪心轨迹"的口径实现）——
+                    #   位置可比，与权重门的 teacher forcing 同构（165 位置 = 1 prompt +
+                    #   32 步 × 5 窗）。★ 自由贪心（v2 工件）已证实是复利口径：borderline
+                    #   token 一翻 KL 冲到 ~7，量的是轨迹分岔不是量化误差。
+                    #   DynamicCache 会让 decode 回退原路——那是首轮假 0 的根因，禁止再走。
                     from benchmarks.cudagraph import compare_logits  # noqa: PLC0415
                     from lemoq.kernels.attn_decode import attention_int8_runs  # noqa: PLC0415
 
@@ -1311,15 +1331,18 @@ def main(argv: list[str] | None = None) -> int:
                     runs_before = attention_int8_runs(model)
                     os.environ[env_name] = "1"
                     try:
-                        arm_traj, _arm_tokens = _static_session_trajectory(
-                            model, ids, max_new_tokens=args.max_new_tokens
+                        arm_traj, _fed = _static_session_trajectory(
+                            model,
+                            ids,
+                            max_new_tokens=args.max_new_tokens,
+                            forced_tokens=tokens,
                         )
                         report = compare_logits(ref_traj_logits, arm_traj)
                         entry["kl"] = float(report["kl"])
                         entry["top1_agreement"] = float(report["top1_agreement"])
                         entry["metric_basis"] = (
-                            "trajectory（decode 步 logits vs fp16 轨迹，StaticCache 会话；"
-                            "teacher forcing 是 prefill 口径，对 KV 扰动不敏感故不采用）"
+                            "trajectory-forced（喂 fp16 参考轨迹的 token 流，decode 步 logits "
+                            "vs fp16 轨迹，StaticCache 会话；自由贪心是复利口径见 v2 工件）"
                         )
                         entry["kv_int8_runs"] = attention_int8_runs(model) - runs_before
                     finally:
