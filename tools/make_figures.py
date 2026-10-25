@@ -319,15 +319,13 @@ def fig1(inputs: dict[str, Any]) -> str:
                     "@1024",
                     ratio("fp16_eager_1024", "fp16_cudagraph_1024_pre_p2j"),
                     COLORS["fp16"],
-                    "%s → %s ms"
-                    % (ms("fp16_eager_1024"), ms("fp16_cudagraph_1024_pre_p2j")),
+                    "%s → %s ms" % (ms("fp16_eager_1024"), ms("fp16_cudagraph_1024_pre_p2j")),
                 ),
                 (
                     "@4096",
                     ratio("fp16_eager_4096", "fp16_cudagraph_4096_pre_p2j"),
                     COLORS["fp16"],
-                    "%s → %s ms"
-                    % (ms("fp16_eager_4096"), ms("fp16_cudagraph_4096_pre_p2j")),
+                    "%s → %s ms" % (ms("fp16_eager_4096"), ms("fp16_cudagraph_4096_pre_p2j")),
                 ),
             ],
         ),

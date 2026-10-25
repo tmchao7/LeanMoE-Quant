@@ -1,5 +1,9 @@
 # LeanMoE-Quant
 
+![status](https://img.shields.io/badge/status-v7%20canonical%20adopted-12b886)
+![tests](https://img.shields.io/badge/tests-733%20passed-brightgreen)
+![gate](https://img.shields.io/badge/accuracy%20gate-KL%3C0.01%20%C2%B7%20top1%E2%89%A50.95-blue)
+
 **Byte-budget-driven quantization + Triton kernel optimization for MoE decode at batch=1.**
 单张 RTX 5090 上把 OLMoE-1B-7B（64 专家 / top-8）的单请求 decode 从 **82.6 ms/token**
 优化到 **1.46 / 1.61 ms**（ctx 1024/4096，685 / 622 tok/s），最好格对原生基线
@@ -16,24 +20,37 @@
 
 ---
 
-## Highlights 项目亮点
+## 🏆 Highlights 项目亮点
 
-| # | 亮点 Highlight | 数字 Numbers |
-| --- | --- | --- |
-| 1 | **七条杠杆，每条独立同轮 A/B，全部采纳**——CUDA Graph / 权重 W8 / split-KV attention / 融合 RMSNorm / packed q·k·v / KV 直写 / lm_head W8 / **KV-INT8** | kernel/步 **994 → 345**；见下图 |
-| 2 | **实测出量化的天花板**——权重流只占一步的 40.9%/23.5%（从刷新 payload 反推），所以完美权重路径的上限也只有 ~1.69×/~1.31×；Marlin 类 kernel 3–4× 的前提（4-bit 过门）在本模型不成立 | 上限 **~1.69× / ~1.31×** |
-| 3 | **KV-INT8 读路径**（自研 kernel）：per-token 对称 int8 + attention kernel 内 scale 折叠（读路径零解包），精度近无损 | @4096 **−109 µs/步（−6.5%）**，门 KL 0.0006 |
-| 4 | **负结果是一等公民**：4-bit 全系（W4-RTN/GPTQ、MXFP4、混合退路）被精度门挡住只发布证据；w8a8@4096 的 5 窗 PASS 经 10 窗复测不稳健被主动 de-publish；融合反量化在 eager 上被否证（孤立 kernel 快 1.21×、端到端反而慢 5%） | KL 门 0.01，未过不发布延迟 |
-| 5 | **测量纪律**：每轮首尾同格金丝雀（>5% 漂移整轮 VOID）、独立进程同轮相邻 A/B + 逐对胜负 + MAD、host_share ≤5% 逐格自检、每张门表由测试钉死到工件 | 733 项 CPU 测试 + CI 四门 |
+**1 · 七条杠杆，每条独立同轮 A/B，全部采纳**
+CUDA Graph / 权重 W8 / split-KV attention / 融合 RMSNorm / packed q·k·v / KV 直写 /
+lm_head W8 / **KV-INT8** —— kernels per step **994 → 345**（见下图）。
+
+**2 · 实测出量化的天花板**
+权重流只占一步的 40.9% / 23.5%（从刷新 payload 反推）⇒ 完美权重路径的上限也只有
+**~1.69× / ~1.31×**。Marlin 类 kernel 3–4× 的前提（4-bit 过门）在本模型不成立。
+
+**3 · KV-INT8 读路径（自研 kernel）**
+per-token 对称 int8 + attention kernel 内 scale 折叠（读路径零解包），精度近无损
+（门 KL 0.0006），@4096 **−109 µs/步（−6.5%）**。
+
+**4 · 负结果是一等公民**
+4-bit 全系（W4-RTN / GPTQ、MXFP4、混合退路）被精度门挡住，只发布证据不发布延迟；
+w8a8@4096 的 5 窗 PASS 经 10 窗复测不稳健被主动 de-publish；融合反量化在 eager 上被
+否证（孤立 kernel 快 1.21×、端到端反而慢 5%）。
+
+**5 · 测量纪律**
+每轮首尾同格金丝雀（>5% 漂移整轮 VOID）、独立进程同轮相邻 A/B + 逐对胜负 + MAD、
+host_share ≤5% 逐格自检、每张门表由测试钉死到工件——733 项 CPU 测试 + CI 四门。
 
 ---
 
-## Metrics 指标数据
+## 📊 Metrics 指标数据
 
 ### Decode step latency 解码步延迟（ms/token，越低越好）
 
 | 配置 Configuration | ctx=1024 | ctx=4096 | gate |
-| --- | --- | --- | --- |
+| --- | ---: | ---: | :---: |
 | fp16 × sdpa（原生基线 native baseline） | 3.5660 | 6.8329 | PASS |
 | fp16 × split-KV kernel | 2.2028 | 2.3484 | PASS |
 | w8a16 × sdpa | 2.9165 | 6.2298 | PASS |
@@ -49,16 +66,18 @@
 
 ![To the wall](docs/figures/fig2_to_the_wall.svg)
 
-### 各轴加速分解 Per-axis speedups & kernel 带宽达成 Kernel bandwidth attainment
+### 各轴加速分解 Per-axis speedups
 
 ![Per-axis speedups](docs/figures/fig1_per_axis_speedups.svg)
+
+### Kernel 级带宽达成 Kernel bandwidth attainment（isolated, L2 flushed）
 
 ![Kernel attainment](docs/figures/fig3_kernel_attainment.svg)
 
 ### 精度 Accuracy（门：KL < 0.01 且 top-1 ≥ 0.95）
 
-| 表面 Surface | KL | top-1 | 任务级 |
-| --- | --- | --- | --- |
+| 表面 Surface | KL | top-1 | 任务级 Task-level |
+| --- | ---: | ---: | --- |
 | 权重 w8a16 | 0.0014 | 0.976 | PPL +0.0088%（wikitext-2 全集）· MMLU −0.50 pt |
 | lm_head W8 | 0.000061 | 1.000 | （三链同上） |
 | KV-INT8 | 0.0006 / 0.0013 | 0.988 / 0.982 | forced 轨迹门（165 位置/ctx） |
