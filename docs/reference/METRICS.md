@@ -210,7 +210,7 @@ MATURITY_REVIEW_2026-10-24 R1——文档已退役，见 git 历史）：
 | G1 | **任务级精度**（MMLU 5-shot 200 题 + GSM8K 100 题，只针对已过门的 w8a16） | §1「任务级分数」 | `tools/task_accuracy.py` | **部分完成（2026-10-09）**：MMLU 已测 —— fp16 53.50% / w8a16 52.50%（delta **−1.0 个点**，门槛 <2 点 ⇒ PASS）；口径 B teacher forcing 一致率 99.0%。**GSM8K 放弃**：生成式在基座模型上贴地板（fp16 8-shot **0/15**），如实记为 floor 而非"未测"。工件 `results/task_accuracy.json` |
 | G2 | **batch 扫描**（batch ∈ {1,2,4,8}，吞吐-延迟曲线） | §2「throughput @ batch」 | `tools/batch_sweep.py` | ✅ **已测（2026-10-10 单轮有效）**：金丝雀 **−3.448% ≤5%**；fp16 单臂、ctx=1024、n=5 丢 1 轮 ⇒ step p50 87.20/85.88/86.82/86.29 ms、tok/s 11.47/23.29/46.07/92.71（工件 `results/batch_sweep.json`）。★ 单列表，禁止与 batch=1 历史数字跨轮混表；**量化衰减对比未测**（本轮仅 fp16） |
 | G3 | **occupancy / register 下限估计**（fused RMSNorm + grouped kernel） | §5「融合后是否引入新瓶颈」 | `tools/occupancy_probe.py` | ✅ **已跑（2026-10-10，`status=done`）**：解析上界（非 ncu 实测）blocks/SM ≤12/≤12/≤6，n_regs 38/40/40，occupancy 上界 100%（工件 `results/occupancy.json`）；stall 实测仍待换机（NCU_PLAN） |
-| G4 | **ncu 补测**（需 `CAP_SYS_ADMIN` 的机器：stall / occupancy / `gpu__time_duration.sum`） | §3、§5 | [docs/reference/NCU_PLAN.md](NCU_PLAN.md) | **换机才能做**（当前 blocked，见 [NCU_EVIDENCE.md](NCU_EVIDENCE.md) §1） |
+| G4 | **ncu 补测**（需 `CAP_SYS_ADMIN` 的机器：stall / occupancy / `gpu__time_duration.sum`） | §3、§5 | `docs/reference/NCU_PLAN.md`（本地文档） | **换机才能做**（当前 blocked，见 [NCU_EVIDENCE.md](NCU_EVIDENCE.md) §1） |
 | G5 | **PPL 写入工件**（`ppl_fp16/ppl_this/ppl_delta` 进 `result.json`） | §1「PPL」 | `tools/quant_ppl.py` + `tools/ppl_status.py --merge` | **完成（2026-10-09）**：3 份 cell 已写（fp16 ppl=9.1985；w8a16 g128 = 9.2047，**+0.067%** < 1% 门槛；w4a16 g128 = 10.0025，+8.7%，与它的 KL FAIL 自洽）。`PPL_STATUS` 44 格 = 3 已测 + 41 已声明、0 缺失 |
 
 一键执行：`scripts/run_gpu_suite.sh`（`--dry-run` 先打印完整计划，含每项的命令、
