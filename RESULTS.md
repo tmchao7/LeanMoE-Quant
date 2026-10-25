@@ -130,7 +130,7 @@ lm_head 直接决定 logits 却仍然近无损（KL 6.1e-5、top-1 165/165 全�
 | FP8 / MXFP4（sm_120 的 block-scale） | FP8 跳过（与 int8 同字节，无收益）；**MXFP4 已跑，负结果**（EXP-p3-02，见 §4） |
 | E5 专家敏感度 / E8 跨带宽（V100） | 矩阵已声明，**未跑** |
 | **E6 KV INT8** | ✅ **已批准立项 + 工程前置已落**（2026-10-24/25）：预注册记录 [EXP-p5-01](experiments/EXP-p5-01-kv-int8.md) + 参考数学/守卫 + 写路径 kernel（逐位舍入链）；**待**：K 门激活、读路径 score 折叠、门、A/B（材料 [KV_INT8_RECON](docs/reference/KV_INT8_RECON_2026-10-24.md)） |
-| **occupancy / register 下限估计** | ✅ **已跑（G3，2026-10-10，`status=done`）**：三族自研 kernel 的**解析上界**（`kind=estimate`/`bound=upper`，非 ncu 实测）——fused RMSNorm（n_regs=38）blocks/SM **≤12**（threads 限）；grouped gate_up（n_regs=40）**≤12**、down_sum **≤6**（regs 限）；occupancy 上界均 100%。工件 `results/occupancy.json`。stall/occupancy **实测**归因仍缺（ncu 阻断，见 [NCU_PLAN](docs/reference/NCU_PLAN.md)） |
+| **occupancy / register 下限估计** | ✅ **已跑（G3，2026-10-10，`status=done`）**：三族自研 kernel 的**解析上界**（`kind=estimate`/`bound=upper`，非 ncu 实测）——fused RMSNorm（n_regs=38）blocks/SM **≤12**（threads 限）；grouped gate_up（n_regs=40）**≤12**、down_sum **≤6**（regs 限）；occupancy 上界均 100%。工件 `results/occupancy.json`。stall/occupancy **实测**归因仍缺（ncu 阻断，见 `NCU_PLAN`（本地文档）） |
 | **batch 曲线** | ✅ **已测（G2，2026-10-10 单轮有效）**：金丝雀 **−3.448%** ≤5%（此前两轮 VOID 的冷态根因已由 `9729dde` 修复）。fp16、ctx=1024、同轮 4 点（n=5、丢 1 轮）：batch 1/2/4/8 → step p50 **87.20 / 85.88 / 86.82 / 86.29 ms**，tok/s **11.47 / 23.29 / 46.07 / 92.71**（工件 `results/batch_sweep.json`，单列表）。仅 fp16 单臂 ⇒ **量化衰减对比仍是缺口**；本项目仍是有意的 batch=1 单流课题 |
 | **任务级精度（GSM8K）** | 生成式口径在基座模型上贴地板（fp16 8-shot 0/15）⇒ **放弃并如实记录**；MMLU 已测并过门（§3.1） |
 | 18 个 host 主导格子的刷新 | 刷新值 VOID（共租 CPU），规范 payload 保留 pre-P2i 版本；列为 P2k。结论不依赖它 |

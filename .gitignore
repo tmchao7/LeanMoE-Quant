@@ -51,3 +51,19 @@ auth.json
 
 # 本地保留的项目亮点素材（不入库；用户后续自行整理进作品集）
 HIGHLIGHTS.md
+
+# 本地保留（不入库）：流程/投递/交接文档与 agent 配置——GitHub 只留 README+RESULTS+代码+记录+技术参考
+AGENTS.md
+PLAN.md
+ENVIRONMENT.md
+opencode.json
+.github/
+docs/handoff/
+docs/apply/
+docs/study/
+docs/compose/
+docs/ROADMAP.md
+docs/README.md
+docs/FUSION_OPPORTUNITIES.md
+docs/reference/SERVER_RUNBOOK.md
+docs/reference/NCU_PLAN.md

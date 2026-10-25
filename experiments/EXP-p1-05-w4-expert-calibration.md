@@ -8,7 +8,7 @@
 - **Date**: 2026-10-22（设计/离线实现）· 2026-10-23（GPU 诊断执行）
 - **Operator**: Mac 离线开发 + 5090 诊断执行
 - **Status**: `planned`（矩阵未注册；GPU 诊断已执行，负结果，不进入扩展）
-- **执行规格**: [分支规格与命令](../docs/compose/spec/quant-w4-calibration.md)
+- **执行规格**: `compose/spec/quant-w4-calibration.md`（本地文档）
 
 ## Hypothesis（GPU 前冻结）
 

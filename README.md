@@ -109,9 +109,8 @@ uv run python -m benchmarks.runner \
 uv run python -m tools.make_figures
 ```
 
-上机细节（模型快照路径、prompt 缓存、共享卡协议）见
-[ENVIRONMENT.md](ENVIRONMENT.md) 与 [docs/reference/SERVER_RUNBOOK.md](docs/reference/SERVER_RUNBOOK.md)；
-实验矩阵（唯一 cell 来源）在 [configs/experiments.yaml](configs/experiments.yaml)。
+实验矩阵（唯一 cell 来源）在 [configs/experiments.yaml](configs/experiments.yaml)；
+上机与环境细节见仓库内 `ENVIRONMENT.md` / `docs/reference/`（部分运维文档仅保留在维护者本地，未入库）。
 
 ---
 
@@ -126,7 +125,8 @@ src/lemoq/quant/           # 量化实现（W8/W4 per-group、门引用、逐表
 benchmarks/runner.py       # harness：五条加载前拒绝 + payload schema + correctness 门
 tools/                     # probe / operator ledger / figures / quant gate 工具链
 tests/                     # 733 项 CPU 测试（parity 门、schema 守卫、门表钉死）
-docs/                      # 文档地图见 docs/README.md；图表在 docs/figures/
+docs/figures/              # 4 figures, regenerated from artifacts 从工件重生成的图表
+docs/reference/            # METRICS / MODELS / SPECS / NCU_EVIDENCE（技术参考）
 ```
 
 > 适用范围 Applicability：所有数字为 **batch=1 单流**、单张 RTX 5090（sm_120）、
