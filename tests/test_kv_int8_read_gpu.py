@@ -129,12 +129,14 @@ def test_cache_write_scatters_at_pos():
     new_v = torch.randn(1, HEADS, 1, D, generator=g, dtype=torch.float32).to(torch.float16).cuda()
     pos = torch.tensor([5], dtype=torch.int64, device=kc.device)
     kv_int8_cache_write(bufs, new_k, new_v, pos)
-    # [pos] 槽 = 参考行量化（逐位）
+    # [pos] 槽 = 参考行量化（逐位）。★ 代码的除法用 **fp32 scale**（kernel 约定），
+    #   存储的 scale 才是 fp16 —— 参考若用 fp16 scale 做除法会出现 1-ulp 代码差。
     amax_k = new_k[0, :, 0].float().abs().amax(dim=-1, keepdim=True)
-    s_ref = torch.where(amax_k > 0, amax_k / 127.0, torch.ones_like(amax_k)).to(torch.float16)
-    q_ref = torch.round(new_k[0, :, 0].float() / s_ref.float()).clamp(-127, 127).to(torch.int8)
+    s32 = torch.where(amax_k > 0, amax_k / 127.0, torch.ones_like(amax_k))
+    s_ref = s32.to(torch.float16)
+    q_ref = torch.round(new_k[0, :, 0].float() / s32).clamp(-127, 127).to(torch.int8)
     assert torch.equal(bufs["kc"][0, :, 5, :], q_ref)
-    assert torch.equal(bufs["ks"][0, :, 5], s_ref)
+    assert torch.equal(bufs["ks"][0, :, 5], s_ref.squeeze(-1))
     # 其余槽逐位不动
     mask = torch.ones(S, dtype=torch.bool, device=kc.device)
     mask[5] = False
@@ -144,12 +146,17 @@ def test_cache_write_scatters_at_pos():
 
 @pytest.mark.gpu
 def test_bulk_quantize_matches_reference_on_device():
-    """K 门 ⑧：整段 bulk 量化（免 host 长度）与逐位置参考一致。"""
+    """K 门 ⑧：整段 bulk 量化（免 host 长度）与逐位置参考一致。
+
+    ★ 参考的除法用 **fp32 scale**（kernel 约定：fp32 除、fp16 存）——用 fp16 scale
+      做除法会有 1-ulp 代码差（2026-10-25 首跑抓到）。
+    """
     assert _requires_gpu()
     x = torch.randn(1, HEADS, SEQ, HEAD_DIM, dtype=torch.float32).to(torch.float16)
     bufs = kv_int8_bulk_quantize(x, x, filled=None)
     amax = x[0].float().abs().amax(dim=-1, keepdim=True)
-    s_ref = torch.where(amax > 0, amax / 127.0, torch.ones_like(amax)).to(torch.float16)
+    s32 = torch.where(amax > 0, amax / 127.0, torch.ones_like(amax))
+    s_ref = s32.to(torch.float16)
     assert torch.equal(bufs["ks"][0], s_ref.squeeze(-1))
-    q_ref = torch.round(x[0].float() / s_ref.float()).clamp(-127, 127).to(torch.int8)
+    q_ref = torch.round(x[0].float() / s32).clamp(-127, 127).to(torch.int8)
     assert torch.equal(bufs["kc"][0], q_ref)
