@@ -16,8 +16,8 @@
 <text x="485.0" y="594.0" font-size="11.0" fill="#57606a" font-weight="400" text-anchor="middle">measured speedup (×, same-round A/B)</text>
 <text x="194.0" y="160.0" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">Execution</text>
 <text x="194.0" y="175.0" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">(eager → CUDA Graph)</text>
-<rect x="210.0" y="145.0" width="322.9" height="16.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
-<text x="540.9" y="157.5" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">2.00×  @1024   (8.12 → 4.07 ms)</text>
+<rect x="210.0" y="145.0" width="393.1" height="16.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
+<text x="611.1" y="157.5" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">2.43×  @1024   (9.88 → 4.07 ms)</text>
 <rect x="210.0" y="167.0" width="218.1" height="16.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
 <text x="436.1" y="179.5" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.35×  @4096   (9.87 → 7.32 ms)</text>
 <text x="194.0" y="272.0" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">Quantization</text>

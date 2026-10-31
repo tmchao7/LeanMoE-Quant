@@ -22,13 +22,13 @@
 <line x1="300.0" y1="154.7" x2="659.6" y2="154.7" stroke="#4c6ef5" stroke-width="1.2" stroke-dasharray="3 3"/>
 <text x="286.0" y="149.7" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fp16 eager (earlier round)</text>
 <text x="651.6" y="149.7" font-size="11.0" fill="#c92a2a" font-weight="600" text-anchor="end">82.64 ms</text>
-<rect x="300.0" y="192.0" width="170.6" height="18.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
+<rect x="300.0" y="192.0" width="186.6" height="18.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
 <text x="286.0" y="205.0" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fp16 eager</text>
-<text x="462.6" y="205.0" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">8.12 ms</text>
+<text x="478.6" y="205.0" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">9.88 ms</text>
 <rect x="300.0" y="247.3" width="114.3" height="18.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
 <text x="286.0" y="260.3" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">fp16 + CUDA Graph</text>
 <text x="406.3" y="260.3" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">4.07 ms</text>
-<text x="424.3" y="260.3" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">2.00×  execution axis (same round)</text>
+<text x="424.3" y="260.3" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="start">2.43×  execution axis (same round)</text>
 <rect x="300.0" y="302.7" width="103.6" height="18.0" fill="#e8590c" opacity="1.00" rx="3.0"/>
 <text x="286.0" y="315.7" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">+ fused RMSNorm</text>
 <text x="395.6" y="315.7" font-size="11.0" fill="#ffffff" font-weight="600" text-anchor="end">3.57 ms</text>

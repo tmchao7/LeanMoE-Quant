@@ -102,9 +102,11 @@ SOURCES: dict[str, dict[str, str]] = {
     },
     "fp16_eager_1024": {
         "kind": "payload",
-        "path": "results/EXP-p4b-01-truncation__bit_width=fp16_execution=eager_ctx=1024/result.json",
+        "path": "results/EXP-p2j-refresh/archive/EXP-p4b-01-truncation__bit_width=fp16_execution=eager_ctx=1024.json",
         "ptr": "latency.per_token_p50_ms",
-        "note": "E7 同一轮的 eager 臂（P2j 刷新 VOID，保留 pre-P2i 规范值）",
+        "note": "★ 归档 pre-P2j 轮的 eager 臂（9.8841），与同归档的 cudagraph（4.0670）构成 "
+        "RESULTS.md 执行轴行引用的同轮对（2.43×）。base-dir result.json 的 8.1179 在记录里"
+        "无出处（v1=9.732、v2 采纳=9.8841、v3 作废=8.2915 都不是它）——不采用，防跨轮混比。",
     },
     # --- EXP-p4c-01 的 v7（2026-10-25 E6 采纳刷新，canonical） ---
     "p4c_fp16_sdpa_1024": {
