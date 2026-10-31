@@ -1,22 +1,24 @@
-# LeanMoE-Quant
+<div align="center">
+  <img src="https://capsule-render.vercel.app/api?type=soft&height=150&color=0:1E3A8A,55:2563EB,100:0D9488&text=LeanMoE-Quant&fontSize=42&fontColor=ffffff&desc=Byte-budget%20quantization%20%2B%20Triton%20kernels%20for%20MoE%20decode%20at%20batch%3D1&descSize=15&descAlignY=76" alt="LeanMoE-Quant" />
+</div>
 
-![status](https://img.shields.io/badge/status-v7%20canonical%20adopted-12b886)
-![tests](https://img.shields.io/badge/tests-733%20passed-brightgreen)
-![gate](https://img.shields.io/badge/accuracy%20gate-KL%3C0.01%20%C2%B7%20top1%E2%89%A50.95-blue)
+<p align="center"><a href="README_EN.md">English</a> · <b>简体中文</b></p>
+
+<p align="center">
+  <img alt="status" src="https://img.shields.io/badge/status-v7%20canonical%20adopted-12b886" />
+  <img alt="tests" src="https://img.shields.io/badge/tests-733%20passed-brightgreen" />
+  <img alt="gate" src="https://img.shields.io/badge/accuracy%20gate-KL%3C0.01%20%C2%B7%20top1%E2%89%A50.95-blue" />
+  <img alt="gpu" src="https://img.shields.io/badge/GPU-RTX%205090%20%C2%B7%20sm__120-4c6ef5" />
+  <img alt="model" src="https://img.shields.io/badge/model-OLMoE--1B--7B--0924%20%C2%B7%2064%20experts-845ef7" />
+  <img alt="canonical" src="https://img.shields.io/badge/canonical-1.46%20%2F%201.61%20ms%20%C2%B7%20685%20%2F%20622%20tok%2Fs-20c997" />
+  <img alt="best cell" src="https://img.shields.io/badge/best%20cell-2.44%C3%97%20%2F%204.25%C3%97-12b886" />
+</p>
 
 **Byte-budget-driven quantization + Triton kernel optimization for MoE decode at batch=1.**
 单张 RTX 5090 上把 OLMoE-1B-7B（64 专家 / top-8）的单请求 decode 从 **82.6 ms/token**
 优化到 **1.46 / 1.61 ms**（ctx 1024/4096，685 / 622 tok/s），最好格对原生基线
-**2.44× / 4.25×**——并实测出这条路线的**结构性上限**。
-
-> **EN**: six custom Triton kernel families, seven independently A/B-tested levers (all
-> adopted), a *measured* structural ceiling (~1.69× at ctx=1024, because weights are only
-> ~41% of a decode step), and first-class negative results. Every number on this page
-> traces to an artifact; nothing is published without passing its accuracy gate.
->
-> **中文**：6 个自研 Triton kernel 族、七条各自独立同轮 A/B 的杠杆（全部采纳）、**实测**的
-> 结构性上限（权重只占一步 ~41% ⇒ 完美权重路径也只有 ~1.69×）、一等的负结果。本页每个
-> 数字都可追溯到工件；不过正确性门的配置不发布性能数字。
+**2.44× / 4.25×**——并实测出这条路线的**结构性上限**。本页每个数字都可追溯到工件；
+不过正确性门的配置不发布性能数字。
 
 ---
 
@@ -105,12 +107,13 @@ uv run python -m benchmarks.runner \
     --ctx 1024 --bit-width w8a16 --attn kernel \
     --execution cudagraph --moe grouped --dequant fused --force
 
-# 5) 从工件重生成全部图表（本页 4 张 SVG 即此产物）
+# 5) 从工件重生成全部图表（本页 4 张 SVG 即此产物，每张图左下角带出处脚注）
 uv run python -m tools.make_figures
 ```
 
 实验矩阵（唯一 cell 来源）在 [configs/experiments.yaml](configs/experiments.yaml)；
-上机与环境细节见仓库内 `ENVIRONMENT.md` / `docs/reference/`（部分运维文档仅保留在维护者本地，未入库）。
+上机与环境等运维文档（`ENVIRONMENT.md` 等）仅保留在维护者本地、未入库，
+技术参考见 [docs/reference/](docs/reference/)。
 
 ---
 
