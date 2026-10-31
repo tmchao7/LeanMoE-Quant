@@ -52,6 +52,9 @@ auth.json
 # 本地保留的项目亮点素材（不入库；用户后续自行整理进作品集）
 HIGHLIGHTS.md
 
+# 个人材料（不入库）：简历相关本地草稿
+简历建议.md
+
 # 本地保留（不入库）：流程/投递/交接文档与 agent 配置——GitHub 只留 README+RESULTS+代码+记录+技术参考
 AGENTS.md
 PLAN.md
