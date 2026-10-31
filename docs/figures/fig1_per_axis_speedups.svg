@@ -1,41 +1,43 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="620" viewBox="0 0 1180 620" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
-<rect width="1180" height="620" fill="#ffffff"/>
-<text x="24.0" y="34.0" font-size="17.0" fill="#1f2328" font-weight="600" text-anchor="start">Each lever measured with its own same-round A/B</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="648" viewBox="0 0 1180 648" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect width="1180" height="648" fill="#ffffff"/>
+<text x="24.0" y="34.0" font-size="17.0" fill="#1f2328" font-weight="600" text-anchor="start">Every lever pays: all four same-round A/Bs land above 1.0×</text>
 <text x="24.0" y="56.0" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="start">OLMoE-1B-7B-0924, batch=1 decode, RTX 5090, measured achievable bandwidth 1560.3 GB/s.</text>
 <text x="24.0" y="71.0" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="start">Ratio &gt; 1.0 = faster. These are four independent A/Bs: do not multiply them (RESULTS.md rule).</text>
-<line x1="371.8" y1="108.0" x2="371.8" y2="558.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="371.8" y="576.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">1.0×</text>
-<line x1="452.6" y1="108.0" x2="452.6" y2="558.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="452.6" y="576.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">1.5×</text>
-<line x1="533.5" y1="108.0" x2="533.5" y2="558.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="533.5" y="576.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">2.0×</text>
-<line x1="614.4" y1="108.0" x2="614.4" y2="558.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="614.4" y="576.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">2.5×</text>
-<line x1="695.3" y1="108.0" x2="695.3" y2="558.0" stroke="#d8dee4" stroke-width="0.8"/>
-<text x="695.3" y="576.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">3.0×</text>
-<text x="485.0" y="596.0" font-size="11.0" fill="#57606a" font-weight="400" text-anchor="middle">measured speedup (×, same-round A/B)</text>
-<text x="194.0" y="160.2" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">Execution</text>
-<text x="194.0" y="175.2" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">(eager → CUDA Graph)</text>
-<rect x="210.0" y="145.2" width="322.9" height="16.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
-<text x="540.9" y="157.8" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">2.00×  @1024   (8.12 → 4.07 ms)</text>
-<rect x="210.0" y="167.2" width="218.1" height="16.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
-<text x="436.1" y="179.8" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.35×  @4096   (9.87 → 7.32 ms)</text>
-<text x="194.0" y="272.8" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">Quantization</text>
-<text x="194.0" y="287.8" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">(w8a16 vs fp16, in-graph)</text>
-<rect x="210.0" y="257.8" width="198.2" height="16.0" fill="#12b886" opacity="1.00" rx="3.0"/>
-<text x="416.2" y="270.2" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.23×  @1024   (3.57 → 2.91 ms)</text>
-<rect x="210.0" y="279.8" width="178.4" height="16.0" fill="#12b886" opacity="1.00" rx="3.0"/>
-<text x="396.4" y="292.2" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.10×  @4096   (6.85 → 6.21 ms)</text>
-<text x="194.0" y="385.2" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">Attention impl</text>
-<text x="194.0" y="400.2" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">(HF sdpa → split-KV)</text>
-<rect x="210.0" y="370.2" width="261.9" height="16.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
-<text x="479.9" y="382.8" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.62×  @1024   (3.57 → 2.20 ms)</text>
-<rect x="210.0" y="392.2" width="470.7" height="16.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
-<text x="688.7" y="404.8" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">2.91×  @4096   (6.83 → 2.35 ms)</text>
-<text x="194.0" y="497.8" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">Fused RMSNorm</text>
-<text x="194.0" y="512.8" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">(7 kernels → 1, whole step)</text>
-<rect x="210.0" y="493.8" width="199.9" height="16.0" fill="#e8590c" opacity="1.00" rx="3.0"/>
-<text x="417.9" y="506.2" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.24×  @1024   (2.41 → 1.95 ms)</text>
-<line x1="371.8" y1="100.0" x2="371.8" y2="562.0" stroke="#c92a2a" stroke-width="1.4" stroke-dasharray="4 3"/>
+<line x1="371.8" y1="108.0" x2="371.8" y2="556.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="371.8" y="574.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">1.0×</text>
+<line x1="452.6" y1="108.0" x2="452.6" y2="556.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="452.6" y="574.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">1.5×</text>
+<line x1="533.5" y1="108.0" x2="533.5" y2="556.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="533.5" y="574.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">2.0×</text>
+<line x1="614.4" y1="108.0" x2="614.4" y2="556.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="614.4" y="574.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">2.5×</text>
+<line x1="695.3" y1="108.0" x2="695.3" y2="556.0" stroke="#d8dee4" stroke-width="0.8"/>
+<text x="695.3" y="574.0" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle">3.0×</text>
+<text x="485.0" y="594.0" font-size="11.0" fill="#57606a" font-weight="400" text-anchor="middle">measured speedup (×, same-round A/B)</text>
+<text x="194.0" y="160.0" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">Execution</text>
+<text x="194.0" y="175.0" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">(eager → CUDA Graph)</text>
+<rect x="210.0" y="145.0" width="322.9" height="16.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
+<text x="540.9" y="157.5" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">2.00×  @1024   (8.12 → 4.07 ms)</text>
+<rect x="210.0" y="167.0" width="218.1" height="16.0" fill="#4c6ef5" opacity="1.00" rx="3.0"/>
+<text x="436.1" y="179.5" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.35×  @4096   (9.87 → 7.32 ms)</text>
+<text x="194.0" y="272.0" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">Quantization</text>
+<text x="194.0" y="287.0" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">(w8a16 vs fp16, in-graph)</text>
+<rect x="210.0" y="257.0" width="198.2" height="16.0" fill="#12b886" opacity="1.00" rx="3.0"/>
+<text x="416.2" y="269.5" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.23×  @1024   (3.57 → 2.91 ms)</text>
+<rect x="210.0" y="279.0" width="178.4" height="16.0" fill="#12b886" opacity="1.00" rx="3.0"/>
+<text x="396.4" y="291.5" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.10×  @4096   (6.85 → 6.21 ms)</text>
+<text x="194.0" y="384.0" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">Attention impl</text>
+<text x="194.0" y="399.0" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">(HF sdpa → split-KV)</text>
+<rect x="210.0" y="369.0" width="261.9" height="16.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
+<text x="479.9" y="381.5" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.62×  @1024   (3.57 → 2.20 ms)</text>
+<rect x="210.0" y="391.0" width="470.7" height="16.0" fill="#f59f00" opacity="1.00" rx="3.0"/>
+<text x="688.7" y="403.5" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">2.91×  @4096   (6.83 → 2.35 ms)</text>
+<text x="194.0" y="496.0" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">Fused RMSNorm</text>
+<text x="194.0" y="511.0" font-size="11.5" fill="#1f2328" font-weight="400" text-anchor="end">(7 kernels → 1, whole step)</text>
+<rect x="210.0" y="492.0" width="199.9" height="16.0" fill="#e8590c" opacity="1.00" rx="3.0"/>
+<text x="417.9" y="504.5" font-size="11.0" fill="#1f2328" font-weight="600" text-anchor="start">1.24×  @1024   (2.41 → 1.95 ms)</text>
+<line x1="371.8" y1="100.0" x2="371.8" y2="560.0" stroke="#c92a2a" stroke-width="1.4" stroke-dasharray="4 3"/>
 <text x="377.8" y="96.0" font-size="10.5" fill="#c92a2a" font-weight="600" text-anchor="start">1.0× = no change</text>
+<text x="24.0" y="624.0" font-size="9.0" fill="#57606a" font-weight="400" text-anchor="start">Data: results/EXP-p0-02-baseline-fp16__ctx=1024 · results/EXP-p4b-01-truncation__* · results/EXP-p4c-01-in-graph-attention__* (v7) · experiments/EXP-p4c-02-elementwise-tail.md §5.6</text>
+<text x="24.0" y="637.0" font-size="9.0" fill="#57606a" font-weight="400" text-anchor="start">Full provenance per number: docs/figures/inputs.json</text>
 </svg>

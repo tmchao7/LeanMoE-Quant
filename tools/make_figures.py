@@ -44,6 +44,12 @@ COLORS = {
     "warn": "#c92a2a",
 }
 
+# 展示层设计系统（2026-10-31）：
+#   结论式标题（标题即结论，数值全部来自同一份 inputs）；直读数值标签；
+#   语义色板：蓝=fp16/执行轴、绿=量化、橙=融合 norm、黄=attention/KV 路径、红=门线、灰=地板/背景；
+#   每张图左下角出处脚注（真实工件路径），完整「数字→工件」映射在 docs/figures/inputs.json。
+FULL_PROV = "Full provenance per number: docs/figures/inputs.json"
+
 # 每个数字的来源。`kind=payload` 从工件读；`kind=record` 是记录正文里的值（转录，写明出处）。
 SOURCES: dict[str, dict[str, str]] = {
     "baseline_fp16_eager_1024": {
@@ -378,17 +384,17 @@ def fig1(inputs: dict[str, Any]) -> str:
         ),
     ]
 
-    w, h = 1180, 620
+    w, h = 1180, 648
     svg = Svg(
         w,
         h,
-        "Each lever measured with its own same-round A/B",
+        "Every lever pays: all four same-round A/Bs land above 1.0×",
         [
             "OLMoE-1B-7B-0924, batch=1 decode, RTX 5090, measured achievable bandwidth 1560.3 GB/s.",
             "Ratio > 1.0 = faster. These are four independent A/Bs: do not multiply them (RESULTS.md rule).",
         ],
     )
-    left, right, top, bottom = 210, 420, 108, 62
+    left, right, top, bottom = 210, 420, 108, 92
     plot_w, plot_h = w - left - right, h - top - bottom
     vmax = 3.4
 
@@ -439,6 +445,16 @@ def fig1(inputs: dict[str, Any]) -> str:
     svg.text(
         x_of(1.0) + 6, top - 12, "1.0× = no change", size=10.5, color=COLORS["warn"], weight="600"
     )
+    # 左下出处脚注（设计系统：图上每个数都能沿这行追到工件；完整映射在 inputs.json）
+    svg.text(
+        24,
+        h - 24,
+        "Data: results/EXP-p0-02-baseline-fp16__ctx=1024 · results/EXP-p4b-01-truncation__* · "
+        "results/EXP-p4c-01-in-graph-attention__* (v7) · experiments/EXP-p4c-02-elementwise-tail.md §5.6",
+        size=9,
+        color=MUTED,
+    )
+    svg.text(24, h - 11, FULL_PROV, size=9, color=MUTED)
     return svg.render()
 
 
@@ -500,18 +516,19 @@ def fig2(inputs: dict[str, Any]) -> str:
     context = ("fp16 eager (earlier round)", p50("baseline_fp16_eager_1024"), COLORS["fp16"], None)
     floor = p50("byte_floor_1024")
 
-    w, h = 940, 510
+    w, h = 940, 546
     svg = Svg(
         w,
         h,
-        "Distance to the bandwidth wall @ctx=1024",
+        "From %.1f to %.2f ms @ctx=1024: every hop is its own same-round A/B"
+        % (context[1], chain[-1][1]),
         [
             "ms per token, log scale. Dashed line = byte floor [T] / measured achievable bandwidth (%.4f ms)."
             % floor,
             "Each hop is its own same-round (or same-cell) A/B; the hollow bar is context, not a hop.",
         ],
     )
-    left, right, top, bottom = 300, 250, 118, 66
+    left, right, top, bottom = 300, 250, 118, 96
     plot_w, plot_h = w - left - right, h - top - bottom
     import math
 
@@ -576,13 +593,23 @@ def fig2(inputs: dict[str, Any]) -> str:
     svg.text(xf + 8, top - 16, "byte floor %.4f ms" % floor, size=10.5, color=MUTED, weight="600")
     svg.text(
         24,
-        h - 16,
+        h - 34,
         "Baseline sits %.0f× above the floor. The best cell reads %.2f× of it — below the fp16-"
         "accounting floor, because KV-INT8 streams half the KV bytes (E6)."
         % (context[1] / floor, chain[-1][1] / floor),
         size=10.5,
         color=MUTED,
     )
+    svg.text(
+        24,
+        h - 20,
+        "Data: results/EXP-p0-02-baseline-fp16__ctx=1024 (baseline & floor) · "
+        "results/EXP-p2j-refresh/archive · results/EXP-p4b-01-truncation__* · "
+        "results/EXP-p4c-01-in-graph-attention__*",
+        size=9,
+        color=MUTED,
+    )
+    svg.text(24, h - 8, FULL_PROV, size=9, color=MUTED)
     return svg.render()
 
 
@@ -630,11 +657,22 @@ def fig3(inputs: dict[str, Any]) -> str:
     }
     bw = float(inputs["measured_bw_gbps"]["value"])
 
-    w, h = 980, 500
+    # 结论式标题：两个 headline 达成率直接从工件读；缺失则回退到描述式标题（不许编数）。
+    att_grouped = subjects["grouped_fp16_layer"].get("attainment_pct_cold_best")
+    att_deq = subjects["dequant_lm_head_w8a16"].get("attainment_pct_cold_best")
+    if att_grouped is not None and att_deq is not None:
+        title = "Grouped GEMV runs at %.0f%% of the wall; fused dequant-GEMM %.1f%%" % (
+            att_grouped,
+            att_deq,
+        )
+    else:
+        title = "Kernel-level: necessary bytes vs measured time (isolated, L2 flushed)"
+
+    w, h = 980, 552
     svg = Svg(
         w,
         h,
-        "Kernel-level: necessary bytes vs measured time (isolated, L2 flushed)",
+        title,
         [
             "One call per subject. attainment = hand-computed necessary bytes / cold time / "
             "measured achievable bandwidth (%.1f GB/s)." % bw,
@@ -705,7 +743,7 @@ def fig3(inputs: dict[str, Any]) -> str:
     base = subjects["grouped_fp16_layer"]
     base_ms = base["timing"]["cold_single"]["min_ms"]
     base_b = base["analytical_bytes"]["read"]
-    foot_y = top + plot_h + 58
+    foot_y = top + plot_h + 52
     svg.text(
         left, foot_y, "expert GEMV — bytes ↓ / time ↓ (vs fp16):", size=11, color=INK, weight="600"
     )
@@ -729,6 +767,15 @@ def fig3(inputs: dict[str, Any]) -> str:
         size=10.5,
         color=MUTED,
     )
+    svg.text(
+        24,
+        h - 22,
+        "Data: results/ncu_evidence/isolated.json — cold timing (256 MB L2 flush before each "
+        "timed call) minus the measured event floor",
+        size=9,
+        color=MUTED,
+    )
+    svg.text(24, h - 9, FULL_PROV, size=9, color=MUTED)
     return svg.render()
 
 
@@ -749,10 +796,12 @@ def fig4(inputs: dict[str, Any]) -> str:
         ("KV direct write (F4)", 2.94, "5/5 pairs", "EXP-p4c-01 §F4", "attn"),
         ("skip mask-fill (F1)", 1.33, "A/B", "skip_mask_fill_ab", "norm"),
     ]
+    w, h = 980, 448
     svg = Svg(
-        980,
-        420,
-        "Seven adopted levers — same-round A/B step-time reduction",
+        w,
+        h,
+        "Seven adopted levers: −%.1f%% to −%.1f%% per decode step, each A/B'd same-round"
+        % (max(v for _, v, _, _, _ in levers), min(v for _, v, _, _, _ in levers)),
         [
             "Independent processes, adjacent arms, same round; canary drift ≤5%, host_share ≤5% per arm.",
             "Sources: RESULTS.md §2 (every row cites its artifact). KV INT8 at ctx=1024: −0.78% (5/5).",
@@ -796,6 +845,14 @@ def fig4(inputs: dict[str, Any]) -> str:
         svg.rect(lx, legend_y - 10, 14, 14, COLORS[key], radius=3)
         svg.text(lx + 20, legend_y + 1, label, size=10.5, color=MUTED)
         lx += 20 + _text_width(label, 10.5) + 26
+    svg.text(
+        24,
+        h - 12,
+        "Data: RESULTS.md §2 (each row cites its artifact: results/EXP-e6-ab-4096-run2 · "
+        "results/EXP-f5-ab-20261025 · results/EXP-f2-ab-20261024 · results/EXP-f4-ab-20261025)",
+        size=9,
+        color=MUTED,
+    )
     return svg.render()
 
 
