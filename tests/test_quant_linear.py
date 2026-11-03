@@ -170,6 +170,37 @@ def test_scale_is_fp16_and_symmetric_quantization_stores_no_zero():
     assert qa.zero is not None and qa.zero.dtype == torch.float16
 
 
+def test_asymmetric_forward_matches_reference():
+    """非对称 4/8-bit 的 forward 必须与 `api.dequantize_reference` 对齐。
+
+    ★ 2026-11-03：旧实现把非对称码符号扩展（4-bit）或存成 int8（8-bit），
+    8..15 / 128..255 会变成负数，随后 `(codes - zero) * scale` 直接错 O(1)。
+    这条测试同时覆盖打包/解包与 fused kernel 的 unsigned 分支（CPU 侧只测前者）。
+    """
+    torch.manual_seed(3)
+    for bits, name in ((4, "w4a16"), (8, "w8a16")):
+        linear = nn.Linear(128, 64, bias=False)
+        spec = SchemeSpec.from_flags(name, 32)
+        spec = SchemeSpec(**{**spec.__dict__, "symmetric": False})
+        ql = QuantLinear(linear, spec)
+        q = qapi.quantize_linear(
+            linear.weight.detach(),
+            bits=bits,
+            group_size=32,
+            scheme="rtn",
+            symmetric=False,
+        )
+        ref = qapi.dequantize_reference(q).to(ql.dequantized_weight().dtype)
+        got = ql.dequantized_weight()
+        assert torch.allclose(got, ref, atol=1e-3), (
+            bits,
+            float((got - ref).abs().max()),
+        )
+        x = torch.randn(2, 128)
+        expect = torch.nn.functional.linear(x, ref, None)
+        assert torch.allclose(ql(x), expect, atol=1e-3), bits
+
+
 # ---------------------------------------------------------------------------
 # 3) ★ 实数 vs 账 —— 项目 [W] 公式的第一次对照
 # ---------------------------------------------------------------------------

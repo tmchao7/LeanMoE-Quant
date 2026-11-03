@@ -370,9 +370,16 @@ if _HAS_TRITON:
                         sg = ((ci >> 3) * (-2.0)) + 1.0  # 0→+1，1→−1
                         codes = sg * mag
                     else:
-                        # int4 符号扩展：`((x & 0xF) ^ 8) - 8`（0..15 -> -8..7），纯算术
-                        lo = ((packed & 0xF) ^ 8) - 8
-                        hi = (((packed >> 4) & 0xF) ^ 8) - 8
+                        # 对称码是 int4（-8..7），非对称码是 uint4（0..15）。
+                        # ★ 2026-11-03：旧版无条件符号扩展，非对称 8..15 会变负，
+                        #   随后 `(codes - zero)` 算错 O(1)。SYMMETRIC 是 constexpr，
+                        #   所以这个分支不增加运行期开销。
+                        if SYMMETRIC:
+                            lo = ((packed & 0xF) ^ 8) - 8
+                            hi = (((packed >> 4) & 0xF) ^ 8) - 8
+                        else:
+                            lo = packed & 0xF
+                            hi = (packed >> 4) & 0xF
                         # join + reshape 按 (byte, which) 展平成 k 序：k = 2j + which
                         codes = tl.reshape(tl.join(lo, hi), (BLOCK_N, BLOCK_K)).to(tl.float32)
 
@@ -405,6 +412,11 @@ if _HAS_TRITON:
                     sc1 = tl.load(s_ptr + offs_n * n_groups + g_one, mask=mask_n, other=0.0).to(
                         tl.float32
                     )
+                    # ★ 2026-11-03：MXFP4 的 E8M0 尺度是 2^(X−127) 的字节，不是数值；
+                    #   这个分支（GROUP_SIZE % BLOCK_K == 0，如 BLOCK_K=16/group=32）
+                    #   旧版漏了转换，127 会被当成 127.0 而不是 1.0。
+                    if MXFP4:
+                        sc1 = tl.exp2(sc1 - 127.0)
                     sc = tl.broadcast_to(sc1[:, None], (BLOCK_N, BLOCK_K))
                 if SYMMETRIC:
                     w = codes * sc
