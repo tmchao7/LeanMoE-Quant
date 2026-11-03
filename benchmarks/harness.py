@@ -178,7 +178,11 @@ def is_done(exp_id: str, root: str = RESULTS_DIR) -> bool:
         return False
     try:
         with open(p, encoding="utf-8") as fh:
-            return json.load(fh).get("status") == "done"
+            payload = json.load(fh)
+        # ★ 2026-11-03：`status=done` 但 schema 不合法（例如数值字段写成 bool、
+        # 或门表/延迟结构自相矛盾）的 payload 不能算完成——否则下一轮会跳过它，
+        # 一个 builder 回归就会永久留下坏工件。
+        return payload.get("status") == "done" and not validate_result(payload)
     except Exception:  # noqa: BLE001
         return False
 

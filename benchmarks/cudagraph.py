@@ -45,6 +45,14 @@ class CudaGraphConfig:
             raise ValueError("the EXP-p0-03 gate supports q_len=1 only")
         if self.ctx <= 0 or self.max_new_tokens <= 0:
             raise ValueError("ctx and max_new_tokens must be positive")
+        # ★ 2026-11-03：ctx=1 会让 prefill 的单个 token 走 q_len=1 decode 路径，
+        #   而 filled_len 仍为 0 ⇒ attention 读 0 个 KV 位置、输出全零，不报错。
+        #   ctx=1 不是有效配置；显式拒绝，避免静默错。
+        if self.ctx < 2:
+            raise ValueError(
+                "ctx must be >= 2: ctx=1 routes the prefill token through the "
+                "q_len=1 decode path with filled_len=0 (zero attention)"
+            )
 
     @property
     def max_cache_len(self) -> int:

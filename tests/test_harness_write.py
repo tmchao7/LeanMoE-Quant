@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 
-from benchmarks.harness import write_result
+from benchmarks.harness import is_done, write_result
 from benchmarks.schema import empty_result
 
 
@@ -57,3 +57,13 @@ def test_write_result_archives_before_overwrite(tmp_path):
     # 内容完全相同再写一次：不产生新归档
     write_result(_fail_payload(notes="v2"), root=str(tmp_path))
     assert len(list(archive_dir.glob("result_*.json"))) == 1
+
+
+def test_is_done_rejects_invalid_done_payload(tmp_path):
+    """status=done 但 schema 不合法的 payload 不能短路下一轮（2026-11-03）。"""
+    payload = empty_result("EXP-t-write", status="done")
+    payload["config"]["ctx"] = True  # bool 不是合法数值
+    target = tmp_path / "EXP-t-write" / "result.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(payload), encoding="utf-8")
+    assert is_done("EXP-t-write", root=str(tmp_path)) is False

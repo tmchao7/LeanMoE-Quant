@@ -91,6 +91,15 @@ def evaluate(
     """比较首尾两份 payload，返回 verdict（不抛异常——坏输入 = VOID）。"""
     reasons: list[str] = []
     head_ms = tail_ms = drift = None
+    # ★ 2026-11-03：已作废的轮次不得重新判 PASS。`--mark` 保留 latency 段，
+    #   所以在同一对文件上重跑 canary 会得到"漂移很小"的假 PASS。
+    for label, payload in (("head", head), ("tail", tail)):
+        if _dig(payload, ("status",)) == "void":
+            reasons.append("%s 的 status=void —— 已作废的轮次不得重新判 PASS" % label)
+    if not isinstance(_dig(head, ("hardware",)), dict) or not isinstance(
+        _dig(tail, ("hardware",)), dict
+    ):
+        reasons.append("金丝雀缺少 hardware 段（无法确认同卡/同算力）")
     try:
         head_ms = _dig(head, metric)
         tail_ms = _dig(tail, metric)

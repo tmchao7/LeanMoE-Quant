@@ -154,11 +154,26 @@ for s in "${STEPS[@]}"; do
       IFS=',' read -r -a _cells <<< "$GATE_CELLS"
       for EXP_ID in "${_cells[@]}"; do
         [ -z "$EXP_ID" ] && continue
+        # ★ 2026-11-03：runner 的 --exp 只接受 **base id**（它自己按矩阵拼轴）。
+        #   完整 cell id 直接传会拼出 `__ctx=...__ctx=...` 的错路径，且能静默跑成
+        #   blocked。这里把 `key=value` 后缀翻译成显式 CLI 参数。
+        BASE="${EXP_ID%%__*}"
+        ARGS=()
+        if [[ "$EXP_ID" == *"__"* ]]; then
+          SUFFIX="${EXP_ID#*__}"
+          IFS='_' read -r -a PARTS <<< "$SUFFIX"
+          for part in "${PARTS[@]}"; do
+            key="${part%%=*}"
+            val="${part#*=}"
+            key="${key//_/-}"
+            ARGS+=("--$key" "$val")
+          done
+        fi
         if [ -f "results/$EXP_ID/result.json" ]; then
           cp -r "results/$EXP_ID" "$ARCH/" && echo "  [archived] $EXP_ID -> $ARCH/"
         fi
         echo "  -> $EXP_ID"
-        $PY -m benchmarks.runner --exp "$EXP_ID" --model "$MODEL" --force || {
+        $PY -m benchmarks.runner --exp "$BASE" --model "$MODEL" --force "${ARGS[@]}" || {
           echo "[FAIL] gate: $EXP_ID" >&2
           [[ $FAIL_FAST -eq 1 ]] && exit 1
         }
