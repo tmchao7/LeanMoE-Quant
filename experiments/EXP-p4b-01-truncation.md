@@ -590,6 +590,17 @@ P3 **不只是**"把 `quant_cfg` 传给 `run_cudagraph`"。排查发现两处必
 > 它们本来就被 gate FAIL 挡在 evidence 层，不能作为 w8a8 的证据引用；w8a8 的 FAIL 以
 > `tools/quant_probe.py` 的独立门工件为准。代码侧已在 runner 加载前拒绝
 > `w8a8 × grouped`（2026-11-03）。
+>
+> ★ **同一注记的两个后果（需用户裁决，硬规则 9 不改矩阵）**：
+> 1. 矩阵里 `EXP-p4b-01-truncation` 的 static config 是 `moe: grouped`，所以它的
+>    **4 个 w8a8 格**（eager/cudagraph × ctx 1024/4096）现在**无法重跑**——拒绝在加载前，
+>    而 suite 脚本不会给它们加 `--moe gather`。它们保留为历史 evidence；要产出真 w8a8
+>    的 grouped 数字，得先在 `moe_grouped_quant` 实现 activation fake-quant + K1 门，
+>    或经用户批准改矩阵（新 cell id）。
+> 2. 旧谓词 `lm_head_w8_effective` 对 **w4a16/w8a8 也返回 True**（历史 payload 可见
+>    `lm_head_w8_effective=True`），即那些格曾把 lm_head 一起量化；2026-11-03 起该谓词
+>    只对 **w8a16** 生效（F5 门只测过 w8a16）。这些格都是 gate FAIL 的 evidence，
+>    不发布延迟，但**未来重跑的配置与历史 payload 不同**，不能把两者当同一格比较。
 
 ### 2.9.4 这三个数字说明了什么（都只到 evidence 层）
 

@@ -6,7 +6,7 @@
 
 <p align="center">
   <img alt="status" src="https://img.shields.io/badge/status-v7%20canonical%20adopted-12b886" />
-  <img alt="tests" src="https://img.shields.io/badge/tests-744%20passed-brightgreen" />
+  <img alt="tests" src="https://img.shields.io/badge/tests-746%20passed-brightgreen" />
   <img alt="gate" src="https://img.shields.io/badge/accuracy%20gate-KL%3C0.01%20%C2%B7%20top1%E2%89%A50.95-blue" />
   <img alt="gpu" src="https://img.shields.io/badge/GPU-RTX%205090%20%C2%B7%20sm__120-4c6ef5" />
   <img alt="model" src="https://img.shields.io/badge/model-OLMoE--1B--7B--0924%20%C2%B7%2064%20experts-845ef7" />
@@ -18,7 +18,8 @@
 单张 RTX 5090 上，OLMoE-1B-7B（64 专家 / top-8）的单请求 decode 从 **82.6 ms/token**
 的 host 主导 eager 起点，降到 canonical **1.46 / 1.61 ms**（ctx 1024/4096，685 / 622 tok/s；
 **两个端点，不是同轮总加速**）；最好格对原生基线 **2.44× / 4.25×**（稳态 decode 步）。
-并**由实测字节地板推导出**这条路线的**结构性上限 ~1.74× / ~1.28×**。本页每个数字都可追溯
+并**由实测字节地板推导出**权重路径（量化）的**结构性上限 ~1.74× / ~1.28×**——这是
+"权重字节归零、其余不变"的上界，**不是**对 2.44×/4.25× 总加速的否定。本页每个数字都可追溯
 到工件；不过正确性门的配置不发布性能数字。32-token 端到端工件反算约 **1.38× / 1.72×**；
 所有延迟都在**全 1 合成 prompt** 上测量，真实文本未测。
 
@@ -28,8 +29,10 @@
 
 **1 · 七条杠杆，每条独立同轮 A/B，全部采纳**
 CUDA Graph / 权重 W8 / split-KV attention / 融合 RMSNorm / KV 直写 / lm_head W8 /
-**KV-INT8** —— kernels per step **994 → 345**。另有 F1/F2 的融合开关（fused RoPE、
+**KV-INT8** —— kernels per step **994 → 345**。另有 F1/F2 的四项融合开关（fused RoPE、
 routing、skip mask-fill、packed q·k·v）一并采纳；`FUSION_DEFAULTS` 七项全 True。
+其中 F1 三项是同进程交替 **n=2**（统计上 underpowered，采纳依据是方向 + `tokens_equal`），
+F2 是独立进程 3/3（RESULTS §2.1）。
 
 **2 · 量化的天花板，由实测字节地板推导**
 权重字节地板只占 fp16×sdpa 步的 **42.4% / 22.1%**（2.3577 GB / 1560.3 GB/s = 1.511 ms）⇒
@@ -47,7 +50,7 @@ w8a8@4096 的 5 窗 PASS 经 10 窗复测不稳健被主动 de-publish；融合�
 
 **5 · 测量纪律**
 每轮首尾同格金丝雀（>5% 漂移整轮 VOID）、独立进程同轮相邻 A/B + 逐对胜负 + MAD、
-host_share ≤5% 逐格自检、每张门表由测试钉死到工件——744 项 CPU 测试 + CI 四门。
+host_share ≤5% 逐格自检、每张门表由测试钉死到工件——746 项 CPU 测试 + CI 四门。
 
 ---
 
@@ -104,7 +107,7 @@ host_share ≤5% 逐格自检、每张门表由测试钉死到工件——744 �
 # 1) 环境（Mac/CPU 可跑全部非 GPU 测试；性能测量需 NVIDIA GPU + triton）
 uv venv -p 3.12 .venv && uv pip install -e ".[dev]"
 
-# 2) 正确性测试（744 项，无需 GPU）
+# 2) 正确性测试（746 项，无需 GPU）
 uv run pytest -m "not gpu" -q
 
 # 3) 机器标定：实测可达带宽（roofline 分母，禁用规格值）
@@ -137,7 +140,7 @@ src/lemoq/kernels/         # 6 个 Triton kernel 族：grouped MoE GEMV、fused 
 src/lemoq/quant/           # 量化实现（W8/W4 per-group、门引用、逐表面 gate 表）
 benchmarks/runner.py       # harness：五条加载前拒绝 + payload schema + correctness 门
 tools/                     # probe / operator ledger / figures / quant gate 工具链
-tests/                     # 744 项 CPU 测试（parity 门、schema 守卫、门表钉死）
+tests/                     # 746 项 CPU 测试（parity 门、schema 守卫、门表钉死）
 docs/figures/              # 4 figures, regenerated from artifacts 从工件重生成的图表
 docs/reference/            # METRICS / MODELS / SPECS / NCU_EVIDENCE（技术参考）
 ```

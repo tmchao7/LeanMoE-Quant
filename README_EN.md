@@ -6,7 +6,7 @@
 
 <p align="center">
   <img alt="status" src="https://img.shields.io/badge/status-v7%20canonical%20adopted-12b886" />
-  <img alt="tests" src="https://img.shields.io/badge/tests-744%20passed-brightgreen" />
+  <img alt="tests" src="https://img.shields.io/badge/tests-746%20passed-brightgreen" />
   <img alt="gate" src="https://img.shields.io/badge/accuracy%20gate-KL%3C0.01%20%C2%B7%20top1%E2%89%A50.95-blue" />
   <img alt="gpu" src="https://img.shields.io/badge/GPU-RTX%205090%20%C2%B7%20sm__120-4c6ef5" />
   <img alt="model" src="https://img.shields.io/badge/model-OLMoE--1B--7B--0924%20%C2%B7%2064%20experts-845ef7" />
@@ -18,8 +18,10 @@
 On a single RTX 5090, single-request decode of OLMoE-1B-7B (64 experts / top-8) goes from a
 **82.6 ms/token** host-bound eager start to **1.46 / 1.61 ms** canonical (ctx 1024/4096,
 685 / 622 tok/s; **two endpoints, not a same-round total**); the best cell is **2.44× / 4.25×**
-over the native baseline (steady-state decode step). The **structural ceiling ~1.74× / ~1.28×**
-is derived from the measured weight-byte floor. Every number on this page traces to an artifact;
+over the native baseline (steady-state decode step). The **weight-path (quantization) ceiling
+~1.74× / ~1.28×** is derived from the measured weight-byte floor — it is the bound with weight
+bytes at zero and everything else unchanged, **not** a cap on the 2.44×/4.25× end-to-end step.
+Every number on this page traces to an artifact;
 nothing is published without passing its accuracy gate. 32-token end-to-end (artifact-derived)
 is ~**1.38× / 1.72×**; all latency uses a **synthetic all-ones prompt** (real text not measured).
 
@@ -31,6 +33,8 @@ is ~**1.38× / 1.72×**; all latency uses a **synthetic all-ones prompt** (real 
 CUDA Graph / weight W8 / split-KV attention / fused RMSNorm / KV direct write / lm_head W8 /
 **KV-INT8** — kernels per step **994 → 345**. The F1/F2 fusion switches (fused RoPE, routing,
 skip mask-fill, packed q·k·v) are adopted too; all seven `FUSION_DEFAULTS` are True.
+The three F1 switches are same-process **n=2** (statistically underpowered; adopted on direction +
+`tokens_equal`); F2 is independent-process 3/3 (RESULTS §2.1).
 
 **2 · The quantization ceiling, derived from the measured byte floor**
 The weight-byte floor is only **42.4% / 22.1%** of the fp16×sdpa step
@@ -51,7 +55,7 @@ path (the isolated kernel is 1.21× cheaper, end-to-end 5% slower).
 **5 · Measurement discipline**
 Same-cell canary first and last in every round (>5% drift VOIDs the round), independent-process
 adjacent A/B with per-pair wins + MAD, host_share ≤5% per-cell self-check, every gate table
-pinned to its artifacts by tests — 744 CPU tests + four CI gates.
+pinned to its artifacts by tests — 746 CPU tests + four CI gates.
 
 ---
 
@@ -110,7 +114,7 @@ The one-page result (every number with its artifact path): **[RESULTS.md](RESULT
 # 1) Environment (all non-GPU tests run on Mac/CPU; latency measurement needs an NVIDIA GPU + triton)
 uv venv -p 3.12 .venv && uv pip install -e ".[dev]"
 
-# 2) Correctness tests (744, no GPU needed)
+# 2) Correctness tests (746, no GPU needed)
 uv run pytest -m "not gpu" -q
 
 # 3) Machine calibration: measured achievable bandwidth (the roofline denominator; spec values are banned)
@@ -145,7 +149,7 @@ src/lemoq/kernels/         # 6 Triton kernel families: grouped MoE GEMV, fused d
 src/lemoq/quant/           # quantization (W8/W4 per-group, gate citations, per-surface gate tables)
 benchmarks/runner.py       # harness: five load-time refusals + payload schema + correctness gate
 tools/                     # probe / operator ledger / figures / quant gate toolchain
-tests/                     # 744 CPU tests (parity gate, schema guards, pinned gate tables)
+tests/                     # 746 CPU tests (parity gate, schema guards, pinned gate tables)
 docs/figures/              # 4 figures, regenerated from artifacts
 docs/reference/            # METRICS / MODELS / SPECS / NCU_EVIDENCE (technical reference)
 ```
