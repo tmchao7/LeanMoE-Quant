@@ -160,7 +160,8 @@ RESULT_SCHEMA: dict[str, dict[str, tuple[type, ...]]] = {
 SCOPE_NOT_APPLICABLE = (
     "服务/并发场景（单请求 batch=1 单流测量：无并发度、无 req/s、无吞吐-延迟曲线）—— "
     "本项目的数字不能用来推断线上服务能力；吞吐随 batch 的衰减未测"
-    "（见 docs/reference/METRICS.md §6 G2）"
+    "（见 docs/reference/METRICS.md §6 G2）。latency 用全 1 合成 prompt（真实文本未测）；"
+    "2.44×/4.25× 是稳态 decode 步，不是端到端请求"
 )
 
 REQUIRED_TOP = (
