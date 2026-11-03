@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="940" height="546" viewBox="0 0 940 546" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <rect width="940" height="546" fill="#ffffff"/>
-<text x="24.0" y="34.0" font-size="17.0" fill="#1f2328" font-weight="600" text-anchor="start">From 82.6 to 1.46 ms @ctx=1024: every hop is its own same-round A/B</text>
+<text x="24.0" y="34.0" font-size="17.0" fill="#1f2328" font-weight="600" text-anchor="start">From the 82.6 ms host-bound start to 1.46 ms @ctx=1024 — solid hops are same-round A/Bs</text>
 <text x="24.0" y="56.0" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="start">ms per token, log scale. Dashed line = byte floor [T] / measured achievable bandwidth (1.5982 ms).</text>
 <text x="24.0" y="71.0" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="start">Each hop is its own same-round (or same-cell) A/B; the hollow bar is context, not a hop.</text>
 <line x1="300.0" y1="118.0" x2="300.0" y2="450.0" stroke="#d8dee4" stroke-width="0.8"/>

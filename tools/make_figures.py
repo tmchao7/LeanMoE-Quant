@@ -338,7 +338,7 @@ def fig1(inputs: dict[str, Any]) -> str:
             ],
         ),
         (
-            "Quantization\n(w8a16 vs fp16, in-graph)",
+            "Quantization\n(w8a16+lm_head vs fp16, E7)",
             [
                 (
                     "@1024",
@@ -355,7 +355,7 @@ def fig1(inputs: dict[str, Any]) -> str:
             ],
         ),
         (
-            "Attention impl\n(HF sdpa → split-KV)",
+            "Attention impl\n(HF sdpa → split-KV, fp16)",
             [
                 (
                     "@1024",
@@ -390,10 +390,11 @@ def fig1(inputs: dict[str, Any]) -> str:
     svg = Svg(
         w,
         h,
-        "Every lever pays: all four same-round A/Bs land above 1.0×",
+        "Every core axis pays: all four same-round A/Bs land above 1.0×",
         [
             "OLMoE-1B-7B-0924, batch=1 decode, RTX 5090, measured achievable bandwidth 1560.3 GB/s.",
-            "Ratio > 1.0 = faster. These are four independent A/Bs: do not multiply them (RESULTS.md rule).",
+            "Four core-axis A/Bs (execution / quantization / attention impl / fused norm); the seven adopted switches are in fig4.",
+            "Ratio > 1.0 = faster. Do not multiply these independent A/Bs (RESULTS.md rule).",
         ],
     )
     left, right, top, bottom = 210, 420, 108, 92
@@ -522,7 +523,7 @@ def fig2(inputs: dict[str, Any]) -> str:
     svg = Svg(
         w,
         h,
-        "From %.1f to %.2f ms @ctx=1024: every hop is its own same-round A/B"
+        "From the %.1f ms host-bound start to %.2f ms @ctx=1024 — solid hops are same-round A/Bs"
         % (context[1], chain[-1][1]),
         [
             "ms per token, log scale. Dashed line = byte floor [T] / measured achievable bandwidth (%.4f ms)."
