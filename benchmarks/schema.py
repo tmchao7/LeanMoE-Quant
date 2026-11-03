@@ -160,7 +160,8 @@ RESULT_SCHEMA: dict[str, dict[str, tuple[type, ...]]] = {
 SCOPE_NOT_APPLICABLE = (
     "服务/并发场景（单请求 batch=1 单流测量：无并发度、无 req/s、无吞吐-延迟曲线）—— "
     "本项目的数字不能用来推断线上服务能力；吞吐随 batch 的衰减未测"
-    "（见 docs/reference/METRICS.md §6 G2）"
+    "（见 docs/reference/METRICS.md §6 G2）。latency 用全 1 合成 prompt（真实文本未测）；"
+    "2.44×/4.25× 是稳态 decode 步，不是端到端请求"
 )
 
 REQUIRED_TOP = (
@@ -367,6 +368,13 @@ def validate_result(payload: Any, ppl_index: dict[str, Any] | None = None) -> li
             v = value[field]
             if v is None:
                 continue  # None == 未测，允许
+            declared = types if isinstance(types, tuple) else (types,)
+            # ★ 2026-11-03：bool 是 int 的子类 —— 旧检查会让
+            #   `latency.per_token_p50_ms = True` / `config.ctx = False` 通过。
+            #   数值字段必须拒绝 bool；布尔字段（如 *_effective）仍在 schema 里声明 bool。
+            if isinstance(v, bool) and any(t in (int, float) for t in declared):
+                problems.append("%s.%s 是数值字段，不能为 bool（得到 %r）" % (section, field, v))
+                continue
             if not isinstance(v, types):
                 problems.append(
                     "%s.%s 类型应为 %s，得到 %s"

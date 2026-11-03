@@ -7,8 +7,9 @@
 > attention 仍走 `QuantLinear` 的 **separate 臂**（每次 forward 反量化）。
 > 于是本条从"建议先做"变成 **拆开那个混淆的硬前提** —— 本会话把 dense fused 臂落地了。
 > ★ **结论（一句话）**：K1 数值门 PASS、kernel 本身在隔离测里快 21%，但在**预注册的
-> eager 格**里 fused 比 separate **慢 5%**（w8a16/w8a8），因为那条路径是 host/launch 受限的
-> （host_share 71.7%、每步 19,029 个 kernel、gpu_busy 只有 57 ms / 199 ms）：
+> eager 格**里 fused 比 separate **慢 4.4–5.1%**（v2 采用 1.0442；payload 交错 p50
+> 1.047；w8a16/w8a8），因为那条路径是 host/launch 受限的
+> （fused 臂归因快照：host_share 71.7%、每步 19,029 个 kernel、gpu_busy 只有 57 ms / 199 ms）：
 > **融合省的字节，被每次调用的 Python/launch 开销吃掉了。** E2 的 1.3-2× 在本配置**否证**。
 
 - **ID**: `EXP-p2-01-dequant-fusion`
@@ -196,6 +197,14 @@ fp16 scale（**部署口径**，`QuantLinear` 按字节账存 fp16）与 fp32 sc
   `[T]` = 1.435 GB；达成率 **0.4–0.5%**（带宽地板 1561.9 GB/s）；VRAM 峰值 12.95 GiB（含
   加载相位的 fp16 模型）；`bytes.budget_vs_actual_delta_pct = 456%`——这是**预期的**：
   驻留的是全部 64 个专家，而 `[W]` 只算每 token 的 top-8（payload 里已有该注）。
+
+> ★ **2026-11-03 审计注记（归因字段口径）**：`host%` / `kernel/步` 来自 `attribution` 段，
+> 而交错 A/B 循环结束时模型停在 **fused** 臂；payload 的
+> `_measurement.dequant.activity.modes` 在 `arm_recorded=separate` 的格子里仍显示
+> `{"fused": 3136}`，且 `gpu_p50 (201.6) > per_token_p50 (189.1)`——这是 A/B 后未复位臂的
+> 已知 bug（2026-11-03 修复，见 `benchmarks/runner.py`）。**E2 的判定只用
+> `interleaved_ab.arms` 的 p50 比值（1.0507/1.0518/1.0442），这些是有效的**；
+> `host%`/`kernel/步` 是 fused 臂快照，不作为 separate 臂的归因引用。
 
 ### 6.4 隔离测量：kernel 本身是快的，慢的是"每次调用的 host 开销"
 

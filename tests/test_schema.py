@@ -70,6 +70,17 @@ def test_wrong_type_is_reported():
     assert any("config.ctx" in p for p in problems)
 
 
+def test_bool_is_not_a_number():
+    """bool 是 int 的子类，但数值字段不能写 True/False（2026-11-03）。"""
+    payload = empty_result("EXP-test-01")
+    payload["latency"]["per_token_p50_ms"] = True
+    problems = validate_result(payload)
+    assert any("per_token_p50_ms" in p and "bool" in p for p in problems)
+    payload2 = empty_result("EXP-test-01")
+    payload2["config"]["ctx"] = False
+    assert any("config.ctx" in p and "bool" in p for p in validate_result(payload2))
+
+
 def test_bad_status_is_reported():
     payload = empty_result("EXP-test-01")
     payload["status"] = "finished"

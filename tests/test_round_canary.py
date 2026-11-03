@@ -42,6 +42,23 @@ def test_negative_drift_beyond_threshold_is_void():
     assert v["verdict"] == "VOID"
 
 
+def test_void_payload_cannot_repass():
+    """★ 2026-11-03：`--mark` 保留 latency，重跑 canary 不能把 void 判回 PASS。"""
+    v = evaluate(_payload(status="void"), _payload(status="void"))
+    assert v["verdict"] == "VOID"
+    assert any("void" in r for r in v["reasons"])
+
+
+def test_missing_hardware_section_is_void():
+    """两端都缺 hardware 时，旧逻辑会因 None==None 而放过；必须 VOID。"""
+    head, tail = _payload(), _payload()
+    head.pop("hardware", None)
+    tail.pop("hardware", None)
+    v = evaluate(head, tail)
+    assert v["verdict"] == "VOID"
+    assert any("hardware" in r for r in v["reasons"])
+
+
 def test_missing_metric_fails_closed():
     tail = _payload()
     tail["latency"]["per_token_p50_ms"] = None

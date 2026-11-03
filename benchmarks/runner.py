@@ -391,14 +391,18 @@ KV_INT8_GATE_CITATIONS: dict[int, dict[str, Any]] = {
 
 
 def lm_head_w8_effective(bit_width: str, qreport: Any = None) -> bool:
-    """F5 开关的**生效**判定：开关开 + 该格是量化格（fp16 没有量化语义）。
+    """F5 开关的**生效**判定：开关开 + 该格是 **w8a16**（F5 门只测过 W8A16）。
 
     payload 侧传 `qreport` 时是三层确认（`qreport.replaced["lm_head"] > 0` =
     替换真的发生了）；拒绝/门检查路径没有 qreport，退回两层（cfg 级）。
+
+    ★ 2026-11-03：旧版对 w4a16/w8a8 也返回 True，于是它们会把 lm_head 量化成
+    4-bit / 带 activation fake-quant，却仍引用 W8A16 的 lm_head 门 —— 这是 fail-open。
+    F5 的门表只覆盖 W8A16；w4a16/w8a8 的 lm_head 保持 fp16，直到有各自的门实测。
     """
     from lemoq.kernels.fusion_switches import fusion_enabled  # noqa: PLC0415
 
-    if not fusion_enabled("lm_head_w8") or str(bit_width) == "fp16":
+    if not fusion_enabled("lm_head_w8") or str(bit_width) != "w8a16":
         return False
     if qreport is None:
         return True
@@ -1291,6 +1295,11 @@ def run_cudagraph(
         measured_bw_gbps=bw,
         qreport=qreport,
     )
+    # ★ 2026-11-03：`session.capture()` 返回的是 capture 时刻的 dict 快照，当时
+    #   `replay_success=False`；correctness 的 graph replay 才会把它置 True。
+    #   payload 必须写 replay 后的状态，否则每个 canonical graph payload 都看起来
+    #   replay 失败（已知工件：RESULT §6 / results/PROVENANCE.md）。
+    capture["replay_success"] = bool(session.capture_info.get("replay_success", False))
     res["capture"] = capture
     res["correctness"] = correctness
     res["ttft"] = ttft
@@ -1504,7 +1513,19 @@ def run_baseline(
                 _set_arm(arm)
                 _timed_block(per_arm[arm], 1)
 
+        # ★ 2026-11-03：交错 A/B 的最后一条臂固定是 `fused`（block*len(arms) 是 len 的倍数），
+        #   而 `activity` / `gap` / `_breakdown` / `_bench_moe_block` 都在这之后测量。不复位就会
+        #   把 separate 格标成 fused 的归因（payload 的 `activity.modes` 只有 fused，
+        #   且 gpu_p50 > per_token_p50）。归因必须在**声明的臂**上测。
+        _set_arm(qspec.dequant)
         dequant_activity = _activity(model)
+        _modes = set(dequant_activity.get("modes", {}))
+        if _modes != {qspec.dequant}:
+            raise RuntimeError(
+                "A/B 归因臂复位失败：activity.modes=%r，期望 {%r}。"
+                "归因必须在声明的臂上测（见 RESULTS/EXP-p2-01 的 2026-11-03 注记）。"
+                % (sorted(_modes), qspec.dequant)
+            )
         # ★ 硬检查：fused 臂一步都没进 kernel 的话，这个"对照"根本不是融合对照。
         #   宁可响亮失败，也不写一个会被误读成"融合无收益"的结果。
         if "fused" in arms and int(dequant_activity["fused_calls"]) == 0:
@@ -2166,6 +2187,13 @@ def build_cudagraph_payload(
     }
     correctness = res["correctness"]
     graph_pass = graph_correctness_passed(correctness)
+    # ★ 2026-11-03：E6 的 KV INT8 门也约束 fp16 图格。eager 路径已在
+    #   `correctness_for_cell` 里做了；cudagraph 的 fp16 分支原来只看 graph_pass，
+    #   KV 门 FAIL/MISSING 时仍会发布 latency —— 这是 fail-open。这里补上。
+    _kv_gate = kv_int8_gate_state(int(cfg.get("ctx") or 0))
+    _kv_fail = _kv_gate is not None and _kv_gate["gate"] != "PASS"
+    if _kv_fail and str(cfg.get("bit_width") or "fp16") == "fp16":
+        graph_pass = False
     graph_block = {
         "kl": correctness["kl"],
         "top1_agreement": correctness["top1_agreement"],
@@ -2186,6 +2214,8 @@ def build_cudagraph_payload(
         "eager_output_tokens": correctness.get("eager_output_tokens"),
         "graph_output_tokens": correctness.get("graph_output_tokens"),
     }
+    if _kv_fail and str(cfg.get("bit_width") or "fp16") == "fp16":
+        graph_block["kv_int8_gate"] = _kv_gate
     if quantized:
         # ★ 量化格的正确性门 = **引用门（p1-04 的 KL/top-1）∧ 图回放门**（合取）。
         #   与 eager 量化格同一条口径（`correctness_for_cell`）：KL 是**引用**的实测值，
@@ -2532,6 +2562,30 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.dry_run:
         # 每条拒绝都发生在**任何模型加载之前** —— 干净失败，且离线（无 GPU）可测。
+        # ★ 2026-11-03：输入域。ctx=1 会让 prefill 走 q_len=1 的零 attention 路径；
+        #   eager 臂没有 batch>1 的实现（run_baseline 固定造 batch=1 prompt）；
+        #   --attn kernel 只接在 cudagraph 臂上，eager 臂会静默跑 sdpa。
+        if args.ctx < 2 or args.ctx > 4096:
+            print(
+                "runner 拒绝: ctx=%d 超出 [2, 4096] —— 该模型上限 4096；ctx=1 会走"
+                "零 attention 路径。见 docs/reference/MODELS.md。" % args.ctx,
+                file=sys.stderr,
+            )
+            return 2
+        if args.execution == "eager" and args.batch != 1:
+            print(
+                "runner 拒绝: eager 臂只支持 batch=1（run_baseline 固定造 batch=1 prompt；"
+                "batch>1 需要新实现/新实验）。",
+                file=sys.stderr,
+            )
+            return 2
+        if args.execution == "eager" and args.attn == "kernel":
+            print(
+                "runner 拒绝: --attn kernel 只在 cudagraph 臂接线；eager 臂会静默跑 "
+                "HF sdpa，而 cell id 却写 attn=kernel。请用 --execution cudagraph。",
+                file=sys.stderr,
+            )
+            return 2
         # ★ `--dequant fused` 的"kernel 尚未实现"拒绝已于 2026-10-07 删除：
         #   `lemoq.kernels._dequant_triton` 已落地（P2-01 的 fused 臂）。现在拒绝它的
         #   唯一理由是**这台机器跑不了**（没有 triton / 没有 CUDA）—— Mac 上仍然拒绝，
@@ -2611,6 +2665,20 @@ def main(argv: list[str] | None = None) -> int:
                 "runner 拒绝: 4/8-bit 量化 grouped 的 group_size=%d 不是偶数 —— "
                 "nibble 成对打包要求偶数（4-bit），且 kernel 的 k 块必须整除 group_size。"
                 % args.group_size,
+                file=sys.stderr,
+            )
+            return 2
+        # ★ 2026-11-03 审计修复：w8a8 × grouped 的 expert 路径**没有** activation
+        #   quantization（`quantize_fused_experts` 只收 weight_bits/group_size），
+        #   实际会按 w8a16 跑，而 payload 却记 act_bits=8。历史 grouped w8a8 格
+        #   （EXP-p4b-01 §2.9.3）只作 evidence，不能作 w8a8 证据；要跑真 w8a8，
+        #   必须先在 `moe_grouped_quant` 里实现 activation fake-quant + K1 门。
+        if quantized and str(args.bit_width) == "w8a8" and moe_mode == "grouped":
+            print(
+                "runner 拒绝: w8a8 × grouped 的 expert 路径没有 activation quantization —— "
+                "experts 实际会按 w8a16 跑（payload 会把它错记成 act_bits=8）。"
+                "请用 --moe hf（gather 对量化格同样被拒），或改用 w8a16；"
+                "历史 w8a8 grouped 格只作 evidence。",
                 file=sys.stderr,
             )
             return 2

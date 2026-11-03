@@ -3,7 +3,7 @@
 
 ## 为什么自己写 SVG 而不是用 matplotlib
 
-- 本仓库的依赖表很窄（`numpy` 是唯一的数值依赖），为三张图引入 matplotlib 不划算；
+- 本仓库的依赖表很窄（`numpy` 是唯一的数值依赖），为四张图引入 matplotlib 不划算；
 - **每个数字都必须能追到工件**：本工具把每个输入连同它的来源路径写进
   `docs/figures/inputs.json`，并**读不到就报错**（绝不静默画一个"看起来对"的数）。
   画图的数字若来自记录正文（而不是 payload），在 `inputs.json` 里标 `"source": "record"`
@@ -17,7 +17,7 @@ python -m tools.make_figures --check    # 只校验输入存在，不写字
 ```
 
 图（英文标注，方便脱离本文被单看）：
-    fig1_per_axis_speedups.svg   五条杠杆各自的同轮 A/B（+ 1.0× 参考线）
+    fig1_per_axis_speedups.svg   各轴/杠杆的同轮 A/B（+ 1.0× 参考线）
     fig2_to_the_wall.svg         从 fp16 eager 到字节下限（对数轴）
     fig3_kernel_attainment.svg   隔离测量：必要字节 vs 实测时间（ncu 替代口径）
 """
@@ -305,7 +305,7 @@ def _text_width(text: str, size: float) -> float:
 
 
 # --------------------------------------------------------------------------------------
-# fig 1：五条杠杆各自的同轮 A/B
+# fig 1：各轴/杠杆的同轮 A/B
 # --------------------------------------------------------------------------------------
 
 
@@ -676,8 +676,9 @@ def fig3(inputs: dict[str, Any]) -> str:
         h,
         title,
         [
-            "One call per subject. attainment = hand-computed necessary bytes / cold time / "
-            "measured achievable bandwidth (%.1f GB/s)." % bw,
+            "One call per subject. attainment = hand-computed necessary bytes / cold time /",
+            "measured achievable bandwidth (%.1f GB/s; current probe 1560.3, old instance 1561.9)."
+            % bw,
             "ncu performance counters are blocked on this host — see docs/reference/NCU_EVIDENCE.md §1.",
         ],
     )
@@ -782,31 +783,34 @@ def fig3(inputs: dict[str, Any]) -> str:
 
 
 def fig4(inputs: dict[str, Any]) -> str:
-    """Seven adopted decode-path levers — same-round A/B step-time reduction.
+    """Seven adopted decode-path switches — same-round A/B step-time reduction.
 
-    ★ 数值口径：每条都是**独立进程·同轮相邻** A/B 的步时降幅（RESULTS.md §2 的行转录，
-    每行的工件引用在 RESULTS.md；E6 @1024 的 −0.78% 因条形太短只在脚注提及）。
+    ★ 数值口径：F4/F5/E6 是**独立进程·同轮相邻** A/B；F1 三项是 `tools/profile_graph.py`
+    的**同进程交替** A/B（n=2，underpowered）；F2 是独立进程 3/3。来源见 RESULTS.md §2.1，
+    每行的工件路径在那里（`results/` 是 machine-local，故 fig4 的输入不进 inputs.json）。
+    E6 @1024 的 −0.78% 因条形太短只在脚注提及。
     """
     levers = [
         # 颜色 = 开关类别（图例语义统一，2026-10-25 视觉审计）：
         #   norm 橙 = kernel/fusion 融合（F1/F2）、attn 黄 = KV 路径（F4）、quant 绿 = 量化（F5/E6）
         ("fused RoPE (F1)", 8.39, "A/B", "fused_rope_ab", "norm"),
         ("KV INT8 read path (E6, ctx=4096)", 6.54, "5/5 pairs", "EXP-e6-ab-4096-run2", "quant"),
-        ("packed q/k/v GEMM (F2)", 4.81, "3/3 pairs", "EXP-p4c-01 §F2", "norm"),
+        ("packed q/k/v GEMM (F2)", 5.05, "3/3 pairs", "EXP-f2-ab-20261024", "norm"),
         ("lm_head W8 quant (F5)", 4.13, "5/5 pairs", "EXP-f5-ab-20261025", "quant"),
         ("fused routing top-k (F1)", 3.00, "A/B", "routing_ab", "norm"),
         ("KV direct write (F4)", 2.94, "5/5 pairs", "EXP-p4c-01 §F4", "attn"),
         ("skip mask-fill (F1)", 1.33, "A/B", "skip_mask_fill_ab", "norm"),
     ]
-    w, h = 980, 448
+    w, h = 980, 464  # 2026-11-03: +16 px for the two-line provenance footer
     svg = Svg(
         w,
         h,
-        "Seven adopted levers: −%.1f%% to −%.1f%% per decode step, each A/B'd same-round"
+        "Seven adopted switches: −%.1f%% to −%.1f%% per decode step, each A/B'd same-round"
         % (max(v for _, v, _, _, _ in levers), min(v for _, v, _, _, _ in levers)),
         [
-            "Independent processes, adjacent arms, same round; canary drift ≤5%, host_share ≤5% per arm.",
-            "Sources: RESULTS.md §2 (every row cites its artifact). KV INT8 at ctx=1024: −0.78% (5/5).",
+            "Independent-process or same-process alternating A/B, same round; canary drift ≤5%, host_share ≤5% per arm.",
+            "Sources: RESULTS.md §2.1 (all seven switches; F4/F5/E6 also in §2). KV INT8 at ctx=1024: −0.78% (5/5).",
+            "F1 (RoPE/routing/skip-mask): same-process n=2, underpowered; F2 retake −5.05% (original −4.81% payload not returned).",
         ],
     )
     left, row_h, gap = 250, 30, 10
@@ -849,9 +853,16 @@ def fig4(inputs: dict[str, Any]) -> str:
         lx += 20 + _text_width(label, 10.5) + 26
     svg.text(
         24,
+        h - 26,
+        "Data: RESULTS.md §2/§2.1 — each row cites its artifact (results/ is machine-local).",
+        size=9,
+        color=MUTED,
+    )
+    svg.text(
+        24,
         h - 12,
-        "Data: RESULTS.md §2 (each row cites its artifact: results/EXP-e6-ab-4096-run2 · "
-        "results/EXP-f5-ab-20261025 · results/EXP-f2-ab-20261024 · results/EXP-f4-ab-20261025)",
+        "results/fused_rope_ab.json · routing_ab.json · skip_mask_fill_ab.json · "
+        "EXP-e6-ab-4096-run2 · EXP-f5-ab-20261025 · EXP-f2-ab-20261024 · EXP-f4-ab-20261025",
         size=9,
         color=MUTED,
     )

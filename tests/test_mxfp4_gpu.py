@@ -125,3 +125,24 @@ def test_wrapper_rejects_bad_mxfp4_arguments():
             symmetric=False,
             mxfp4=True,
         )
+
+
+def test_triton_mxfp4_small_block_k_uses_exp2_scale():
+    """★ 2026-11-03：BLOCK_K=16（GROUP_SIZE % BLOCK_K == 0 分支）也必须做
+    `2^(X−127)`；旧版漏了转换，E8M0 字节 127 会被当成 127.0。"""
+    _requires_gpu()
+    x, q, _ = _case(1, 256, 128, 11)
+    w_ref = dequantize_mxfp4(q, dtype=torch.float32).cuda()
+    ref = x.float() @ w_ref.T
+    got = dequant_gemm_fused(
+        x,
+        q["codes_packed"].cuda(),
+        q["scales"].cuda(),
+        None,
+        group_size=32,
+        bits=4,
+        symmetric=True,
+        mxfp4=True,
+        config={"BLOCK_N": 4, "BLOCK_K": 16, "num_warps": 2, "num_stages": 1},
+    )
+    assert torch.allclose(got, ref, **TOL)

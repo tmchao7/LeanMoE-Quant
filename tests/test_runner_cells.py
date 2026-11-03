@@ -37,6 +37,7 @@ from benchmarks.runner import (  # noqa: E402
     correctness_for_cell,
     gate_for_cell,
     gate_from_metrics,
+    lm_head_w8_effective,
     quant_spec_for_cfg,
     quantize_for_cfg,
 )
@@ -858,6 +859,61 @@ def test_quantized_over_non_hf_moe_is_refused(capsys):
         ]
     )
     assert rc_fp16 == 0
+
+
+def test_w8a8_over_grouped_moe_is_refused(capsys):
+    """w8a8 × grouped 的 experts 实际按 w8a16 跑（无 activation quant）。
+
+    历史 grouped w8a8 格（EXP-p4b-01 §2.9.3）只作 evidence；这条拒绝防止
+    payload 继续把 experts 记成 act_bits=8。
+    """
+    rc = runner_main(
+        [
+            "--exp",
+            "EXP-p4b-01-truncation",
+            "--bit-width",
+            "w8a8",
+            "--execution",
+            "eager",
+            "--ctx",
+            "1024",
+            "--moe",
+            "grouped",
+            "--rmsnorm",
+            "hf",
+        ]
+    )
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "w8a8" in out.err and "grouped" in out.err
+    # w8a16 × grouped 仍可跑（dry-run 不加载模型）
+    rc_w8a16 = runner_main(
+        [
+            "--exp",
+            "EXP-p4b-01-truncation",
+            "--bit-width",
+            "w8a16",
+            "--execution",
+            "eager",
+            "--ctx",
+            "1024",
+            "--moe",
+            "grouped",
+            "--rmsnorm",
+            "hf",
+            "--dry-run",
+        ]
+    )
+    assert rc_w8a16 == 0
+
+
+def test_lm_head_w8_is_only_effective_for_w8a16(monkeypatch):
+    """F5 门只测过 W8A16；w4a16/w8a8 不得套用它（否则是 fail-open）。"""
+    monkeypatch.setenv("LEMOQ_LMHEAD_W8", "1")
+    assert lm_head_w8_effective("w8a16") is True
+    assert lm_head_w8_effective("w4a16") is False
+    assert lm_head_w8_effective("w8a8") is False
+    assert lm_head_w8_effective("fp16") is False
 
 
 def test_quantized_grouped_4bit_is_now_allowed_as_evidence(capsys):

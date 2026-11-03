@@ -957,9 +957,16 @@ def _decode_forward_impl(
     #   免 host 长度；capture 期调用会显式拒绝——初始化绝不能进图）。
     from lemoq.kernels.fusion_switches import fusion_enabled as _fusion_enabled  # noqa: PLC0415
 
-    if _fusion_enabled("kv_int8"):
-        if self._lemoq_attn_backend != "triton":
-            raise RuntimeError("kv_int8 需要 attn backend=triton（oracle 只用于单测）")
+    _kv8_active = _fusion_enabled("kv_int8")
+    if _kv8_active:
+        from lemoq.kernels.kv_int8 import kv_int8_rows_applicable  # noqa: PLC0415
+
+        # ★ 2026-11-03：合同是"不满足就回退 fp16"，不是 raise。oracle backend、
+        #   bf16/fp32、非 2 幂 D、q_len>1、CPU 行都走 fp16 路径；只有 buffer 初始化
+        #   发生在 capture 里才必须响亮失败。
+        if self._lemoq_attn_backend != "triton" or not kv_int8_rows_applicable(new_key, new_value):
+            _kv8_active = False
+    if _kv8_active:
         if _kv_int8_bufs_stale(self, past_key_values):
             import torch as _t  # noqa: PLC0415
 

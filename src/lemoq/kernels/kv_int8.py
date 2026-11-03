@@ -83,6 +83,10 @@ def kv_int8_rows_applicable(k_new: Any, v_new: Any) -> bool:
         return False
     if k_new.shape != v_new.shape or k_new.dim() != 4 or k_new.shape[0] != 1:
         return False
+    # ★ 2026-11-03：kernel / cache writer 只处理**一行**（q_len=1）；(1,H,T,D) 的
+    #   T>1 会静默只写第一个 token，丢掉 T-1 行。守卫必须显式拒绝。
+    if k_new.shape[2] != 1:
+        return False
     if not (k_new.is_contiguous() and v_new.is_contiguous()):
         return False
     dim = k_new.shape[-1]
@@ -130,9 +134,15 @@ def kv_int8_bulk_quantize(cache_keys: Any, cache_values: Any, filled: Any = None
     torch = _torch()
     H, S, D = cache_keys.shape[1], cache_keys.shape[2], cache_keys.shape[3]
     dev = cache_keys.device
+    if filled is not None:
+        # filled 可能是 0-dim 设备张量；init 路径允许一次 host 同步。
+        filled = int(filled.item()) if hasattr(filled, "item") else int(filled)
+        filled = max(0, min(filled, S))
     out: dict[str, Any] = {}
     for name, tensor in (("kc", cache_keys), ("vc", cache_values)):
-        codes = torch.ones((1, H, S, D), dtype=torch.int8, device=dev)
+        # ★ 2026-11-03：未填充槽位必须是 codes=0/scale=1（docstring 的约定）；
+        #   旧版 codes=ones 会让 [filled,S) 反量化成 1.0，未来任何整段读都会读到垃圾。
+        codes = torch.zeros((1, H, S, D), dtype=torch.int8, device=dev)
         scales = torch.ones((1, H, S), dtype=torch.float16, device=dev)
         if filled is not None and filled > 0:
             region = tensor[0, :, :filled, :].float()  # (H, filled, D)

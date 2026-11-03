@@ -12,7 +12,7 @@
 | **KL 散度** | 固定 prompt 集上，本配置与 fp16 参考的 logits 逐位置 KL 平均 | W8 ≈ <0.01；W4 ≈ <0.05 | **自定建议值**（本文件 Phase 1 拍定，未引自文献） | 主指标；不受采样策略影响 |
 | **top-1 一致率** | 与 fp16 参考的 greedy 轨迹 teacher forcing 下**逐位置 argmax 一致比例**（多窗口平均；实现：33 位置 × 5 窗口 = 165 位置取均值） | ≥0.95 | **自定建议值**（同上） | 直观；但比 KL 粗糙。注意这不是"只看首 token"——是轨迹上每个位置都比 |
 | **PPL** | wikitext-2 困惑度，报绝对值与相对退化 | 相对退化 <1% | **自定建议值**（同上） | 与传统对照可比；对 4bit 区分度弱 |
-| **任务级分数** | GSM8K / MMLU 小子集 | 下降 <2 个点 | **自定建议值**（同上） | 最贴"能不能用"，但贵、方差大；★ MMLU **已测**（2026-10-09，n=200，见 §6 G1 与 RESULTS §3.1）；GSM8K 生成式在基座上贴地板、已放弃 |
+| **任务级分数** | GSM8K / MMLU 小子集 | 下降 <2 个点 | **自定建议值**（同上） | 最贴"能不能用"，但贵、方差大；★ MMLU **已测**（2026-10-09，n=200，见 §6 G1 与 RESULTS §3.1）；GSM8K 生成式在基座上贴地板、**本地无工件**、对外不引用 |
 
 ★ **门槛来源的说明（必须随结论一起读）**：上面四个门槛都是**本项目自定的建议值**，
 不是从文献抄的。外部常用的一个参考是"KLD < ~0.007 可接受"，比这里的 W8 门槛
@@ -23,6 +23,19 @@
 
 **为什么 KL 是主指标**：PPL 对 4bit 的区分度弱，且受解码策略影响；KL 直接量化"分布偏了
 多少"，是量化文献的标准语言。
+
+### 1.1 门的适用范围（2026-11-03 补）
+
+三张引用门（`GATE_CITATIONS` / `LMHEAD_GATE_CITATIONS` / `KV_INT8_GATE_CITATIONS`）量的是
+**量化表面**：权重（attention+experts）、lm_head、KV cache。它们用参考实现（HF sdpa + HF MoE
+或 `tools/quant_probe.py` 的工具链）测得；**attention/MoE 的实现轴**（sdpa vs split-KV、
+hf vs grouped）不靠这张门，靠各自的 K1 parity（`PARITY_GATE` 1e-3）单独保证。引用时必须
+分开说：
+
+- "这个量化配置过门" = 权重/lm_head/KV 的 KL/top-1 实测；
+- "这个 kernel 实现正确" = K1 parity（+ 边界/逐位测试）；
+- 两者**不能互相替代**。2026-11-03 之前门表没有 `attn`/`moe` 字段，runner 也不比较它们；
+  这是记录口径的边界，不是"门覆盖了所有实现"。
 
 ---
 
@@ -207,11 +220,11 @@ MATURITY_REVIEW_2026-10-24 R1——文档已退役，见 git 历史）：
 
 | # | 项 | 关联 | 脚本 / 计划 | 状态 |
 |---|---|---|---|---|
-| G1 | **任务级精度**（MMLU 5-shot 200 题 + GSM8K 100 题，只针对已过门的 w8a16） | §1「任务级分数」 | `tools/task_accuracy.py` | **部分完成（2026-10-09）**：MMLU 已测 —— fp16 53.50% / w8a16 52.50%（delta **−1.0 个点**，门槛 <2 点 ⇒ PASS）；口径 B teacher forcing 一致率 99.0%。**GSM8K 放弃**：生成式在基座模型上贴地板（fp16 8-shot **0/15**），如实记为 floor 而非"未测"。工件 `results/task_accuracy.json` |
+| G1 | **任务级精度**（MMLU 5-shot 200 题 + GSM8K 100 题，只针对已过门的 w8a16） | §1「任务级分数」 | `tools/task_accuracy.py` | **部分完成（2026-10-09；2026-10-25 当前配置复核）**：MMLU —— fp16 53.50% / weight-only w8a16 52.50%（delta **−1.0 点**，旧测）/ combined w8a16+lm_head 53.00%（**−0.50 点**，当前配置）；门槛 <2 点 ⇒ PASS。口径 B teacher forcing 一致率 99.0%。**GSM8K 无可用工件**：本地 `results/task_accuracy.json` 不含 GSM8K 结果，旧引用 0/15 已从对外表格移除；待 GPU 盘找回后再入档。工件 `results/task_accuracy.json`、`results/EXP-p1-06-lm-head-w8/mmlu_w8a16_lmhead.json` |
 | G2 | **batch 扫描**（batch ∈ {1,2,4,8}，吞吐-延迟曲线） | §2「throughput @ batch」 | `tools/batch_sweep.py` | ✅ **已测（2026-10-10 单轮有效）**：金丝雀 **−3.448% ≤5%**；fp16 单臂、ctx=1024、n=5 丢 1 轮 ⇒ step p50 87.20/85.88/86.82/86.29 ms、tok/s 11.47/23.29/46.07/92.71（工件 `results/batch_sweep.json`）。★ 单列表，禁止与 batch=1 历史数字跨轮混表；**量化衰减对比未测**（本轮仅 fp16） |
 | G3 | **occupancy / register 下限估计**（fused RMSNorm + grouped kernel） | §5「融合后是否引入新瓶颈」 | `tools/occupancy_probe.py` | ✅ **已跑（2026-10-10，`status=done`）**：解析上界（非 ncu 实测）blocks/SM ≤12/≤12/≤6，n_regs 38/40/40，occupancy 上界 100%（工件 `results/occupancy.json`）；stall 实测仍待换机（NCU_PLAN） |
 | G4 | **ncu 补测**（需 `CAP_SYS_ADMIN` 的机器：stall / occupancy / `gpu__time_duration.sum`） | §3、§5 | `docs/reference/NCU_PLAN.md`（本地文档） | **换机才能做**（当前 blocked，见 [NCU_EVIDENCE.md](NCU_EVIDENCE.md) §1） |
-| G5 | **PPL 写入工件**（`ppl_fp16/ppl_this/ppl_delta` 进 `result.json`） | §1「PPL」 | `tools/quant_ppl.py` + `tools/ppl_status.py --merge` | **完成（2026-10-09）**：3 份 cell 已写（fp16 ppl=9.1985；w8a16 g128 = 9.2047，**+0.067%** < 1% 门槛；w4a16 g128 = 10.0025，+8.7%，与它的 KL FAIL 自洽）。`PPL_STATUS` 44 格 = 3 已测 + 41 已声明、0 缺失 |
+| G5 | **PPL 写入工件**（`ppl_fp16/ppl_this/ppl_delta` 进 `result.json`） | §1「PPL」 | `tools/quant_ppl.py` + `tools/ppl_status.py --merge` | **cell 级 3/44（2026-10-09）**：fp16 ppl=9.1985；w8a16 g128 = 9.2047（+0.067% < 1%）；w4a16 g128 = 10.0025（+8.7%，与 KL FAIL 自洽）。**全集工件另有**：`results/r4-ppl-fullset-w8a16.json`（weight-only +0.015%）、`results/EXP-p1-06-lm-head-w8/ppl_f5_lmhead_v2.json`（lm_head-only +0.0088%、combined +0.0227%）。`PPL_STATUS` 仍按 3/44 cell 记账；不要把全集数字说成 44 格都写了。 |
 
 一键执行：`scripts/run_gpu_suite.sh`（`--dry-run` 先打印完整计划，含每项的命令、
 预计时长、显存需求、验收阈值与失败回滚）。

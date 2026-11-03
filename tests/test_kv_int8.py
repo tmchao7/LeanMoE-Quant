@@ -125,6 +125,10 @@ def test_guard_rejects_cpu_and_bad_shapes():
     t = torch.randn(1, 4, 2, 16, dtype=torch.float16)[:, :, :1]
     assert not t.is_contiguous()
     assert kv_int8_rows_applicable(t, t.clone()) is False
+    # q_len>1：kernel 只处理一行（2026-11-03）；CPU 上先被 CUDA 检查拦住，
+    # 但形状契约本身也必须拒绝（GPU 版 test_kv_int8_gpu.py 覆盖）。
+    multi = torch.randn(1, 4, 2, 16, dtype=torch.float16)
+    assert kv_int8_rows_applicable(multi, multi.clone()) is False
 
 
 def test_fold_attention_algebra_end_to_end():
@@ -179,6 +183,22 @@ def test_bulk_quantize_whole_cache_and_zero_slots():
     assert (err <= 0.6 * bufs["ks"][0, :, :6].float().unsqueeze(-1)).all()
     # 零行：scale=1.0、codes=0
     assert (bufs["ks"][0, :, 6:] == 1.0).all() and (bufs["kc"][0, :, 6:] == 0).all()
+
+
+def test_bulk_quantize_filled_tail_is_zero():
+    """`filled=k` 时 [k,S) 必须是 codes=0/scale=1（2026-11-03 修复）。
+
+    旧版 codes 初始化成 ones，反量化后是 1.0；任何未来整段读都会读到垃圾。
+    """
+    from lemoq.kernels.kv_int8 import dequant_int8, kv_int8_bulk_quantize
+
+    g = torch.Generator().manual_seed(13)
+    x = torch.randn(1, 2, 8, 16, generator=g, dtype=torch.float32).to(torch.float16)
+    bufs = kv_int8_bulk_quantize(x, x, filled=4)
+    assert (bufs["kc"][0, :, 4:] == 0).all()
+    assert (bufs["ks"][0, :, 4:] == 1.0).all()
+    tail = dequant_int8(bufs["kc"][0, :, 4:], bufs["ks"][0, :, 4:].unsqueeze(-1))
+    assert torch.equal(tail, torch.zeros_like(tail))
 
 
 def test_kv_int8_bufs_staleness_is_cache_identity():

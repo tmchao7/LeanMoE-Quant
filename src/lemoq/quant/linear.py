@@ -320,7 +320,9 @@ class QuantLinear(nn.Module):
         if int(spec.weight_bits) == 4:
             packed = qpack.pack_4bit(codes_padded)
         elif int(spec.weight_bits) == 8:
-            packed = codes_padded.to(torch.int8)
+            # ★ 2026-11-03：非对称码是 0..255，存 int8 会把 128..255 绕成负数，
+            #   随后 `(codes - zero) * scale` 直接算错 O(1)。非对称必须存 uint8。
+            packed = codes_padded.to(torch.int8 if spec.symmetric else torch.uint8)
         else:
             raise ValueError("只支持 4 / 8 bit 权重")
 
@@ -376,7 +378,10 @@ class QuantLinear(nn.Module):
             w = dequantize_packed(self.packed, self.scale, self.in_features, block=32)
             return w.to(dtype) if dtype is not None else w
         if self.weight_bits == 4:
-            codes = qpack.unpack_4bit(self.packed, signed=True).to(torch.float32)
+            # 对称码是 int4（-8..7），非对称码是 uint4（0..15）——不能都符号扩展。
+            codes = qpack.unpack_4bit(self.packed, signed=bool(self.spec.symmetric)).to(
+                torch.float32
+            )
         else:
             codes = self.packed.to(torch.float32)
         codes = codes.reshape(self.out_features, self.n_groups, self.group_size)

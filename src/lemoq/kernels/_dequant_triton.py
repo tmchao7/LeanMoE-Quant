@@ -170,7 +170,8 @@ def dequant_gemm_fused(
     参数（与 `dequant_gemm_separate_reference` 同一个契约）：
 
         x         (M, K)  fp16 / fp32，K = 未补齐的输入维
-        qweight   (N, P)  int8（bits=8，P = padded_in）或 uint8（bits=4，P = padded_in/2）
+        qweight   (N, P)  bits=8：对称 int8 / 非对称 uint8（P = padded_in）；
+                          bits=4：uint8（P = padded_in/2，每字节两个 nibble）
         scale     (N, n_groups)  fp16 / fp32；n_groups 沿 **输入维**（与 rtn 一致）
         zero      对称量化传 None
         group_size  与量化时一致；padded_in = n_groups * group_size
@@ -236,11 +237,19 @@ def dequant_gemm_fused(
         raise ValueError("非对称量化必须给 zero")
     if bits == 4 and int(group_size) % 2 != 0:
         raise ValueError("4-bit 要求 group_size 为偶数，得到 %d" % int(group_size))
-    expected_q_dtype = torch.uint8 if bits == 4 else torch.int8
+    # ★ 2026-11-03：非对称 8-bit 的码值是 0..255，`QuantLinear` 存 uint8
+    #   （存 int8 会把 128..255 绕成负数）。kernel 的 8-bit 分支按指针 dtype 装载，
+    #   uint8 直接得到 0..255，再减 zero 才是对的；对称码仍是 int8（-128..127）。
+    expected_q_dtype = torch.uint8 if (bits == 4 or not symmetric) else torch.int8
     if qweight.dtype != expected_q_dtype:
         raise ValueError(
-            "%d-bit 的 qweight 应是 %s，得到 %s（打包格式见 lemoq.quant.pack）"
-            % (bits, expected_q_dtype, qweight.dtype)
+            "%d-bit 的 qweight 应是 %s（%s），得到 %s（打包格式见 lemoq.quant.pack）"
+            % (
+                bits,
+                expected_q_dtype,
+                "非对称码 0..255" if bits == 8 and not symmetric else "码值范围见规范",
+                qweight.dtype,
+            )
         )
     if x.dtype not in (torch.float16, torch.float32):
         raise NotImplementedError("x 只支持 fp16/fp32，得到 %s" % x.dtype)
@@ -370,9 +379,16 @@ if _HAS_TRITON:
                         sg = ((ci >> 3) * (-2.0)) + 1.0  # 0→+1，1→−1
                         codes = sg * mag
                     else:
-                        # int4 符号扩展：`((x & 0xF) ^ 8) - 8`（0..15 -> -8..7），纯算术
-                        lo = ((packed & 0xF) ^ 8) - 8
-                        hi = (((packed >> 4) & 0xF) ^ 8) - 8
+                        # 对称码是 int4（-8..7），非对称码是 uint4（0..15）。
+                        # ★ 2026-11-03：旧版无条件符号扩展，非对称 8..15 会变负，
+                        #   随后 `(codes - zero)` 算错 O(1)。SYMMETRIC 是 constexpr，
+                        #   所以这个分支不增加运行期开销。
+                        if SYMMETRIC:
+                            lo = ((packed & 0xF) ^ 8) - 8
+                            hi = (((packed >> 4) & 0xF) ^ 8) - 8
+                        else:
+                            lo = packed & 0xF
+                            hi = (packed >> 4) & 0xF
                         # join + reshape 按 (byte, which) 展平成 k 序：k = 2j + which
                         codes = tl.reshape(tl.join(lo, hi), (BLOCK_N, BLOCK_K)).to(tl.float32)
 
@@ -405,6 +421,11 @@ if _HAS_TRITON:
                     sc1 = tl.load(s_ptr + offs_n * n_groups + g_one, mask=mask_n, other=0.0).to(
                         tl.float32
                     )
+                    # ★ 2026-11-03：MXFP4 的 E8M0 尺度是 2^(X−127) 的字节，不是数值；
+                    #   这个分支（GROUP_SIZE % BLOCK_K == 0，如 BLOCK_K=16/group=32）
+                    #   旧版漏了转换，127 会被当成 127.0 而不是 1.0。
+                    if MXFP4:
+                        sc1 = tl.exp2(sc1 - 127.0)
                     sc = tl.broadcast_to(sc1[:, None], (BLOCK_N, BLOCK_K))
                 if SYMMETRIC:
                     w = codes * sc
