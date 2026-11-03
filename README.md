@@ -135,8 +135,9 @@ uv run python -m tools.make_figures
 ```text
 RESULTS.md                 # ★ 一页纸结果（每个数字带出处）
 experiments/<EXP-ID>.md    # ★ 每个实验的权威记录（预注册假设/判据/结果/适用范围）
-src/lemoq/kernels/         # 6 个 Triton kernel 族：grouped MoE GEMV、fused dequant GEMM、
-                           #   split-KV decode attention、fused RMSNorm、packed q/k/v、KV-INT8
+src/lemoq/kernels/         # 6 个 Triton kernel 族（4 个 K1 parity 核心 + 2 个集成）：
+                           #   grouped MoE GEMV、fused dequant GEMM、split-KV decode attention、
+                           #   fused RMSNorm、packed q/k/v、KV-INT8
 src/lemoq/quant/           # 量化实现（W8/W4 per-group、门引用、逐表面 gate 表）
 benchmarks/runner.py       # harness：五条加载前拒绝 + payload schema + correctness 门
 tools/                     # probe / operator ledger / figures / quant gate 工具链
