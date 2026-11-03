@@ -2677,7 +2677,8 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "runner 拒绝: w8a8 × grouped 的 expert 路径没有 activation quantization —— "
                 "experts 实际会按 w8a16 跑（payload 会把它错记成 act_bits=8）。"
-                "请用 --moe gather/hf，或改用 w8a16；历史 w8a8 grouped 格只作 evidence。",
+                "请用 --moe hf（gather 对量化格同样被拒），或改用 w8a16；"
+                "历史 w8a8 grouped 格只作 evidence。",
                 file=sys.stderr,
             )
             return 2

@@ -59,11 +59,20 @@ def test_write_result_archives_before_overwrite(tmp_path):
     assert len(list(archive_dir.glob("result_*.json"))) == 1
 
 
-def test_is_done_rejects_invalid_done_payload(tmp_path):
-    """status=done 但 schema 不合法的 payload 不能短路下一轮（2026-11-03）。"""
+def test_is_done_is_status_based_and_write_validates(tmp_path):
+    """续跑谓词只看 status；schema 守卫在写路径（2026-11-03 审计回退）。
+
+    `is_done` 若也做 schema 校验，本机 51 份历史 `done` 件（p1-01 9 格、p2-01 6 格、
+    p4b 5 个 eager 格等）会突然"未完成"，一次普通调用就隐式重跑并覆盖规范 payload
+    （硬规则 9）。所以：坏 payload 仍算 done（历史），但 `write_result` 必须把
+    schema 问题返回给 runner（runner 非零退出），新坏件当场被拦。
+    """
     payload = empty_result("EXP-t-write", status="done")
     payload["config"]["ctx"] = True  # bool 不是合法数值
     target = tmp_path / "EXP-t-write" / "result.json"
     target.parent.mkdir(parents=True)
     target.write_text(json.dumps(payload), encoding="utf-8")
-    assert is_done("EXP-t-write", root=str(tmp_path)) is False
+    assert is_done("EXP-t-write", root=str(tmp_path)) is True
+
+    _, problems = write_result(payload, root=str(tmp_path))
+    assert any("ctx" in p and "bool" in p for p in problems)

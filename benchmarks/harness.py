@@ -28,7 +28,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from benchmarks.schema import empty_result, sanitize_gate_failed_perf, validate_result
+from benchmarks.schema import (
+    empty_result,
+    load_ppl_index,
+    sanitize_gate_failed_perf,
+    validate_result,
+)
 
 DEFAULT_MATRIX = "configs/experiments.yaml"
 RESULTS_DIR = "results"
@@ -173,16 +178,28 @@ def result_path(exp_id: str, root: str = RESULTS_DIR) -> Path:
 
 
 def is_done(exp_id: str, root: str = RESULTS_DIR) -> bool:
+    """断点续跑谓词 = **只看 status**。
+
+    ★ 2026-11-03 审计回退：本函数曾改为 `status == done and not validate_result(...)`。
+      实测本机 77 份 `result.json` 里有 53 份不合法（51 份 `status=done` + 2 份
+      `blocked`）；补上 PPL 索引后仍有 40 份。其中 p1-01 的 9 格、p2-01 的 6 格、
+      p4b 的 5 个 eager 格都是**已记录的 done 格**：一次普通调用就会重跑并覆盖
+      规范 payload —— 这正是硬规则 9 要禁止的隐式重跑（"重跑 done 格需要记录里的
+      理由 + 归档"）。schema 演进（新增 config 字段、PPL 声明清单）也会被误判成
+      builder 回归，PPL_STATUS 里 3 个 `status=measured` 条目只有 `note` 没有
+      `reason`，同样会被误伤。
+
+    正确的守卫在**写路径**：`write_result()` 仍然 `validate_result` 并把 problems
+    返回给 runner（runner 以非零码退出），新坏的 payload 当场就会被抓住；历史
+    payload 的 schema 债务由记录和归档处理，不由续跑开关处理。
+    """
     p = result_path(exp_id, root)
     if not p.exists():
         return False
     try:
         with open(p, encoding="utf-8") as fh:
             payload = json.load(fh)
-        # ★ 2026-11-03：`status=done` 但 schema 不合法（例如数值字段写成 bool、
-        # 或门表/延迟结构自相矛盾）的 payload 不能算完成——否则下一轮会跳过它，
-        # 一个 builder 回归就会永久留下坏工件。
-        return payload.get("status") == "done" and not validate_result(payload)
+        return payload.get("status") == "done"
     except Exception:  # noqa: BLE001
         return False
 
@@ -197,7 +214,9 @@ def write_result(payload: dict[str, Any], root: str = RESULTS_DIR) -> tuple[Path
       硬规则 2 类问题不应再出现。
     """
     sanitize_gate_failed_perf(payload)
-    problems = validate_result(payload)
+    # ★ 2026-11-03：PPL 声明清单按**同一 root** 查（默认 results/PPL_STATUS.json）。
+    #   漏传索引会让"已在清单里声明未测"的 payload 被误报为缺声明。
+    problems = validate_result(payload, load_ppl_index(str(Path(root) / "PPL_STATUS.json")))
     p = result_path(payload["exp_id"], root)
     p.parent.mkdir(parents=True, exist_ok=True)
     serialized = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"

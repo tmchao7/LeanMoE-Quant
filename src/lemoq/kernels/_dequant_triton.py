@@ -170,7 +170,8 @@ def dequant_gemm_fused(
     参数（与 `dequant_gemm_separate_reference` 同一个契约）：
 
         x         (M, K)  fp16 / fp32，K = 未补齐的输入维
-        qweight   (N, P)  int8（bits=8，P = padded_in）或 uint8（bits=4，P = padded_in/2）
+        qweight   (N, P)  bits=8：对称 int8 / 非对称 uint8（P = padded_in）；
+                          bits=4：uint8（P = padded_in/2，每字节两个 nibble）
         scale     (N, n_groups)  fp16 / fp32；n_groups 沿 **输入维**（与 rtn 一致）
         zero      对称量化传 None
         group_size  与量化时一致；padded_in = n_groups * group_size
@@ -236,11 +237,19 @@ def dequant_gemm_fused(
         raise ValueError("非对称量化必须给 zero")
     if bits == 4 and int(group_size) % 2 != 0:
         raise ValueError("4-bit 要求 group_size 为偶数，得到 %d" % int(group_size))
-    expected_q_dtype = torch.uint8 if bits == 4 else torch.int8
+    # ★ 2026-11-03：非对称 8-bit 的码值是 0..255，`QuantLinear` 存 uint8
+    #   （存 int8 会把 128..255 绕成负数）。kernel 的 8-bit 分支按指针 dtype 装载，
+    #   uint8 直接得到 0..255，再减 zero 才是对的；对称码仍是 int8（-128..127）。
+    expected_q_dtype = torch.uint8 if (bits == 4 or not symmetric) else torch.int8
     if qweight.dtype != expected_q_dtype:
         raise ValueError(
-            "%d-bit 的 qweight 应是 %s，得到 %s（打包格式见 lemoq.quant.pack）"
-            % (bits, expected_q_dtype, qweight.dtype)
+            "%d-bit 的 qweight 应是 %s（%s），得到 %s（打包格式见 lemoq.quant.pack）"
+            % (
+                bits,
+                expected_q_dtype,
+                "非对称码 0..255" if bits == 8 and not symmetric else "码值范围见规范",
+                qweight.dtype,
+            )
         )
     if x.dtype not in (torch.float16, torch.float32):
         raise NotImplementedError("x 只支持 fp16/fp32，得到 %s" % x.dtype)

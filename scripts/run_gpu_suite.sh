@@ -161,13 +161,17 @@ for s in "${STEPS[@]}"; do
         ARGS=()
         if [[ "$EXP_ID" == *"__"* ]]; then
           SUFFIX="${EXP_ID#*__}"
-          IFS='_' read -r -a PARTS <<< "$SUFFIX"
-          for part in "${PARTS[@]}"; do
+          # ★ 只在这些 key= 前切开——`IFS=_` 会把 `attn=flash_attention_2`
+          #   这类带下划线的**值**拆坏（当前矩阵还没有这种值，但 CLI 已接受）。
+          NORMALIZED=$(printf '%s' "$SUFFIX" | awk '{gsub(/_(bit_width|group_size|ctx|attn|moe|execution|dequant|rmsnorm|targets)=/, "\n&"); print}')
+          while IFS= read -r part; do
+            part="${part#_}"
+            [ -z "$part" ] && continue
             key="${part%%=*}"
             val="${part#*=}"
             key="${key//_/-}"
             ARGS+=("--$key" "$val")
-          done
+          done <<< "$NORMALIZED"
         fi
         if [ -f "results/$EXP_ID/result.json" ]; then
           cp -r "results/$EXP_ID" "$ARCH/" && echo "  [archived] $EXP_ID -> $ARCH/"
