@@ -45,7 +45,7 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 > 空心条是**另一个轮次**的参照，**不属于**那条链 —— 把它接进链里会造出一个假的
 > "8.36× 杠杆"，这正是本项目禁止的跨轮混比（硬规则 3）。链从 E7 那一轮的 eager 开始。
 
-## 2. 五条杠杆，每条都有自己的 A/B
+## 2. 七条杠杆 + 一个 kernel 修复，每条都有自己的 A/B
 
 | # | 杠杆 | 实测 | 口径 | 出处 |
 | --- | --- | --- | --- | --- |
@@ -107,6 +107,27 @@ batch=1 的 decode 是**纯带宽受限**：每生成一个 token，要把参与
 但 **weight-only 与 combined 的数字不可混用**：weight-only 的 PPL 是 +0.015%、MMLU −1.0；
 lm_head-only 的 PPL 是 +0.0088%；combined 的 PPL 是 +0.0227%、MMLU −0.50。
 lm_head 直接决定 logits 却仍然近无损（KL 6.1e-5、top-1 165/165 全对）。
+
+### 3.2 端到端（从工件反算，不是新测量）
+
+`E2E(N) = TTFT_p50 + N × per_token_p50`；四个 payload 来自 `EXP-p4c-01` 的 canonical 与
+fp16×sdpa 格，用 `python -m tools.e2e_report` 复算（不产生新数字）。
+
+| ctx | arm | TTFT p50 (ms) | decode p50 (ms/token) | E2E-32 (ms) | E2E-128 (ms) |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1024 | canonical | 84.4366 | 1.4602 | 131.16 | 271.34 |
+| 1024 | fp16 × sdpa | 67.2101 | 3.5660 | 181.32 | 523.66 |
+| 4096 | canonical | 158.3072 | 1.6075 | 209.75 | 364.07 |
+| 4096 | fp16 × sdpa | 141.9074 | 6.8329 | 360.56 | 1016.52 |
+
+| ctx | E2E-32 ratio（fp16÷canonical） | E2E-128 ratio |
+| ---: | ---: | ---: |
+| 1024 | **1.3824×** | 1.9299× |
+| 4096 | **1.7190×** | 2.7921× |
+
+> 2.44×/4.25× 是**稳态 decode 步**；按 benchmark 自己的 32 个输出 token，端到端只有
+> **1.38×/1.72×**。TTFT 反而更差（canonical 84.44/158.31 vs fp16 67.21/141.91 ms）：
+> prefill 没优化，量化格的 prefill 走 separate dequant。真实文本未测；prompt 是全 1 合成。
 
 ![kernel 级证据：必要字节 vs 实测时间](docs/figures/fig3_kernel_attainment.svg)
 
