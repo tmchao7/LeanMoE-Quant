@@ -2,10 +2,16 @@
 
 两类检查：
 
-1. **工件复算**（有 `results/` 时）：canonical 1.4602/1.6075、最好格 2.4421/4.2506、
-   E7 1.2253/1.1025、32/128-token E2E 比值，全部从 payload 现算，不读文档。
+1. **工件检查**（有 `results/` 时）：八个 canonical p50 是**钉死的回归值**
+   （`PAYLOAD_CLAIMS` 里硬编码 expected，再从 payload 读实际值比较——不是从文档推导），
+   最好格 2.4421/4.2506、E7 1.2253/1.1025、32/128-token E2E 比值则是**从 payload 现算**
+   的派生量。fig4 的七根条也从 A/B 工件复算（F1 三项读 `*_ab.json`，F2/F4/F5/E6 读
+   `ab_summary.json` 的 off/on mean），并检查 SVG 里确实写着同一个两位小数。
+   这些检查都不读文档，所以能抓"工件变了"和"派生量算错"，**抓不到**
+   "文档抄错了 canonical 值"（那一层由 RESULTS 的工件路径 + 人工审阅负责）。
 2. **文档扫描**：旧值（1.1911 / 1.1974 / 1.1979 / 707 / 729 / 501 / 1.69× / 1.31× /
    40.9% / 23.5% / 89.9% / 90.4%）必须出现在带历史标记的上下文里；否则失败。
+   扫描范围含 `docs/study/`（本地学习材料，gitignored；不存在就跳过）。
 
 用法：
     python -m tools.check_claims
@@ -72,6 +78,7 @@ DOC_PATHS = [
     ROOT / "docs" / "README.md",
     ROOT / "docs" / "apply",
     ROOT / "docs" / "reference",
+    ROOT / "docs" / "study",
     ROOT / "experiments",
 ]
 
@@ -161,6 +168,71 @@ def _check_payloads() -> tuple[list[str], list[str]]:
     return errors, lines
 
 
+# fig4 的七根条是 `make_figures.fig4` 里**硬编码**的（它不读 inputs.json）——这正是
+# "自证"风险：图里的数字和工件一起漂移时，没人会发现。这里把图钉回 A/B 工件：
+# F1 三项读 `tools/profile_graph.py --ab-*` 的 JSON，F2/F4/F5/E6 读 `ab_summary.json`
+# 的 off/on mean（F2 的 5.05% 是 4 位小数 p50 的舍入口径，精确均值是 5.042%，
+# 故给 0.02pp 容差；其余 0.005pp）。
+FIG4_PCT_FIELDS = [
+    ("fused RoPE", "fused_rope_ab.json", "treatment_faster_pct", 8.39, 0.005),
+    ("routing", "routing_ab.json", "fused_faster_pct", 3.00, 0.005),
+    ("skip mask-fill", "skip_mask_fill_ab.json", "treatment_faster_pct", 1.33, 0.005),
+]
+FIG4_AB_SUMMARIES = [
+    ("F2", "EXP-f2-ab-20261024/ab_summary.json", 5.05, 0.02),
+    ("F4", "EXP-f4-ab-20261025/ab_summary.json", 2.94, 0.005),
+    ("F5", "EXP-f5-ab-20261025/ab_summary.json", 4.13, 0.005),
+    ("E6", "EXP-e6-ab-4096-run2/ab_summary.json", 6.54, 0.005),
+]
+
+
+def _check_fig4() -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    lines: list[str] = []
+    if not RESULTS.exists():
+        return errors, lines
+    svg_path = ROOT / "docs" / "figures" / "fig4_lever_ab.svg"
+    if not svg_path.exists():
+        return ["fig4: 缺 docs/figures/fig4_lever_ab.svg"], []
+    text = svg_path.read_text(encoding="utf-8")
+
+    def _pin(name: str, got: float, expected: float, tol: float) -> None:
+        if abs(got - expected) > tol:
+            errors.append("fig4/%s: 工件 %.4f%% != 图 %.2f%%" % (name, got, expected))
+        elif ("−%.2f%%" % expected) not in text:
+            errors.append("fig4/%s: SVG 里找不到 −%.2f%%" % (name, expected))
+        else:
+            lines.append("[ok] fig4 %s = −%.2f%%" % (name, expected))
+
+    for name, rel, key, expected, tol in FIG4_PCT_FIELDS:
+        payload = _load(rel)
+        if payload is None:
+            errors.append("fig4/%s: 缺 payload %s" % (name, rel))
+            continue
+        got = payload.get(key)
+        if not isinstance(got, (int, float)) or isinstance(got, bool):
+            errors.append("fig4/%s: %s 不是数值（%r）" % (name, key, got))
+            continue
+        _pin(name, float(got), expected, tol)
+    for name, rel, expected, tol in FIG4_AB_SUMMARIES:
+        payload = _load(rel)
+        if payload is None:
+            errors.append("fig4/%s: 缺 payload %s" % (name, rel))
+            continue
+        off, on = payload.get("off_mean_ms"), payload.get("on_mean_ms")
+        if not (
+            isinstance(off, (int, float))
+            and not isinstance(off, bool)
+            and isinstance(on, (int, float))
+            and not isinstance(on, bool)
+            and float(off) > 0
+        ):
+            errors.append("fig4/%s: off/on mean 缺失或非法" % name)
+            continue
+        _pin(name, abs((float(on) - float(off)) / float(off) * 100.0), expected, tol)
+    return errors, lines
+
+
 def _doc_files() -> list[Path]:
     files: list[Path] = []
     for item in DOC_PATHS:
@@ -199,8 +271,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     args = ap.parse_args(argv)
     payload_errors, payload_lines = _check_payloads()
+    fig4_errors, fig4_lines = _check_fig4()
     doc_errors, doc_lines = _check_docs()
-    errors = payload_errors + doc_errors
+    errors = payload_errors + fig4_errors + doc_errors
+    payload_lines = payload_lines + fig4_lines
     if args.json:
         print(
             json.dumps(

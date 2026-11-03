@@ -39,5 +39,21 @@ def test_e2e_report_check_exit_code():
     assert e2e_report.main(["--check"]) == 0
 
 
+def test_e2e_report_check_skips_without_results(tmp_path, monkeypatch):
+    """干净克隆（无 results/）时 `--check` 是 skip，不是失败（2026-11-03 审计修复）。"""
+    monkeypatch.setattr(e2e_report, "RESULTS", tmp_path / "missing-results")
+    assert e2e_report.main(["--check"]) == 0
+
+
 def test_check_claims_passes_on_current_tree():
     assert check_claims.main(["--check"]) == 0
+
+
+def test_check_claims_actually_detects_an_unmarked_stale_value(tmp_path, monkeypatch):
+    """不只断言"当前树绿"——扫描器必须真的能抓到未标历史的旧值（2026-11-03 审计）。"""
+    bad = tmp_path / "bad.md"
+    bad.write_text("当前上限是 1.69×。\n", encoding="utf-8")
+    monkeypatch.setattr(check_claims, "ROOT", tmp_path)
+    monkeypatch.setattr(check_claims, "DOC_PATHS", [bad])
+    errors, _ = check_claims._check_docs()
+    assert any("1.69×" in e for e in errors)
