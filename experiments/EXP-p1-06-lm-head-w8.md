@@ -138,8 +138,8 @@ PASS；样本噪声下与全 w8a16 当年的 −1.0 点不可区分）。
 PPL +0.0088%；MMLU −0.50 点），A/B VALID（−63.3 µs，−4.13%，5/5 对），翻默认后 22 格刷新
 干净。**收益来自把地板本身减半**（0.1319 → 0.066 ms）而非捕获缺口——N7 口径的预测兑现：
 实测 −63.3 µs/步落在预注册的 40–80 µs 区间内，且两 ctx 刷新格的差（−41/−46 µs）噪声内一致。
-`lm_head` W8 g128 是量化叙事的最后一块：**experts + attention + lm_head 全部 W8A16 g128，
-router/embedding/KV 刻意保留**（KV INT8 = E6，已批待做）。
+`lm_head` W8 g128 是量化叙事的最后一块：**experts + attention W8A16 g128，lm_head W8 g128，
+router/embedding/KV 刻意保留**（KV INT8 = E6，已采纳，见 `EXP-p5-01`）。
 
 ## Applicability
 

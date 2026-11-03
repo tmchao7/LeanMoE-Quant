@@ -6,7 +6,7 @@
 - **ID**: `EXP-p0-03-baseline-cudagraph`
 - **Date**: 2026-09-30
 - **Operator**: Codex; target machine is the rented RTX 5090 server
-- **Status**: `planned`
+- **Status**: `blocked`（by design；见文末 ★ 结果）
 
 ## Hypothesis
 
@@ -99,12 +99,21 @@ bandwidth attainment: planned
 weights / KV / activations / workspace / peak total: planned
 ```
 
+## ★ 结果（2026-10-07 上卡后补记）
+
+`blocked` **by design**：HF 的 `OlmoeSparseMoeBlock` 在 batch=1 decode 时对 64 个专家做
+数据依赖的 Python 循环 + `torch.where/nonzero`，`StaticCache` 的写入路径也随 `filled_len`
+变化；`torch.cuda.CUDAGraph` 无法 capture 含数据依赖控制流的图。该结论由
+`EXP-p0-04`（static/grouped MoE + cudagraph，PASS，graph vs eager KL=0）与
+`docs/reference/MOE_CUDAGRAPH.md` 的机制分析共同支撑。没有性能数字可发布。
+
 ## Verdict
 
 ```text
-verdict:    planned
-outcome:    inconclusive
-notes:      No Mac result is reportable. This record is completed only from the RTX 5090 run.
+verdict:    blocked
+outcome:    infeasible-by-design
+notes:      HF dynamic MoE + StaticCache cannot be captured; no latency published.
+            The static/grouped replacement is EXP-p0-04.
 ```
 
 ## Follow-ups
@@ -115,7 +124,8 @@ notes:      No Mac result is reportable. This record is completed only from the 
 ## Applicability
 
 ```text
-本结论适用于：planned; intended for RTX 5090 (sm_120)、fp16、单卡、batch=1、ctx=1024、OLMoE-1B-7B-0924
+本结论适用于：blocked by design（HF 动态 MoE + StaticCache 不可 capture）；intended for RTX 5090
+（sm_120）、fp16、单卡、batch=1、ctx=1024、OLMoE-1B-7B-0924
 不适用于：PagedAttention、多请求 serving、量化配置、ctx=4096、其它 GPU
 原因：本实验只验证连续 StaticCache 与固定 q_len=1 CUDA Graph feasibility。
 ```

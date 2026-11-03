@@ -6,7 +6,7 @@
 
 <p align="center">
   <img alt="status" src="https://img.shields.io/badge/status-v7%20canonical%20adopted-12b886" />
-  <img alt="tests" src="https://img.shields.io/badge/tests-733%20passed-brightgreen" />
+  <img alt="tests" src="https://img.shields.io/badge/tests-744%20passed-brightgreen" />
   <img alt="gate" src="https://img.shields.io/badge/accuracy%20gate-KL%3C0.01%20%C2%B7%20top1%E2%89%A50.95-blue" />
   <img alt="gpu" src="https://img.shields.io/badge/GPU-RTX%205090%20%C2%B7%20sm__120-4c6ef5" />
   <img alt="model" src="https://img.shields.io/badge/model-OLMoE--1B--7B--0924%20%C2%B7%2064%20experts-845ef7" />
@@ -15,24 +15,28 @@
 </p>
 
 **Byte-budget-driven quantization + Triton kernel optimization for MoE decode at batch=1.**
-On a single RTX 5090, single-request decode of OLMoE-1B-7B (64 experts / top-8) goes from
-**82.6 ms/token** down to **1.46 / 1.61 ms** (ctx 1024/4096, 685 / 622 tok/s); the best cell is
-**2.44× / 4.25×** over the native baseline — and the **measured structural ceiling** of this
-route is established along the way. Every number on this page traces to an artifact; nothing
-is published without passing its accuracy gate.
+On a single RTX 5090, single-request decode of OLMoE-1B-7B (64 experts / top-8) goes from a
+**82.6 ms/token** host-bound eager start to **1.46 / 1.61 ms** canonical (ctx 1024/4096,
+685 / 622 tok/s; **two endpoints, not a same-round total**); the best cell is **2.44× / 4.25×**
+over the native baseline (steady-state decode step). The **structural ceiling ~1.74× / ~1.28×**
+is derived from the measured weight-byte floor. Every number on this page traces to an artifact;
+nothing is published without passing its accuracy gate. 32-token end-to-end (artifact-derived)
+is ~**1.38× / 1.72×**; all latency uses a **synthetic all-ones prompt** (real text not measured).
 
 ---
 
 ## 🏆 Highlights
 
 **1 · Seven levers, each with its own same-round A/B, all adopted**
-CUDA Graph / weight W8 / split-KV attention / fused RMSNorm / packed q·k·v / KV direct write /
-lm_head W8 / **KV-INT8** — kernels per step **994 → 345** (figure below).
+CUDA Graph / weight W8 / split-KV attention / fused RMSNorm / KV direct write / lm_head W8 /
+**KV-INT8** — kernels per step **994 → 345**. The F1/F2 fusion switches (fused RoPE, routing,
+skip mask-fill, packed q·k·v) are adopted too; all seven `FUSION_DEFAULTS` are True.
 
-**2 · The quantization ceiling, measured**
-The weight stream is only 40.9% / 23.5% of a decode step (backed out from refresh payloads) ⇒
-even a perfect weight path caps at **~1.69× / ~1.31×**. The premise of Marlin-class 3–4×
-kernels (4-bit passing the gate) does not hold for this model.
+**2 · The quantization ceiling, derived from the measured byte floor**
+The weight-byte floor is only **42.4% / 22.1%** of the fp16×sdpa step
+(2.3577 GB / 1560.3 GB/s = 1.511 ms) ⇒ even a perfect weight path caps at **~1.74× / ~1.28×**.
+The old 40.9%/23.5% were quantized-step/fp16-step cell ratios, not weight shares; 1.31 is withdrawn.
+The premise of Marlin-class 3–4× kernels (4-bit passing the gate) does not hold for this model.
 
 **3 · KV-INT8 read path (custom kernel)**
 Per-token symmetric int8 with scale folding inside the attention kernel (zero unpacking on the
@@ -47,7 +51,7 @@ path (the isolated kernel is 1.21× cheaper, end-to-end 5% slower).
 **5 · Measurement discipline**
 Same-cell canary first and last in every round (>5% drift VOIDs the round), independent-process
 adjacent A/B with per-pair wins + MAD, host_share ≤5% per-cell self-check, every gate table
-pinned to its artifacts by tests — 733 CPU tests + four CI gates.
+pinned to its artifacts by tests — 744 CPU tests + four CI gates.
 
 ---
 
@@ -63,8 +67,12 @@ pinned to its artifacts by tests — 733 CPU tests + four CI gates.
 | **w8a16 + lm_head W8 + KV-INT8 × kernel (canonical)** | **1.4602** | **1.6075** | PASS |
 
 > Same-round cells only; best cell = fp16×sdpa / canonical = **2.44× / 4.25×**.
+> Two equivalent factorizations: `1.2227×1.9968 = 1.6188×1.5086 = 2.4421`
+> (@4096 `1.0968×3.8755 = 2.9096×1.4609 = 4.2506`). `1.5086` is the **quantization ratio on the
+> kernel cell, not the attention ratio**. 2.44×/4.25× is a steady-state decode-step ratio, not an
+> end-to-end request; the artifact-derived 32-token E2E is ~1.38×/1.72×.
 
-### Seven levers — same-round A/B step-time reduction
+### Seven adopted switches — same-round A/B step-time reduction
 
 ![Seven adopted levers](docs/figures/fig4_lever_ab.svg)
 
@@ -84,9 +92,13 @@ pinned to its artifacts by tests — 733 CPU tests + four CI gates.
 
 | Surface | KL | top-1 | Task-level |
 | --- | ---: | ---: | --- |
-| weight w8a16 | 0.0014 | 0.976 | PPL +0.0088% (wikitext-2 full) · MMLU −0.50 pt |
-| lm_head W8 | 0.000061 | 1.000 | (same three chains) |
+| weight-only w8a16 | 0.0014 | 0.976 | PPL **+0.015%** (wikitext-2 full) · MMLU **−1.0** (n=200, earlier run) |
+| lm_head W8 (isolated) | 0.000061 | 1.000 | PPL **+0.0088%** (wikitext-2 full) |
+| combined w8a16 + lm_head | — (two sub-gates) | — | PPL **+0.0227%** · MMLU **−0.50** (n=200, current config) |
 | KV-INT8 | 0.0006 / 0.0013 | 0.988 / 0.982 | forced-trajectory gate (165 positions/ctx) |
+
+> Do not mix the three accuracy surfaces: weight-only, lm_head-only and combined each have their
+> own artifact (RESULTS §3.1).
 
 The one-page result (every number with its artifact path): **[RESULTS.md](RESULTS.md)**.
 
@@ -98,7 +110,7 @@ The one-page result (every number with its artifact path): **[RESULTS.md](RESULT
 # 1) Environment (all non-GPU tests run on Mac/CPU; latency measurement needs an NVIDIA GPU + triton)
 uv venv -p 3.12 .venv && uv pip install -e ".[dev]"
 
-# 2) Correctness tests (733, no GPU needed)
+# 2) Correctness tests (744, no GPU needed)
 uv run pytest -m "not gpu" -q
 
 # 3) Machine calibration: measured achievable bandwidth (the roofline denominator; spec values are banned)
@@ -133,11 +145,13 @@ src/lemoq/kernels/         # 6 Triton kernel families: grouped MoE GEMV, fused d
 src/lemoq/quant/           # quantization (W8/W4 per-group, gate citations, per-surface gate tables)
 benchmarks/runner.py       # harness: five load-time refusals + payload schema + correctness gate
 tools/                     # probe / operator ledger / figures / quant gate toolchain
-tests/                     # 733 CPU tests (parity gate, schema guards, pinned gate tables)
+tests/                     # 744 CPU tests (parity gate, schema guards, pinned gate tables)
 docs/figures/              # 4 figures, regenerated from artifacts
 docs/reference/            # METRICS / MODELS / SPECS / NCU_EVIDENCE (technical reference)
 ```
 
 > Applicability: every number is a **batch=1 single-stream** measurement on one RTX 5090
-> (sm_120), OLMoE-1B-7B-0924, ctx ∈ {1024, 4096}; conclusions do not transfer across
-> hardware/models (each record's Applicability section states the boundary).
+> (sm_120), OLMoE-1B-7B-0924, ctx ∈ {1024, 4096}; latency uses a **synthetic all-ones prompt**
+> (real text not measured) and is a **steady-state decode step**, not an end-to-end request.
+> Conclusions do not transfer across hardware/models (each record's Applicability section
+> states the boundary).

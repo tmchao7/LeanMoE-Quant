@@ -49,11 +49,12 @@
 `kv_direct_write=False`）；p50 噪声内：fp16 3.5446/6.7805、w8a16 2.9589/6.2219、
 w8a8@4096 8.8232（**R3 de-publish 后已撤销发布**）；E7 = **1.1979/1.0898**（2026-10-24 值 1.1974/1.0912 留档）。
 
-★ **2026-10-25 F5 采纳刷新 = v6（canonical）**：lm_head 也量化（六 True）。三链 PASS + A/B VALID
+★ **2026-10-25 F5 采纳刷新 = v6（历史；v7 见文末 E6 刷新）**：lm_head 也量化（六 True）。三链 PASS + A/B VALID
 （−63.3 µs，−4.13%，5/5 对，canary 0.131%；前两轮宿主机共租尖峰 fail-closed 作废，归档
 `EXP-f5-ab-20261025-invalid-run{1,2}`）+ 刷新 22/22 干净（canary −0.058%）。新采用 p50（cudagraph）：
 fp16 **3.5628/6.8445**、w8a16 **2.9149/6.226**；E7 `speedup_cudagraph` = **1.2223（1024）/ 1.0994（4096）**
-（F4 值 1.1979/1.0898 留档）。量化步/fp16 步份额 **41.2%/25.1%** ⇒ 上限 ~1.70×/~1.34×。
+（v7 = **1.2253/1.1025**；F4 值 1.1979/1.0898 留档）。量化步/fp16 步是**格比** 41.2%/25.1%，
+不是权重份额；按权重字节地板 1.511 ms 算是 **42.4%/22.1%** ⇒ 上限 **~1.74×/~1.28×**。
 w4a16 两格 gate FAIL 如旧（evidence）；w8a8@4096 格 gate FAIL 如旧（R3 裁决，照跑只作 evidence）。
 逐格 `lm_head_w8_effective` 量化格 True / fp16 格 False（刷新谓词机械执行）。
 
@@ -581,6 +582,14 @@ P3 **不只是**"把 `quant_cfg` 传给 `run_cudagraph`"。排查发现两处必
 | `w8a8 × 4096` | _(17.9230)_ | _(9.3360)_ | — | 1.301 GB | 1749 / 2002 |
 
 （`w8a8` 的 cudagraph 两格来自 §2.8 第 2 轮，同轮金丝雀与本节一致。）
+
+> ★ **2026-11-03 审计注记（w8a8 × grouped 的实际语义）**：grouped expert 路径**没有实现
+> activation quantization**——`StaticShapedMoE` / `quantize_fused_experts` 只接收
+> `weight_bits` / `group_size`，`grouped_moe_forward_quant` 直接消费未量化的 `x`。所以
+> 这两格实际是 **attention w8a8 + experts w8a16**，而 payload 记录了 `act_bits=8`。
+> 它们本来就被 gate FAIL 挡在 evidence 层，不能作为 w8a8 的证据引用；w8a8 的 FAIL 以
+> `tools/quant_probe.py` 的独立门工件为准。代码侧已在 runner 加载前拒绝
+> `w8a8 × grouped`（2026-11-03）。
 
 ### 2.9.4 这三个数字说明了什么（都只到 evidence 层）
 
