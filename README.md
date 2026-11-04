@@ -15,42 +15,44 @@
 </p>
 
 **Byte-budget-driven quantization + Triton kernel optimization for MoE decode at batch=1.**
-单张 RTX 5090 上，OLMoE-1B-7B（64 专家 / top-8）的单请求 decode 从 **82.6 ms/token**
-的 host 主导 eager 起点，降到 canonical **1.46 / 1.61 ms**（ctx 1024/4096，685 / 622 tok/s；
-**两个端点，不是同轮总加速**）；最好格对原生基线 **2.44× / 4.25×**（稳态 decode 步）。
-并**由实测字节地板推导出**权重路径（量化）的**结构性上限 ~1.74× / ~1.28×**——这是
-"权重字节归零、其余不变"的上界，**不是**对 2.44×/4.25× 总加速的否定。本页每个数字都可追溯
-到工件；不过正确性门的配置不发布性能数字。32-token 端到端工件反算约 **1.38× / 1.72×**；
-所有延迟都在**全 1 合成 prompt** 上测量，真实文本未测。
+实验在单张 RTX 5090 上跑，模型是 OLMoE-1B-7B（64 专家 / top-8），batch=1。decode 的起点是
+**82.6 ms/token** 的 eager 实现，瓶颈在 host；canonical 配置做到 **1.46 / 1.61 ms**（ctx 1024/4096，
+685 / 622 tok/s）。这两个数是两个端点，不是同一轮的总加速。最好格对原生 fp16×sdpa 基线的
+同轮加速是 **2.44× / 4.25×**，口径为稳态 decode 步。权重路径的上限按实测字节地板算是
+**~1.74× / ~1.28×**：它假设权重字节归零、其他都不变，不是说上面的 2.44×/4.25× 只能到这个数。
+本页数字都能追到工件；没过正确性门的配置不发布延迟。按 32 个输出 token 反算，端到端约
+**1.38× / 1.72×**。所有延迟都用全 1 合成 prompt 测，真实文本没测。
 
 ---
 
 ## 🏆 Highlights 项目亮点
 
-**1 · 七条杠杆，每条独立同轮 A/B，全部采纳**
+**1 · 七条杠杆，逐条做过同轮 A/B 后采纳**
 CUDA Graph / 权重 W8 / split-KV attention / 融合 RMSNorm / KV 直写 / lm_head W8 /
-**KV-INT8** —— kernels per step **994 → 345**。另有 F1/F2 的四项融合开关（fused RoPE、
-routing、skip mask-fill、packed q·k·v）一并采纳；`FUSION_DEFAULTS` 七项全 True。
-其中 F1 三项是同进程交替 **n=2**（统计上 underpowered，采纳依据是方向 + `tokens_equal`），
+**KV-INT8**，kernels per step 从 **994** 降到 **345**。F1/F2 里的四项融合开关（fused RoPE、
+routing、skip mask-fill、packed q·k·v）也一起采纳了，`FUSION_DEFAULTS` 七项都是 True。
+F1 这三项只做了同进程交替 **n=2**，统计上 underpowered，采纳看的是方向和 `tokens_equal`；
 F2 是独立进程 3/3（RESULTS §2.1）。
 
-**2 · 量化的天花板，由实测字节地板推导**
-权重字节地板只占 fp16×sdpa 步的 **42.4% / 22.1%**（2.3577 GB / 1560.3 GB/s = 1.511 ms）⇒
-完美权重路径的上界也只有 **~1.74× / ~1.28×**。Marlin 类 kernel 3–4× 的前提（4-bit 过门）
-在本模型不成立。旧版 40.9%/23.5% 是"量化步/fp16 步"的格比，不是权重份额；1.31 已撤回。
+**2 · 量化的上限，按实测字节地板算**
+权重字节地板只占 fp16×sdpa 步的 **42.4% / 22.1%**，也就是 2.3577 GB / 1560.3 GB/s = 1.511 ms。
+就算权重路径一点都不花时间，上界也只有 **~1.74× / ~1.28×**。Marlin 类 kernel 想要的 3–4×，
+前提是 4-bit 能过精度门，这个前提在本模型上不成立。旧版的 40.9%/23.5% 是"量化步/fp16 步"
+的格比，不是权重份额；1.31 这个数已经撤回。
 
 **3 · KV-INT8 读路径（自研 kernel）**
-per-token 对称 int8 + attention kernel 内 scale 折叠（读路径零解包），精度近无损
-（门 KL 0.0006），@4096 **−109 µs/步（−6.5%）**。
+per-token 对称 int8，scale 折进 attention kernel，读路径不用再解包。门的 KL 是 0.0006，
+@4096 每步少 **109 µs（−6.5%）**。
 
-**4 · 负结果是一等公民**
-4-bit 全系（W4-RTN / GPTQ、MXFP4、混合退路）被精度门挡住，只发布证据不发布延迟；
-w8a8@4096 的 5 窗 PASS 经 10 窗复测不稳健被主动 de-publish；融合反量化在 eager 上被
-否证（孤立 kernel 快 1.21×、端到端反而慢 5%）。
+**4 · 负结果也记录**
+4-bit 的几条路（W4-RTN / GPTQ、MXFP4、混合退路）都没过精度门，只留证据，不发布延迟。
+w8a8@4096 的 5 窗 PASS 在 10 窗复测里不稳健，主动 de-publish 了。融合反量化在 eager 上
+被否证：孤立 kernel 快 1.21×，端到端反而慢 5%。
 
-**5 · 测量纪律**
-每轮首尾同格金丝雀（>5% 漂移整轮 VOID）、独立进程同轮相邻 A/B + 逐对胜负 + MAD、
-host_share ≤5% 逐格自检、每张门表由测试钉死到工件——746 项 CPU 测试 + CI 四门。
+**5 · 测量上的几条规矩**
+每轮开头和结尾各跑一次同一格当金丝雀，漂移超过 5% 整轮 VOID；A/B 用独立进程、同轮相邻，
+记逐对胜负和 MAD；每格自检 host_share ≤5%；每张门表都由测试钉到工件。CPU 测试 **746** 项，
+CI 四门。
 
 ---
 
@@ -65,10 +67,10 @@ host_share ≤5% 逐格自检、每张门表由测试钉死到工件——746 �
 | w8a16 × sdpa | 2.9165 | 6.2298 | PASS |
 | **w8a16 + lm_head W8 + KV-INT8 × kernel（canonical）** | **1.4602** | **1.6075** | PASS |
 
-> 同轮同格可比（same-round cells only）；最好格 = fp16×sdpa / canonical = **2.44× / 4.25×**。
-> 两种等价分解：`1.2227×1.9968 = 1.6188×1.5086 = 2.4421`（@4096 `1.0968×3.8755 =
-> 2.9096×1.4609 = 4.2506`）。`1.5086` 是 kernel 格上的量化比，**不是 attention 比**。
-> 2.44×/4.25× 是稳态 decode 步，不是端到端请求；32-token E2E 反算约 1.38×/1.72×。
+> 表里只放同轮同格的数。最好格 = fp16×sdpa / canonical = **2.44× / 4.25×**。
+> 2.44 有两种等价拆法：`1.2227×1.9968 = 1.6188×1.5086 = 2.4421`；@4096 是
+> `1.0968×3.8755 = 2.9096×1.4609 = 4.2506`。`1.5086` 是 kernel 格上的量化比，不是 attention 比。
+> 2.44×/4.25× 只算稳态 decode 步，不是端到端请求；32-token E2E 反算约 1.38×/1.72×。
 
 ### 七个默认开关的同轮 A/B 步时降幅 Seven adopted switches — same-round A/B step-time reduction
 
@@ -95,9 +97,9 @@ host_share ≤5% 逐格自检、每张门表由测试钉死到工件——746 �
 | combined w8a16 + lm_head | —（两子门分别引用） | — | PPL **+0.0227%** · MMLU **−0.50**（n=200，当前配置） |
 | KV-INT8 | 0.0006 / 0.0013 | 0.988 / 0.982 | forced 轨迹门（165 位置/ctx） |
 
-> 三个精度臂不可混用：weight-only、lm_head-only、combined 的数字各有出处（RESULTS §3.1）。
+> 三个精度臂不要混着引用：weight-only、lm_head-only、combined 各有各的出处（RESULTS §3.1）。
 
-完整的一页纸结果（每个数字带工件路径）：**[RESULTS.md](RESULTS.md)**。
+带工件路径的一页纸结果在 **[RESULTS.md](RESULTS.md)**。
 
 ---
 
@@ -124,9 +126,9 @@ uv run python -m benchmarks.runner \
 uv run python -m tools.make_figures
 ```
 
-实验矩阵（唯一 cell 来源）在 [configs/experiments.yaml](configs/experiments.yaml)；
-上机与环境等运维文档（`ENVIRONMENT.md` 等）仅保留在维护者本地、未入库，
-技术参考见 [docs/reference/](docs/reference/)。
+实验矩阵在 [configs/experiments.yaml](configs/experiments.yaml)，cell id 也只从这里来。
+上机和环境文档（`ENVIRONMENT.md` 等）留在维护者本地，没有入库；技术参考在
+[docs/reference/](docs/reference/)。
 
 ---
 
@@ -146,7 +148,7 @@ docs/figures/              # 4 figures, regenerated from artifacts 从工件重�
 docs/reference/            # METRICS / MODELS / SPECS / NCU_EVIDENCE（技术参考）
 ```
 
-> 适用范围 Applicability：所有数字为 **batch=1 单流**、单张 RTX 5090（sm_120）、
-> OLMoE-1B-7B-0924、ctx ∈ {1024, 4096} 的测量；latency 用**全 1 合成 prompt**（真实文本
-> 未测），且是**稳态 decode 步**，不是端到端请求。结论不跨硬件/模型迁移（每份记录的
-> Applicability 节写明边界）。
+> 适用范围 Applicability：下面这些数字都来自 **batch=1 单流**、单张 RTX 5090（sm_120）、
+> OLMoE-1B-7B-0924、ctx ∈ {1024, 4096} 的测量。latency 用全 1 合成 prompt 测，真实文本没测；
+> 口径是稳态 decode 步，不是端到端请求。换硬件或换模型都不能直接搬（每份记录的
+> Applicability 节写了边界）。
